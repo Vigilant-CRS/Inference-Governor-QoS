@@ -1,0 +1,6 @@
+# Die generierten OIP-Typen sind gross. Ein Future, das mehrere davon als
+# lokale Variablen haelt, landet ungeboxt auf dem Stack des Aufrufers — unter
+# Last fuehrt das zum Stack-Ueberlauf statt zu einem Fehler. Die Schwelle liegt
+# deshalb deutlich unter dem Clippy-Default von 16 KB, damit solche Futures
+# auffallen, bevor sie in Produktion gehen.
+future-size-threshold = 4096

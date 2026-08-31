@@ -1,0 +1,19 @@
+[package]
+name = "onetimer-backend-triton"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Triton backend adapter for OneTimer"
+
+[dependencies]
+onetimer-core = { path = "../onetimer-core", version = "0.1.0" }
+onetimer-protocol-oip = { path = "../onetimer-protocol-oip", version = "0.1.0" }
+tonic = "0.14.6"
+tokio = { version = "1", features = ["time", "sync"] }
+tracing = "0.1"
+
+[lints]
+workspace = true

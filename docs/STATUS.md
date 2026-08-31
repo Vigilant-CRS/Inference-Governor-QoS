@@ -1,6 +1,6 @@
 # Arbeitsstand
 
-Stand: 2026-08-31 · Gate S bestanden
+Stand: 2026-08-31 · Gate S bestanden, Phase 2a fertig
 
 ## Fertig
 
@@ -66,28 +66,44 @@ Zwei Defekte, die erst dieser Lauf sichtbar gemacht hat, sind als ADR-0009 und
 ADR-0010 dokumentiert und behoben. Beide waren mit Unit-Tests nicht auffindbar:
 sie zeigten sich nur als Systemverhalten unter Dauerlast.
 
+### Phase 2a — Gateway, Adapter, Konfiguration, CLI
+
+- `onetimer-protocol-oip` — Wire-Typen aus den unveraenderten Triton-.proto-
+  Dateien; Extraktion der `onetimer_`-Parameter; Uhrenbehandlung nach ADR-0011.
+- `onetimer-config` — YAML-Schema, `diagnose()` sammelt alle Befunde.
+- `onetimer-backend-triton` — gRPC-Client mit Verbindungsheilung. Keine
+  fachliche Politik im Adapter (Spec 8.4).
+- `onetimer-gateway` — Single-Owner-Actor ueber bounded Kanal, gRPC-Dienst mit
+  allen 21 OIP-Methoden, Uebersetzung terminaler Zustaende in Statuscodes.
+- `onetimer-cli` — `onetimer doctor` und `onetimer serve`.
+
+**Gemessen** gegen ein echtes gRPC-Backend (Release, leere Tensoren):
+Zusatzaufwand des Governors rund 0,1 bis 0,2 ms je Request. In einem Burst von
+12 Requests bei 60 ms Backendlaufzeit wurden 3 ausgefuehrt und 9 mit
+`onetimer-reason: superseded` abgewiesen — die Frische-Semantik wirkt auf dem
+Draht, nicht nur im Simulator.
+
 ## Als naechstes
 
-**Phase 2 — OIP-Gateway und Triton-Adapter.** Nach ADR-0008:
+**Phase 2b — Shared-Memory-Referenz-Passthrough (WP14, ADR-0003).**
+Die Shm-Endpunkte werden bereits durchgereicht; was fehlt, ist die
+Lebenszyklusverwaltung der Regionen und der Nachweis, dass OneTimer die
+Payload dabei nie beruehrt. Ohne diesen Pfad misst jeder Datenebenen-Benchmark
+den Bootstrap-Transport statt das Produkt.
 
-1. OIP-v2-gRPC-Gateway (WP7), transparenter Compatibility Mode.
-2. Triton-Backend-Adapter mit In-Flight-Kreditkontrolle (WP8, ADR-0002). Die
-   Kreditlogik liegt bereits im Kern; der Adapter muss sie an echte
-   Completions binden statt an simulierte.
-3. Shared-Memory-Referenz-Passthrough (WP14, ADR-0003) — vorgezogen, weil der
-   gRPC-Copy-Pfad sonst das Performancegate reisst, ohne dass das etwas ueber
-   das Scheduling aussagt.
-4. Data-Plane-Overhead und Scheduling-Effekt **getrennt** messen.
+**Phase 3 — Profiler, Online Estimator, Metrics.** Der Scheduler emittiert
+`Action::ObservedRuntime` samt Belegungsgrad; verarbeitet wird das noch nicht.
 
-Vor Phase 2 sinnvoll, aber nicht blockierend:
+**Phase 4 — Gate M3.** Der eigentliche Produktbeweis: gegen eine **getunte**
+Triton-Baseline auf echter Hardware.
 
-- `onetimer doctor` (WP4). Die Validierungsregeln liegen bereits als
-  `validate()`-Methoden vor. ADR-0010 nennt einen neuen Pflichtcheck:
-  ein Vertrag, dessen `max_age` in der Groessenordnung der Laufzeit liegt, ist
-  ueberzeichnet und muss vor dem Start gemeldet werden — Szenario A ist genau
-  so ein Fall.
-- Burst-Lastprofile aus Spec 19.4; bisher laufen nur die stationaeren
-  Lastpunkte.
+### Was Gate M3 hier blockiert
+
+Auf dieser Maschine ist kein `nvidia-container-toolkit` installiert, also hat
+Docker keinen Zugriff auf die RTX 3070. Ohne das laeuft Triton nur auf der CPU,
+und die GPU-Konkurrenz — der eigentliche Gegenstand der Produkthypothese —
+laesst sich nicht messen. Ausserdem sind auf `/` nur rund 48 GB frei; ein
+Triton-Image belegt davon einen erheblichen Teil.
 
 ## Offene Punkte
 

@@ -1,0 +1,11 @@
+# tonic, hyper und tower haben tiefe Aufrufketten. Im Debug-Build wird nichts
+# geinlined, wodurch ein einzelner gRPC-Aufruf mehr als die 2 MiB Stack
+# verbraucht, die der Testlaeufer einem Testthread standardmaessig gibt.
+#
+# Das ist keine Eigenschaft unseres Codes: die beteiligten Futures sind
+# gemessen 2-3 KB gross (siehe `report_future_sizes`), und im Release-Build
+# laufen dieselben Tests mit dem Standardstack durch. Der Wert steht deshalb
+# hier und nicht als Umgebungsvariable in einer Anleitung, die jeder neue
+# Entwickler und die CI erst finden muessten.
+[env]
+RUST_MIN_STACK = "16777216"

@@ -29,7 +29,8 @@ kein Gateway und keine Triton-Anbindung.
 | 0 | Workspace, CI, Lizenzbasis, Kerntypen, Sim-Clock | **fertig** |
 | 1 | Queue-Policies, Deadline/Slack, Slot-Look-ahead, Varianten, Ueberlast-FSM | **fertig** |
 | 1b | Simulierte Kernvergleiche — **Gate S** | **bestanden** |
-| 2 | OIP-Gateway, Triton-Adapter, Shared-Memory-Passthrough | offen |
+| 2a | OIP-Gateway, Triton-Adapter, Konfiguration, CLI | **fertig** |
+| 2b | Shared-Memory-Referenz-Passthrough | offen |
 | 3 | Profiler, Online Estimator, Metrics | offen |
 | 4 | Benchmark-Harness, getunte Triton-Baseline — **Gate M3** | offen |
 
@@ -51,6 +52,22 @@ reproduzierbar mit `cargo run --release -p onetimer-sim --bin gate-s`.
 Der Simulator ist die Best-Case-Welt für OneTimer — kein Proxy-Overhead, keine
 zweite Backend-Queue, keine Profilfehler. **Gate S kann die Hypothese
 falsifizieren, aber nicht bestätigen.**
+
+### Gemessener Zusatzaufwand des Governors
+
+Gegen ein echtes gRPC-Backend, Release-Build, leere Tensoren:
+
+| Backend-Laufzeit | direkt | über OneTimer | Zusatz |
+|---:|---:|---:|---:|
+| 1 ms | 2227 µs/Req | 2337 µs/Req | +110 µs |
+| 5 ms | 6249 µs/Req | 6329 µs/Req | +80 µs |
+| 20 ms | 21227 µs/Req | 21435 µs/Req | +208 µs |
+
+Rund 0,1 bis 0,2 ms je Request. **Das ist die Steuerebene, nicht der
+Datenpfad**: die Tensoren sind in dieser Messung leer. Die Kopierkosten eines
+6-MB-Frames auf dem gRPC-Pfad sind darin nicht enthalten — genau deshalb ist
+der Shared-Memory-Referenz-Passthrough nach ADR-0003 der eigentliche
+Produktpfad, und genau deshalb weist der Benchmark beides getrennt aus.
 
 > **Es liegen keine Messwerte gegen echte Hardware vor.** Alle Zahlen in der
 > Spezifikation sind Zielwerte, Rechenbeispiele oder Validierungsschwellen. Die
