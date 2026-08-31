@@ -1,0 +1,39 @@
+# cargo-deny Konfiguration.
+# Umsetzung der Lizenz-Allowlist aus Spec 20.8 und der Supply-Chain-Tests
+# aus Spec 21. Konservative Engineering-Policy, keine juristische Aussage.
+
+[graph]
+all-features = true
+
+[licenses]
+version = 2
+# Spec 20.8, "initial automatisch erlauben".
+# MPL-2.0, LGPL-, EPL-Varianten sind bewusst NICHT gelistet: sie erfordern
+# manuelle Pruefung und muessen einzeln mit Begruendung ergaenzt werden.
+# GPL/AGPL/SSPL/BUSL/RSAL/Commons Clause bleiben blockiert.
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+]
+confidence-threshold = 0.93
+exceptions = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Spec 26.4: keine unbounded Puffer, keine globale Mega-State-Struktur.
+# Diese Crates wuerden Muster einschleppen, die der Scheduler-Core ausschliesst.
+deny = []
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

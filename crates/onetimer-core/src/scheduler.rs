@@ -1,0 +1,759 @@
+//! Der Single-Owner-Scheduler (Spec 9.4, WP3/WP9).
+//!
+//! Ein reiner Zustandsautomat: Ereignisse hinein, Aktionen hinaus. Er ruft
+//! keine Uhr ab, oeffnet keine Verbindung und kennt Triton nicht. Genau
+//! deshalb laeuft derselbe Code im Simulator und im Gateway, und ein
+//! Live-Trace ist offline exakt reproduzierbar (Spec 30.1, 30.2).
+//!
+//! ## Die Entscheidungsreihenfolge
+//!
+//! Lexikographisch, nicht gewichtet (Spec 10.6). Es gibt keine Score-Funktion,
+//! in der viele Best-Effort-Requests einen Protected-Request aufwiegen koennen:
+//!
+//! 1. Kritikalitaet absteigend,
+//! 2. dann fruehste absolute Deadline (EDF, Spec 10.5),
+//! 3. dann aelteste Generation Time.
+//!
+//! ## Warum der Scheduler absichtlich nichts tut
+//!
+//! Trifft ein Kandidat auf ein Veto aus dem Protected-Look-ahead, wird er
+//! **verschoben, nicht abgelehnt**. Die Ressource bleibt kurz ungenutzt, damit
+//! erwartbare wichtigere Arbeit rechtzeitig starten kann (Spec 10.7). Dieses
+//! bewusste Idle ist der Punkt, an dem sich OneTimer von einem
+//! work-conserving Scheduler trennt.
+
+use crate::arrayvec::ArrayVec;
+use crate::feasibility::{DEFAULT_HORIZON, ExpectedArrival, GuardVerdict, guard_protected};
+use crate::ids::{MAX_MODELS, ModelIdx, RequestId, SlotIdx, VariantIdx};
+use crate::metrics::Metrics;
+use crate::model::{ContractError, ModelContract};
+use crate::overload::{OverloadController, OverloadState, PressureSample};
+use crate::profile::SafetyMargin;
+use crate::queue::{DropReason, ModelQueue, QueueConfigError};
+use crate::request::{Criticality, RequestDescriptor, RequestState};
+use crate::slots::SlotSet;
+use crate::time::{Duration, Instant};
+use crate::variant::{Resolution, VariantState, resolve};
+
+/// Hoechstzahl gleichzeitig an das Backend uebergebener Requests.
+const MAX_INFLIGHT: usize = crate::ids::MAX_SLOTS * crate::slots::MAX_SLOT_DEPTH;
+
+/// Ein Ereignis, das den Scheduler erreicht.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Event {
+    /// Ein neuer Request ist am Gateway eingetroffen.
+    Arrival(RequestDescriptor),
+    /// Das Backend meldet eine Fertigstellung.
+    Completion {
+        /// Der fertiggestellte Request.
+        request: RequestId,
+        /// Der Slot, der dadurch frei wird.
+        slot: SlotIdx,
+    },
+    /// Das Backend meldet einen Fehler.
+    BackendFailure {
+        /// Der betroffene Request.
+        request: RequestId,
+        /// Der Slot, der dadurch frei wird.
+        slot: SlotIdx,
+    },
+    /// Ein Weckruf ohne aeusseren Anlass.
+    Tick,
+}
+
+/// Eine Anweisung des Schedulers an seine Umgebung.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    /// Den Request mit dieser Variante an das Backend weiterreichen.
+    Dispatch {
+        /// Der Request.
+        request: RequestId,
+        /// Das logische Modell.
+        model: ModelIdx,
+        /// Die gewaehlte physische Variante.
+        variant: VariantIdx,
+        /// Der Zielslot.
+        slot: SlotIdx,
+        /// Die konservativ prognostizierte Laufzeit.
+        predicted_runtime: Duration,
+    },
+    /// Den Request terminal abschliessen und den Client informieren.
+    Terminate {
+        /// Der Request.
+        request: RequestId,
+        /// Der terminale Zustand.
+        state: RequestState,
+    },
+    /// Eine beobachtete Backendlaufzeit melden.
+    ///
+    /// Die Rueckkopplung fuer den Online Runtime Estimator (Spec 13.2, WP11).
+    /// Sie traegt den Belegungsgrad mit, unter dem gemessen wurde, weil genau
+    /// das den Interferenzeffekt datengetrieben erfasst (ADR-0006).
+    ObservedRuntime {
+        /// Das logische Modell.
+        model: ModelIdx,
+        /// Die ausgefuehrte Variante.
+        variant: VariantIdx,
+        /// Der Belegungsgrad beim Start.
+        occupancy: usize,
+        /// Die gemessene Laufzeit.
+        runtime: Duration,
+    },
+    /// Den Scheduler spaetestens zu diesem Zeitpunkt erneut aufrufen.
+    ///
+    /// Ohne diesen Weckruf bliebe eine non-work-conserving Entscheidung
+    /// haengen: der Scheduler hat absichtlich nichts gestartet und wuerde ohne
+    /// aeusseres Ereignis nie wieder nachsehen.
+    WakeAt(Instant),
+}
+
+/// Empfaenger der Scheduler-Aktionen.
+///
+/// Als Trait statt als Rueckgabepuffer, damit der Kern keine Obergrenze fuer
+/// die Zahl der Aktionen erfinden muss: die Umgebung entscheidet, ob sie in
+/// einen Kanal, einen Vektor oder eine Testliste schreibt.
+pub trait ActionSink {
+    /// Nimmt eine Aktion entgegen.
+    fn emit(&mut self, action: Action);
+}
+
+impl<F: FnMut(Action)> ActionSink for F {
+    fn emit(&mut self, action: Action) {
+        self(action);
+    }
+}
+
+/// Ein an das Backend uebergebener Request samt seiner Planung.
+#[derive(Debug, Clone, Copy)]
+struct Dispatched {
+    descriptor: RequestDescriptor,
+    variant: VariantIdx,
+    at: Instant,
+    occupancy: usize,
+}
+
+/// Die Planung eines Kandidaten: welche Variante, wie lange, und reicht es.
+#[derive(Debug, Clone, Copy)]
+struct Plan {
+    variant: VariantIdx,
+    predicted_runtime: Duration,
+    /// Optimistisch geschaetzte Fertigstellung (`p50`).
+    ///
+    /// Grundlage der Verwerfensentscheidung nach ADR-0010: verworfen wird nur,
+    /// was selbst im guenstigen Fall wertlos waere.
+    optimistic_finish: Instant,
+    /// Ob die Deadline nach konservativer Planung noch haltbar ist.
+    ///
+    /// Steuert nur noch Metrik und Variantenwahl, nicht mehr das Verwerfen.
+    feasible: bool,
+}
+
+/// Warum ein Scheduler nicht gebaut werden konnte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulerError {
+    /// Kein Modell konfiguriert.
+    NoModels,
+    /// Mehr Modelle als [`MAX_MODELS`].
+    TooManyModels {
+        /// Die geforderte Anzahl.
+        requested: usize,
+    },
+    /// Ein Modellvertrag ist unzulaessig.
+    Contract {
+        /// Der Index des Modells.
+        model: usize,
+        /// Der Fehler.
+        error: ContractError,
+    },
+    /// Eine Queue-Konfiguration ist unzulaessig.
+    Queue {
+        /// Der Index des Modells.
+        model: usize,
+        /// Der Fehler.
+        error: QueueConfigError,
+    },
+}
+
+impl core::fmt::Display for SchedulerError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NoModels => write!(f, "keine Modelle konfiguriert"),
+            Self::TooManyModels { requested } => {
+                write!(f, "{requested} Modelle, Maximum {MAX_MODELS}")
+            }
+            Self::Contract { model, error } => write!(f, "Modell {model}: {error}"),
+            Self::Queue { model, error } => write!(f, "Modell {model}: {error}"),
+        }
+    }
+}
+
+impl core::error::Error for SchedulerError {}
+
+/// Der Scheduler.
+#[derive(Debug)]
+pub struct Scheduler {
+    contracts: ArrayVec<ModelContract, MAX_MODELS>,
+    queues: ArrayVec<ModelQueue, MAX_MODELS>,
+    variant_states: [VariantState; MAX_MODELS],
+    next_expected: [Option<Instant>; MAX_MODELS],
+    slots: SlotSet,
+    overload: OverloadController,
+    margin: SafetyMargin,
+    horizon: Duration,
+    inflight: ArrayVec<Dispatched, MAX_INFLIGHT>,
+    metrics: Metrics,
+}
+
+impl Scheduler {
+    /// Baut einen Scheduler aus geprueften Vertraegen.
+    ///
+    /// # Errors
+    ///
+    /// Siehe [`SchedulerError`]. Eine ungueltige Konfiguration verhindert den
+    /// Start, statt still mit riskanten Defaults weiterzulaufen (Spec L-020).
+    pub fn new(
+        contracts: ArrayVec<ModelContract, MAX_MODELS>,
+        slots: SlotSet,
+        overload: OverloadController,
+        margin: SafetyMargin,
+    ) -> Result<Self, SchedulerError> {
+        if contracts.is_empty() {
+            return Err(SchedulerError::NoModels);
+        }
+        let mut queues = ArrayVec::new();
+        for (i, contract) in contracts.iter().enumerate() {
+            contract
+                .validate()
+                .map_err(|error| SchedulerError::Contract { model: i, error })?;
+            let queue = ModelQueue::new(contract.queue, contract.stateful)
+                .map_err(|error| SchedulerError::Queue { model: i, error })?;
+            queues
+                .push(queue)
+                .map_err(|_| SchedulerError::TooManyModels {
+                    requested: contracts.len(),
+                })?;
+        }
+        Ok(Self {
+            contracts,
+            queues,
+            variant_states: [VariantState::default(); MAX_MODELS],
+            next_expected: [None; MAX_MODELS],
+            slots,
+            overload,
+            margin,
+            horizon: DEFAULT_HORIZON,
+            inflight: ArrayVec::new(),
+            metrics: Metrics::default(),
+        })
+    }
+
+    /// Setzt den Look-ahead-Horizont (Spec 10.8).
+    pub const fn set_horizon(&mut self, horizon: Duration) {
+        self.horizon = horizon;
+    }
+
+    /// Die aktuellen Zaehler.
+    #[must_use]
+    pub const fn metrics(&self) -> &Metrics {
+        &self.metrics
+    }
+
+    /// Der aktuelle Ueberlastzustand.
+    #[must_use]
+    pub const fn overload_state(&self) -> OverloadState {
+        self.overload.state()
+    }
+
+    /// Die Slot-Belegung, fuer Diagnose und Tests.
+    #[must_use]
+    pub const fn slots(&self) -> &SlotSet {
+        &self.slots
+    }
+
+    /// Verarbeitet ein Ereignis und emittiert die daraus folgenden Aktionen.
+    pub fn on_event<S: ActionSink>(&mut self, now: Instant, event: Event, sink: &mut S) {
+        match event {
+            Event::Arrival(descriptor) => self.on_arrival(now, descriptor, sink),
+            Event::Completion { request, slot } => self.on_completion(now, request, slot, sink),
+            Event::BackendFailure { request, slot } => {
+                self.on_failure(now, request, slot, sink);
+            }
+            Event::Tick => {}
+        }
+        self.schedule(now, sink);
+    }
+
+    fn on_arrival<S: ActionSink>(
+        &mut self,
+        now: Instant,
+        descriptor: RequestDescriptor,
+        sink: &mut S,
+    ) {
+        self.metrics.received = self.metrics.received.saturating_add(1);
+        let model = descriptor.logical_model;
+
+        // Die naechste Ankunft dieses Modells fortschreiben (Spec 10.8).
+        if let Some(contract) = self.contracts.get(model.get())
+            && let Some(period) = contract.period
+            && let Some(expected) = now.checked_add(period)
+            && let Some(slot) = self.next_expected.get_mut(model.get())
+        {
+            *slot = Some(expected);
+        }
+
+        let state = self.overload.state();
+        if !state.admits(descriptor.criticality) {
+            sink.emit(Action::Terminate {
+                request: descriptor.id,
+                state: RequestState::RejectedInfeasible,
+            });
+            self.metrics.rejected_infeasible = self.metrics.rejected_infeasible.saturating_add(1);
+            return;
+        }
+
+        let Some(queue) = self.queues.get_mut(model.get()) else {
+            sink.emit(Action::Terminate {
+                request: descriptor.id,
+                state: RequestState::RejectedInfeasible,
+            });
+            return;
+        };
+
+        let outcome = queue.push(descriptor);
+        for eviction in outcome.evicted.iter() {
+            self.count_drop(eviction.reason);
+            sink.emit(Action::Terminate {
+                request: eviction.id(),
+                state: eviction.state(),
+            });
+        }
+        if let Some(reason) = outcome.rejected {
+            self.count_drop(reason);
+            sink.emit(Action::Terminate {
+                request: descriptor.id,
+                state: reason.terminal_state(),
+            });
+        }
+    }
+
+    fn on_completion<S: ActionSink>(
+        &mut self,
+        now: Instant,
+        request: RequestId,
+        slot: SlotIdx,
+        sink: &mut S,
+    ) {
+        self.slots.complete(slot, request);
+        let Some(index) = self
+            .inflight
+            .iter()
+            .position(|d| d.descriptor.id == request)
+        else {
+            return;
+        };
+        let Some(entry) = self.inflight.remove(index) else {
+            return;
+        };
+
+        let compute = now.saturating_since(entry.at);
+        self.metrics.total_compute_nanos = self
+            .metrics
+            .total_compute_nanos
+            .saturating_add(compute.as_nanos());
+        sink.emit(Action::ObservedRuntime {
+            model: entry.descriptor.logical_model,
+            variant: entry.variant,
+            occupancy: entry.occupancy,
+            runtime: compute,
+        });
+
+        // Stufe C der Stale-Pruefung (Spec 10.3): ist das Ergebnis bei
+        // Fertigstellung noch aktuell? Die Rechenzeit ist bereits verbraucht;
+        // sie wird als stale_compute erfasst, statt sie zu verschweigen.
+        let obsolete = entry.descriptor.is_over_age(now);
+        let missed = entry
+            .descriptor
+            .absolute_deadline
+            .is_some_and(|deadline| now > deadline);
+
+        let state = if obsolete {
+            self.metrics.completed_obsolete = self.metrics.completed_obsolete.saturating_add(1);
+            self.metrics.stale_compute_nanos = self
+                .metrics
+                .stale_compute_nanos
+                .saturating_add(compute.as_nanos());
+            RequestState::CompletedObsolete
+        } else {
+            self.metrics.completed_valid = self.metrics.completed_valid.saturating_add(1);
+            RequestState::CompletedValid
+        };
+
+        if missed {
+            self.metrics.deadline_misses = self.metrics.deadline_misses.saturating_add(1);
+            if entry.descriptor.criticality.is_guarded() {
+                self.metrics.protected_deadline_misses =
+                    self.metrics.protected_deadline_misses.saturating_add(1);
+            }
+        }
+        self.observe_pressure(now, entry.descriptor.criticality, missed || obsolete);
+        sink.emit(Action::Terminate { request, state });
+    }
+
+    fn on_failure<S: ActionSink>(
+        &mut self,
+        now: Instant,
+        request: RequestId,
+        slot: SlotIdx,
+        sink: &mut S,
+    ) {
+        self.slots.complete(slot, request);
+        self.metrics.backend_failures = self.metrics.backend_failures.saturating_add(1);
+        let index = self
+            .inflight
+            .iter()
+            .position(|d| d.descriptor.id == request);
+        if let Some(entry) = index.and_then(|i| self.inflight.remove(i)) {
+            let compute = now.saturating_since(entry.at);
+            self.metrics.total_compute_nanos = self
+                .metrics
+                .total_compute_nanos
+                .saturating_add(compute.as_nanos());
+            self.observe_pressure(now, entry.descriptor.criticality, true);
+        }
+        sink.emit(Action::Terminate {
+            request,
+            state: RequestState::Failed,
+        });
+    }
+
+    /// Der Hauptdurchlauf: Stale sammeln, Ueberlast bewerten, dispatchen.
+    fn schedule<S: ActionSink>(&mut self, now: Instant, sink: &mut S) {
+        self.overload.evaluate(now);
+        self.collect_stale(now, sink);
+
+        // Bounded: jeder Durchlauf reicht hoechstens einen Request weiter, und
+        // mehr als MAX_INFLIGHT koennen nie gleichzeitig offen sein.
+        for _ in 0..MAX_INFLIGHT {
+            if !self.dispatch_one(now, sink) {
+                break;
+            }
+        }
+        if let Some(wake) = self.next_wakeup(now) {
+            sink.emit(Action::WakeAt(wake));
+        }
+    }
+
+    fn collect_stale<S: ActionSink>(&mut self, now: Instant, sink: &mut S) {
+        let mut drops: ArrayVec<(RequestId, RequestState, Criticality), MAX_INFLIGHT> =
+            ArrayVec::new();
+        for queue in self.queues.iter_mut() {
+            for eviction in queue.collect_stale(now).iter() {
+                let _ = drops.push((
+                    eviction.id(),
+                    eviction.state(),
+                    eviction.descriptor.criticality,
+                ));
+            }
+        }
+        for (request, state, criticality) in drops.iter() {
+            self.metrics.stale = self.metrics.stale.saturating_add(1);
+            self.observe_pressure(now, *criticality, true);
+            sink.emit(Action::Terminate {
+                request: *request,
+                state: *state,
+            });
+        }
+    }
+
+    /// Waehlt den naechsten Kandidaten und reicht ihn weiter.
+    ///
+    /// Gibt `true` zurueck, wenn etwas geschehen ist und ein weiterer Durchlauf
+    /// sinnvoll sein kann.
+    fn dispatch_one<S: ActionSink>(&mut self, now: Instant, sink: &mut S) -> bool {
+        let forecast = self.build_forecast(now);
+        let mut vetoed: crate::slots::ModelMask = crate::slots::ModelMask::NONE;
+
+        loop {
+            let Some((model, id)) = self.best_candidate(vetoed) else {
+                return false;
+            };
+            if !self.slots.has_credit(model) {
+                return false;
+            }
+
+            let Some(queue) = self.queues.get(model.get()) else {
+                return false;
+            };
+            let Some(descriptor) = queue.iter().find(|d| d.id == id).copied() else {
+                return false;
+            };
+            let Some(Plan {
+                variant,
+                predicted_runtime,
+                optimistic_finish,
+                feasible,
+            }) = self.plan(model, &descriptor, now)
+            else {
+                return false;
+            };
+
+            // ADR-0009: Verworfen wird, was bei Fertigstellung fachlich
+            // wertlos waere — nicht, was lediglich seine Deadline verfehlt.
+            // Die frueher hier stehende Deadline-Ablehnung fuehrte unter
+            // Ueberlast dazu, dass gar nichts mehr ausgefuehrt wurde: null
+            // Deadline-Misses, null nuetzliche Ergebnisse.
+            let worthless_on_arrival = descriptor.max_age.is_some_and(|limit| {
+                optimistic_finish.saturating_since(descriptor.generation_time) > limit
+            });
+            if worthless_on_arrival && descriptor.queue_policy.allows_stale_drop() {
+                self.drop_candidate(model, id, RequestState::Stale, sink);
+                self.metrics.stale = self.metrics.stale.saturating_add(1);
+                self.observe_pressure(now, descriptor.criticality, true);
+                continue;
+            }
+            if !feasible {
+                self.metrics.dispatched_late = self.metrics.dispatched_late.saturating_add(1);
+            }
+
+            // Look-ahead auf erwartbare wichtigere Arbeit (Spec 10.7).
+            match guard_protected(
+                &self.slots,
+                model,
+                descriptor.criticality,
+                predicted_runtime,
+                now,
+                forecast.iter(),
+                self.horizon,
+            ) {
+                GuardVerdict::WouldEndanger { retry_after, .. } => {
+                    self.metrics.deferred_for_protected =
+                        self.metrics.deferred_for_protected.saturating_add(1);
+                    sink.emit(Action::WakeAt(retry_after));
+                    vetoed = vetoed.with(model);
+                    continue;
+                }
+                GuardVerdict::Clear => {}
+            }
+
+            let Some(slot) = self.slots.ready_slot(model, now) else {
+                return false;
+            };
+            if self
+                .slots
+                .dispatch(slot, id, model, now, predicted_runtime)
+                .is_err()
+            {
+                return false;
+            }
+
+            if let Some(queue) = self.queues.get_mut(model.get()) {
+                queue.take(id);
+            }
+            if let Some(vs) = self.variant_states.get_mut(model.get()) {
+                vs.record(variant, now);
+            }
+            let _ = self.inflight.push(Dispatched {
+                descriptor,
+                variant,
+                at: now,
+                occupancy: self.slots.occupancy(),
+            });
+            self.metrics.forwarded = self.metrics.forwarded.saturating_add(1);
+            self.metrics.count_variant(variant);
+            sink.emit(Action::Dispatch {
+                request: id,
+                model,
+                variant,
+                slot,
+                predicted_runtime,
+            });
+            return true;
+        }
+    }
+
+    /// Loest Variante und Laufzeitprognose fuer einen Kandidaten auf.
+    ///
+    /// Gibt `None` zurueck, wenn derzeit ueberhaupt nicht geplant werden kann —
+    /// kein Slot fuer dieses Modell oder keine brauchbare Variante. Das ist
+    /// kein Machbarkeitsurteil; der Request bleibt Kandidat.
+    fn plan(&self, model: ModelIdx, descriptor: &RequestDescriptor, now: Instant) -> Option<Plan> {
+        let contract = self.contracts.get(model.get())?;
+        let state = self.variant_states.get(model.get())?;
+        let resolution = resolve(
+            contract,
+            state,
+            &self.slots,
+            model,
+            now,
+            descriptor.absolute_deadline,
+            self.margin,
+        );
+        match resolution {
+            Resolution::Feasible(sel) => Some(Plan {
+                variant: sel.variant,
+                optimistic_finish: self.optimistic_finish(
+                    contract,
+                    sel.variant,
+                    sel.feasibility.start,
+                ),
+                predicted_runtime: sel
+                    .feasibility
+                    .finish
+                    .saturating_since(sel.feasibility.start),
+                feasible: true,
+            }),
+            Resolution::Infeasible { fastest } => Some(Plan {
+                variant: fastest.variant,
+                optimistic_finish: self.optimistic_finish(
+                    contract,
+                    fastest.variant,
+                    fastest.feasibility.start,
+                ),
+                predicted_runtime: fastest
+                    .feasibility
+                    .finish
+                    .saturating_since(fastest.feasibility.start),
+                feasible: false,
+            }),
+            Resolution::NoSlot | Resolution::NoVariant => None,
+        }
+    }
+
+    /// Die optimistisch geschaetzte Fertigstellung einer Variante (ADR-0010).
+    fn optimistic_finish(
+        &self,
+        contract: &ModelContract,
+        variant: VariantIdx,
+        start: Instant,
+    ) -> Instant {
+        contract
+            .variant(variant)
+            .and_then(|v| v.profile.optimistic_at(self.slots.occupancy()).ok())
+            .and_then(|runtime| start.checked_add(runtime))
+            .unwrap_or(start)
+    }
+
+    /// Der beste wartende Kandidat nach lexikographischer Ordnung (Spec 10.6).
+    fn best_candidate(&self, vetoed: crate::slots::ModelMask) -> Option<(ModelIdx, RequestId)> {
+        let mut best: Option<(Criticality, Instant, Instant, ModelIdx, RequestId)> = None;
+
+        for (i, queue) in self.queues.iter().enumerate() {
+            let model = ModelIdx(u16::try_from(i).unwrap_or(u16::MAX));
+            if vetoed.contains(model) {
+                continue;
+            }
+            for descriptor in queue.iter() {
+                // Ohne Deadline zaehlt der Request als maximal geduldig; er
+                // wird erst beruecksichtigt, wenn nichts Dringenderes wartet.
+                let deadline = descriptor
+                    .absolute_deadline
+                    .unwrap_or(Instant::from_nanos(u64::MAX));
+                let key = (
+                    descriptor.criticality,
+                    deadline,
+                    descriptor.generation_time,
+                    model,
+                    descriptor.id,
+                );
+                let better = match best {
+                    None => true,
+                    Some((c, d, g, _, _)) => {
+                        (core::cmp::Reverse(key.0), key.1, key.2) < (core::cmp::Reverse(c), d, g)
+                    }
+                };
+                if better {
+                    best = Some(key);
+                }
+            }
+        }
+        best.map(|(_, _, _, model, id)| (model, id))
+    }
+
+    /// Die erwarteten geschuetzten Ankuenfte im Look-ahead-Horizont.
+    fn build_forecast(&self, now: Instant) -> ArrayVec<ExpectedArrival, MAX_MODELS> {
+        let mut out = ArrayVec::new();
+        let limit = now.checked_add(self.horizon);
+        for (i, contract) in self.contracts.iter().enumerate() {
+            if !contract.criticality.is_guarded() {
+                continue;
+            }
+            let Some(Some(expected_at)) = self.next_expected.get(i).copied() else {
+                continue;
+            };
+            if limit.is_some_and(|l| expected_at > l) {
+                continue;
+            }
+            let Some(deadline) = expected_at.checked_add(contract.deadline) else {
+                continue;
+            };
+            // Die beste Variante ist die konservative Annahme: sie ist die
+            // langsamste, und der Look-ahead soll nicht optimistisch sein.
+            let Some(best) = contract.variants.get(0) else {
+                continue;
+            };
+            let Ok(runtime) = best
+                .profile
+                .conservative_at(self.slots.occupancy(), self.margin)
+            else {
+                continue;
+            };
+            let _ = out.push(ExpectedArrival {
+                model: ModelIdx(u16::try_from(i).unwrap_or(u16::MAX)),
+                criticality: contract.criticality,
+                at: expected_at.max(now),
+                deadline,
+                runtime,
+            });
+        }
+        out
+    }
+
+    /// Der naechste Zeitpunkt, zu dem der Scheduler ohnehin nachsehen sollte.
+    fn next_wakeup(&self, now: Instant) -> Option<Instant> {
+        let mut earliest: Option<Instant> = None;
+        for f in self.slots.inflight_iter() {
+            if f.expected_finish > now {
+                earliest =
+                    Some(earliest.map_or(f.expected_finish, |e: Instant| e.min(f.expected_finish)));
+            }
+        }
+        earliest
+    }
+
+    fn drop_candidate<S: ActionSink>(
+        &mut self,
+        model: ModelIdx,
+        id: RequestId,
+        state: RequestState,
+        sink: &mut S,
+    ) {
+        if let Some(queue) = self.queues.get_mut(model.get()) {
+            queue.take(id);
+        }
+        sink.emit(Action::Terminate { request: id, state });
+    }
+
+    fn observe_pressure(&mut self, now: Instant, criticality: Criticality, violated: bool) {
+        self.overload.observe(
+            now,
+            PressureSample {
+                guarded: criticality.is_guarded(),
+                violated,
+            },
+        );
+    }
+
+    fn count_drop(&mut self, reason: DropReason) {
+        match reason {
+            DropReason::Superseded | DropReason::ArrivedOutOfOrder => {
+                self.metrics.superseded = self.metrics.superseded.saturating_add(1);
+            }
+            DropReason::OverAge => {
+                self.metrics.stale = self.metrics.stale.saturating_add(1);
+            }
+            DropReason::QueueFull | DropReason::Backpressure => {
+                self.metrics.rejected_capacity = self.metrics.rejected_capacity.saturating_add(1);
+            }
+        }
+    }
+}

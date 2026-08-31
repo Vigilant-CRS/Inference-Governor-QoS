@@ -1,0 +1,15 @@
+[package]
+name = "onetimer-sim"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Deterministic discrete-event simulator for the OneTimer scheduling core"
+
+[dependencies]
+onetimer-core = { path = "../onetimer-core", version = "0.1.0" }
+
+[lints]
+workspace = true

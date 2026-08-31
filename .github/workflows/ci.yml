@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  check:
+    name: fmt / clippy / test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --all-features
+
+  supply-chain:
+    name: licenses / advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses bans advisories sources
+
+  # Gate S ist ein Produktgate, kein optionaler Bericht: eine Regression im
+  # Scheduling muss den Build brechen, nicht erst beim naechsten manuellen Lauf
+  # auffallen.
+  gate-s:
+    name: gate s
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo run --release -p onetimer-sim --bin gate-s | tee gate-s.log
+      - run: grep -q "Gate S: bestanden" gate-s.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gate-s-report
+          path: docs/benchmark/gate-s-report.md
+
+  # Spec 21.2: REUSE-Konformitaet als eigener, nicht optionaler Schritt.
+  reuse:
+    name: reuse lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: fsfe/reuse-action@v5
