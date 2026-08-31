@@ -19,7 +19,23 @@ allow = [
     "ISC",
 ]
 confidence-threshold = 0.93
-exceptions = []
+
+# Spec 20.8 sieht fuer Lizenzen ausserhalb der Allowlist eine manuelle Pruefung
+# vor. Diese Liste ist das Ergebnis dieser Pruefung — bewusst als Einzelfall je
+# Crate und nicht als Erweiterung der globalen Allowlist, damit eine neue
+# Dependency mit derselben Lizenz erneut geprueft werden muss.
+#
+# Beide Lizenzen sind permissiv, OSI-approved und ohne Reziprozitaets- oder
+# Offenlegungspflicht. Technische Produktplanung, keine Rechtsberatung — vor
+# kommerzieller Distribution ist eine formale juristische Pruefung noetig.
+exceptions = [
+    # Zlib: permissiv, dreiklauselig, keine Namensnennungspflicht in Binaries.
+    # Transitive Abhaengigkeit ueber hashbrown.
+    { name = "foldhash", allow = ["Zlib"] },
+    # Unicode-3.0 deckt die eingebetteten Unicode-Datentabellen. Der Code selbst
+    # steht unter MIT OR Apache-2.0. Transitive Abhaengigkeit ueber syn/quote.
+    { name = "unicode-ident", allow = ["Unicode-3.0"] },
+]
 
 [bans]
 multiple-versions = "warn"

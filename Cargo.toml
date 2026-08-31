@@ -2,6 +2,8 @@
 resolver = "3"
 members = [
     "crates/onetimer-core",
+    "crates/onetimer-config",
+    "crates/onetimer-protocol-oip",
     "crates/onetimer-sim",
 ]
 
