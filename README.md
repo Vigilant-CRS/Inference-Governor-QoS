@@ -83,6 +83,27 @@ Daten liegen, und OneTimer berührt sie nie. Faktor 73.
 
 Details und Methodik: [`docs/benchmark/data-plane.md`](docs/benchmark/data-plane.md).
 
+### Bringt die Steuerung etwas? — auf dem echten Stack gemessen
+
+Derselbe Workload zweimal durch denselben gRPC-Stack, einmal direkt zum Backend
+und einmal über OneTimer. Bei 133 % geschützter Auslastung auf einem Slot:
+
+| Strom | Abdeckung ohne | mit | AoI p95 ohne | mit |
+|---|---:|---:|---:|---:|
+| detector | 45 % | **99 %** | 216 ms | **15 ms** |
+| pose | 46 % | **99 %** | 209 ms | **25 ms** |
+| depth | 52 % | **99 %** | 225 ms | **32 ms** |
+
+Dabei führt das Backend **mehr** aus, nicht weniger: 1112 statt 854 Inferenzen.
+
+Ohne Konkurrenz bringt der Governor dagegen nichts — bei 30 % Auslastung auf
+zwei Slots liefern beide Seiten alles. Und ein Best-Effort-Job, der länger
+dauert als die kürzeste geschützte Periode, startet auf einem Slot nie; das ist
+eine Eigenschaft nicht unterbrechbarer Ausführung und in
+[ADR-0012](docs/adr/0012-best-effort-starvation.md) festgehalten.
+
+Details: [`docs/benchmark/wire-bench.md`](docs/benchmark/wire-bench.md).
+
 > **Es liegen keine Messwerte gegen echte Hardware vor.** Alle Zahlen in der
 > Spezifikation sind Zielwerte, Rechenbeispiele oder Validierungsschwellen. Die
 > Produkthypothese ist unbewiesen, bis Gate M3 sie gegen eine **getunte**

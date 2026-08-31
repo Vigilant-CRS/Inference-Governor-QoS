@@ -47,14 +47,16 @@ pub struct Metrics {
     /// Zaehler waere eine nie ausgefuehrte Hintergrundlast nur an ausbleibenden
     /// Antworten zu erkennen — also praktisch gar nicht.
     pub best_effort_starved: u64,
-    /// Requests, die bewusst trotz verfehlbarer Deadline gestartet wurden.
+    /// Requests, die bewusst trotz verfehlbarer Deadline **gestartet** wurden.
     ///
     /// Nach ADR-0009 ist eine verspaetete, aber frische Inferenz besser als
     /// keine. Der Zaehler macht sichtbar, wie oft das noetig war.
     pub dispatched_late: u64,
     /// Wie oft ein Start zugunsten erwarteter geschuetzter Arbeit verschoben wurde.
     ///
-    /// Der Zaehler des absichtlichen Idle (Spec 10.7). Er gehoert zu den
+    /// Der Zaehler des absichtlichen Idle (Spec 10.7). Er zaehlt **Veto-
+    /// Ereignisse**, nicht Requests: derselbe Kandidat kann bei jeder
+    /// Planungsrunde erneut zurueckgestellt werden. Er gehoert zu den
     /// wichtigsten Diagnosewerten: ist er null, wirkt der Look-ahead nicht;
     /// ist er sehr hoch, ist die Konfiguration ueberzeichnet.
     pub deferred_for_protected: u64,

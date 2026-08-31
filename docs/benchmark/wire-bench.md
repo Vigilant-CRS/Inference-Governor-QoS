@@ -38,7 +38,83 @@ alles verwirft, faellt sofort auf.
 
 ## Ergebnisse
 
-*(Die Tabellen werden vom Lauf erzeugt; siehe unten zum Reproduzieren.)*
+Messdauer 15 s je Lauf und Puffertiefe, Kerne 8-15 reserviert.
+
+### A — geschuetzte Vertraege ueberzeichnet
+
+133 % geschuetzte Auslastung auf einem Slot. `doctor` meldet dafuer
+`PROTECTED_WORKLOAD_UNSCHEDULABLE`; gemessen wird trotzdem, um zu zeigen, was
+in dieser Lage passiert.
+
+| Strom | Abdeckung ohne | mit | AoI p95 ohne | mit | Faktor |
+|---|---:|---:|---:|---:|---:|
+| detector | 45 % | **99 %** | 216 ms | **15 ms** | 108x |
+| pose | 46 % | **99 %** | 209 ms | **25 ms** | 107x |
+| depth | 52 % | **99 %** | 225 ms | **32 ms** | 95x |
+| vlm | 100 % | 3 % | 301 ms | 202 ms | — |
+
+Backend: 854 Inferenzen ohne, **1112 mit** Governor. Der Governor fuehrt also
+mehr aus und liefert dabei frischere Ergebnisse — kein Tausch von Durchsatz
+gegen Latenz, sondern weniger Arbeit an bereits wertlosen Daten.
+
+Der VLM verhungert. Bei dieser Konfiguration ist das die richtige Antwort und
+`doctor` sagt es vorher; siehe ADR-0012.
+
+### B — tragfaehige Vertraege, ein Slot
+
+61 % geschuetzte Auslastung.
+
+| Strom | Abdeckung ohne | mit | AoI p95 ohne | mit |
+|---|---:|---:|---:|---:|
+| detector | 87 % | **100 %** | 36 ms | **23 ms** |
+| pose | 91 % | **100 %** | 175 ms | **25 ms** |
+| depth | 97 % | **100 %** | 189 ms | **40 ms** |
+| vlm | 100 % | 14 % | 309 ms | 3562 ms |
+
+Der wichtigste Befund des ganzen Benchmarks steht in dieser Zeile: **auch bei
+61 % Auslastung startet der VLM fast nie.** Die Blockade ist eine Eigenschaft
+der Laufzeitverhaeltnisse, nicht der Last — ein 200-ms-Job gefaehrdet auf einem
+nicht unterbrechbaren Slot immer die naechste 50-ms-Ankunft. Daraus entstand
+ADR-0012 und die zugehoerige `doctor`-Warnung.
+
+### C — dieselbe Last, zwei Slots, kein Co-Run-Verbot
+
+30 % geschuetzte Auslastung, reichlich Reserve.
+
+| Strom | Abdeckung ohne | mit | AoI p95 ohne | mit |
+|---|---:|---:|---:|---:|
+| detector | 100 % | 98 % | 15 ms | 14 ms |
+| pose | 100 % | 100 % | 22 ms | 50 ms |
+| depth | 100 % | 100 % | 30 ms | 50 ms |
+| vlm | 100 % | 100 % | 321 ms | 348 ms |
+
+**Ohne Konkurrenz bringt der Governor nichts** — und das ist die ehrliche
+Aussage, nicht eine Verlegenheit. Alle 533 Requests wurden weitergereicht, kein
+einziger verworfen. Die hoehere AoI von `pose` und `depth` ist kein Fehler,
+sondern die konfigurierte Absicht: sie sind `high`, der Detektor ist
+`protected` und geht vor.
+
+Die 98 % beim Detektor sind kein verlorener Request — es wurde keiner
+verworfen. Ein Ergebnis, das knapp in das naechste 50-ms-Fenster rutscht,
+laesst das vorige leer. Die Abdeckungsmetrik ist an dieser Stelle
+randempfindlich; bei viel Reserve und kurzen Perioden ist sie das falsche
+Werkzeug, weil sie nichts mehr zu unterscheiden hat.
+
+## Was der Benchmark ueber den Code gesagt hat
+
+Drei Fehler wurden hier gefunden, nicht durch Tests:
+
+1. `SafetyMargin::NONE` war als `1/1` dargestellt. `as_percent()` lieferte 1
+   statt 100 — einen Wert, den `from_percent` ablehnt. Der Margenregler wich
+   still auf den Default aus und plante mit 110 % statt 100 %.
+2. Der Slot-Belegungsgrad wurde **nach** dem eigenen Dispatch erfasst, geplant
+   wird aber mit dem Wert davor. Jede Estimator-Zelle war um eins verschoben;
+   der Schaetzer waere vorhanden, aber wirkungslos gewesen.
+3. `dispatched_late` zaehlte Planungsversuche statt Dispatches — 2057 bei 924
+   weitergereichten Requests.
+
+Keiner der drei erzeugte eine Fehlermeldung. Alle drei waren nur an Verhalten
+unter Dauerlast zu erkennen.
 
 ## Reproduzieren
 

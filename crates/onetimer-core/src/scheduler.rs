@@ -562,10 +562,6 @@ impl Scheduler {
                 self.observe_pressure(now, descriptor.criticality, true);
                 continue;
             }
-            if !feasible {
-                self.metrics.dispatched_late = self.metrics.dispatched_late.saturating_add(1);
-            }
-
             // Look-ahead auf erwartbare wichtigere Arbeit (Spec 10.7).
             match guard_protected(
                 &self.slots,
@@ -619,6 +615,13 @@ impl Scheduler {
             });
             self.metrics.forwarded = self.metrics.forwarded.saturating_add(1);
             self.metrics.count_variant(variant);
+            if !feasible {
+                // Erst hier zaehlen, nicht in der Kandidatenschleife: ein
+                // Kandidat kann mehrfach geprueft und wieder zurueckgestellt
+                // werden. Ein Zaehler, der Planungsversuche zaehlt und
+                // Requests heisst, ist schlimmer als kein Zaehler.
+                self.metrics.dispatched_late = self.metrics.dispatched_late.saturating_add(1);
+            }
             sink.emit(Action::Dispatch {
                 request: id,
                 model,
