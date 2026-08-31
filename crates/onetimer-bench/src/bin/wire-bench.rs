@@ -45,12 +45,14 @@ use std::time::Duration;
 const RUN_SECONDS: u64 = 15;
 const SEED: u64 = 0x5EED_BEEF;
 
-/// Puffertiefen, mit denen die Baseline gefahren wird.
+/// Puffertiefen, mit denen **beide Seiten** gefahren werden.
 ///
 /// Eine flache Tiefe drosselt den Client selbst, eine tiefe erzeugt Rueckstand.
-/// Je Strom wird das **bessere** Baselineergebnis gewertet, damit der Vergleich
-/// nicht an einer schlecht gewaehlten Zahl haengt (Spec 19.1).
-const BASELINE_CAPS: [usize; 3] = [1, 4, 16];
+/// Je Strom zaehlt das bessere Ergebnis — fuer die Baseline **und** fuer den
+/// Governor. Nur eine Seite ihre beste Tiefe waehlen zu lassen waere ein
+/// verstecktes Handicap: bei geringer Last ist eine Tiefe von 1 eine
+/// Selbstdrosselung, die von sich aus optimal ist (Spec 19.1).
+const CAPS: [usize; 3] = [1, 4, 16];
 
 fn ms(v: u64) -> onetimer_core::Duration {
     onetimer_core::Duration::from_nanos_unbounded(v.saturating_mul(1_000_000))
@@ -137,7 +139,7 @@ impl Scenario {
             .collect()
     }
 
-    fn governed_streams(&self) -> Vec<StreamDef> {
+    fn governed_streams(&self, cap: usize) -> Vec<StreamDef> {
         self.streams
             .iter()
             .map(|(name, _, period, max_age)| StreamDef {
@@ -145,7 +147,7 @@ impl Scenario {
                 model: name,
                 period: Duration::from_millis(*period),
                 max_age: Duration::from_millis(*max_age),
-                in_flight_cap: 16,
+                in_flight_cap: cap,
             })
             .collect()
     }
@@ -245,10 +247,6 @@ async fn start_gateway(
     (address, utilization, handle)
 }
 
-fn find<'a>(reports: &'a [StreamReport], name: &str) -> Option<&'a StreamReport> {
-    reports.iter().find(|r| r.name == name)
-}
-
 fn main() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .thread_stack_size(8 * 1024 * 1024)
@@ -263,8 +261,10 @@ async fn run() {
     let only = std::env::args().nth(1);
     println!(
         "wire-bench: derselbe Workload, einmal direkt zum Backend und einmal ueber OneTimer.\n\
-         Messdauer {RUN_SECONDS} s je Lauf. Die Baseline wird mit Puffertiefen {BASELINE_CAPS:?} \
-         gefahren;\nje Strom zaehlt ihr bestes Ergebnis.\n"
+         Messdauer {RUN_SECONDS} s je Lauf.\nBeide Seiten werden mit den \
+         Puffertiefen {CAPS:?} gefahren; je Strom zaehlt das jeweils beste\n\
+         Ergebnis. Nur eine Seite ihre beste Tiefe waehlen zu lassen waere ein \
+         verstecktes Handicap.\n"
     );
 
     for scenario in scenarios() {
@@ -279,7 +279,7 @@ async fn run() {
         // --- Baseline: beste Puffertiefe je Strom -------------------------
         let mut best: HashMap<&'static str, StreamReport> = HashMap::new();
         let mut baseline_executed = 0_u64;
-        for cap in BASELINE_CAPS {
+        for cap in CAPS {
             let (endpoint, backend) = fresh_backend(scenario.slots).await;
             let reports = drive(&endpoint, &scenario.direct_streams(cap), duration, false).await;
             baseline_executed = baseline_executed.max(backend.executed.load(Ordering::Relaxed));
@@ -291,19 +291,34 @@ async fn run() {
             }
         }
 
-        // --- Mit Governor --------------------------------------------------
-        let (backend_endpoint, backend) = fresh_backend(scenario.slots).await;
-        let yaml = scenario.config_yaml(&backend_endpoint);
-        let (gateway_endpoint, utilization, handle) =
-            start_gateway(&yaml, &backend_endpoint).await;
-        let governed = drive(
-            &gateway_endpoint,
-            &scenario.governed_streams(),
-            duration,
-            true,
-        )
-        .await;
-        let governed_executed = backend.executed.load(Ordering::Relaxed);
+        // --- Mit Governor, dieselbe Tiefensuche ----------------------------
+        let mut governed_best: HashMap<&'static str, StreamReport> = HashMap::new();
+        let mut governed_executed = 0_u64;
+        let mut utilization = 0_u64;
+        let mut last_metrics = None;
+        for cap in CAPS {
+            let (backend_endpoint, backend) = fresh_backend(scenario.slots).await;
+            let yaml = scenario.config_yaml(&backend_endpoint);
+            let (gateway_endpoint, u, handle) = start_gateway(&yaml, &backend_endpoint).await;
+            utilization = u;
+            let reports = drive(
+                &gateway_endpoint,
+                &scenario.governed_streams(cap),
+                duration,
+                true,
+            )
+            .await;
+            governed_executed = governed_executed.max(backend.executed.load(Ordering::Relaxed));
+            last_metrics = handle.metrics().await.ok();
+            for report in reports {
+                let entry = governed_best
+                    .entry(report.name)
+                    .or_insert_with(|| report.clone());
+                if report.coverage.covered_permille() > entry.coverage.covered_permille() {
+                    *entry = report;
+                }
+            }
+        }
 
         println!(
             "\n  Geschuetzte serialisierte Auslastung: {} % {}",
@@ -317,7 +332,7 @@ async fn run() {
         println!("\n  Strom     | Abdeckung ohne | mit    | AoI p95 ohne | mit     | Faktor");
         println!("  ----------|----------------|--------|--------------|---------|-------");
         for (name, _, _, _) in &scenario.streams {
-            let (Some(a), Some(b)) = (best.get(name), find(&governed, name)) else {
+            let (Some(a), Some(b)) = (best.get(name), governed_best.get(name)) else {
                 continue;
             };
             let without = a.coverage.uncovered_permille();
@@ -344,7 +359,7 @@ async fn run() {
         println!(
             "  Backend: {baseline_executed} Inferenzen ohne, {governed_executed} mit Governor"
         );
-        if let Ok(m) = handle.metrics().await {
+        if let Some(m) = last_metrics {
             println!(
                 "  Governor: angenommen {} weitergereicht {} supersediert {} \
                  stale {} unmachbar {} verspaetet {} zurueckgestellt {} \

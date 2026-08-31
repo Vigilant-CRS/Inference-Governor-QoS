@@ -31,7 +31,7 @@ kein Gateway und keine Triton-Anbindung.
 | 1b | Simulierte Kernvergleiche — **Gate S** | **bestanden** |
 | 2a | OIP-Gateway, Triton-Adapter, Konfiguration, CLI | **fertig** |
 | 2b | Shared-Memory-Referenz-Passthrough | **fertig** |
-| 3 | Profiler, Online Estimator, Metrics | offen |
+| 3 | Online Runtime Estimator | **fertig** · Profiler und Prometheus offen |
 | 4 | Benchmark-Harness, getunte Triton-Baseline — **Gate M3** | offen |
 
 ### Gate S — simulierte Falsifikation

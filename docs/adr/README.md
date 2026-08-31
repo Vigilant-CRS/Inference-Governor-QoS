@@ -21,6 +21,7 @@ Spec-Stelle explizit.
 | [0010](0010-pessimistic-promises-optimistic-discards.md) | Pessimistisch versprechen, optimistisch verwerfen | §10.3, §13.2 | Akzeptiert |
 | [0011](0011-client-clock-domains.md) | Die Erzeugungszeit kommt aus einer fremden Uhr | §16.2, §10.2, L-019 | Akzeptiert |
 | [0012](0012-best-effort-starvation.md) | Aushungerung ist ein Befund, kein Nebeneffekt | §1.3, §10.6, §15 | Akzeptiert |
+| [0013](0013-margin-corrects-forecasts-not-contracts.md) | Die Marge korrigiert Prognosefehler, nicht Vertragsverletzungen | §13.3 | Akzeptiert |
 
 ## Format
 
