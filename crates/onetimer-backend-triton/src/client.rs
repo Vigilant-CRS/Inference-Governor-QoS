@@ -16,6 +16,27 @@ use tonic::transport::{Channel, Endpoint};
 /// eine Antwort geben, statt in einem langen TCP-Timeout zu haengen.
 const CONNECT_TIMEOUT: StdDuration = StdDuration::from_secs(5);
 
+/// Standardobergrenze fuer die Groesse einer einzelnen gRPC-Nachricht.
+///
+/// tonic setzt hier 4 MiB. Ein 1920x1080x3-uint8-Frame sind 6,2 MB — der
+/// Default lehnt also einen gewoehnlichen Kamerarequest ab. Die Grenze bleibt
+/// trotzdem eine Grenze: Spec 8.3 verbietet unbeschraenkte Allokationen aus
+/// fremd kontrollierten Groessen, und ein Wert von „unbegrenzt" waere genau
+/// das.
+pub const DEFAULT_MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+
+/// HTTP/2-Fenster fuer einen einzelnen Stream.
+///
+/// Der Default von 64 KiB zwingt bei Tensornutzlasten zu einer Kette von
+/// WINDOW_UPDATE-Runden und kostet damit ein Vielfaches der reinen
+/// Uebertragungszeit. Bei einer Messung faellt das dem Proxy doppelt zur Last,
+/// weil er zwei Verbindungen bedient — das waere aber ein Artefakt der
+/// Voreinstellung und keine Eigenschaft des Governors.
+pub const STREAM_WINDOW_BYTES: u32 = 4 * 1024 * 1024;
+
+/// HTTP/2-Fenster fuer die gesamte Verbindung.
+pub const CONNECTION_WINDOW_BYTES: u32 = 8 * 1024 * 1024;
+
 /// Der Gesundheitszustand des Backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TritonHealth {
@@ -34,6 +55,7 @@ pub struct TritonHealth {
 #[derive(Debug)]
 pub struct TritonClient {
     endpoint: String,
+    max_message_bytes: usize,
     channel: Mutex<Option<Channel>>,
 }
 
@@ -45,10 +67,23 @@ impl TritonClient {
     /// Fehlermeldung, wenn es das nie wird.
     #[must_use]
     pub fn new(endpoint: impl Into<String>) -> Self {
+        Self::with_max_message_bytes(endpoint, DEFAULT_MAX_MESSAGE_BYTES)
+    }
+
+    /// Erzeugt einen Client mit einer eigenen Nachrichtenobergrenze.
+    #[must_use]
+    pub fn with_max_message_bytes(endpoint: impl Into<String>, max_message_bytes: usize) -> Self {
         Self {
             endpoint: endpoint.into(),
+            max_message_bytes,
             channel: Mutex::new(None),
         }
+    }
+
+    /// Die konfigurierte Nachrichtenobergrenze.
+    #[must_use]
+    pub const fn max_message_bytes(&self) -> usize {
+        self.max_message_bytes
     }
 
     /// Der konfigurierte Endpunkt.
@@ -74,6 +109,8 @@ impl TritonClient {
                 cause: e.to_string(),
             })?
             .connect_timeout(CONNECT_TIMEOUT)
+            .initial_stream_window_size(STREAM_WINDOW_BYTES)
+            .initial_connection_window_size(CONNECTION_WINDOW_BYTES)
             // Nagle aus: der Governor verschickt kleine Steuerpakete, bei denen
             // 40 ms Verzoegerung die gesamte Deadline aufbrauchen wuerden.
             .tcp_nodelay(true)
@@ -85,6 +122,13 @@ impl TritonClient {
             })?;
         *guard = Some(channel.clone());
         Ok(channel)
+    }
+
+    /// Ein Client mit den konfigurierten Groessengrenzen.
+    fn client(&self, channel: Channel) -> GrpcInferenceServiceClient<Channel> {
+        GrpcInferenceServiceClient::new(channel)
+            .max_decoding_message_size(self.max_message_bytes)
+            .max_encoding_message_size(self.max_message_bytes)
     }
 
     /// Verwirft den zwischengespeicherten Kanal.
@@ -105,7 +149,7 @@ impl TritonClient {
     ///
     /// [`BackendError::Unreachable`], wenn kein Kanal aufgebaut werden kann.
     pub async fn raw(&self) -> Result<GrpcInferenceServiceClient<Channel>, BackendError> {
-        Ok(GrpcInferenceServiceClient::new(self.channel().await?))
+        Ok(self.client(self.channel().await?))
     }
 
     /// Fragt Lebendigkeit und Bereitschaft ab.
@@ -114,7 +158,7 @@ impl TritonClient {
     ///
     /// [`BackendError`], wenn das Backend nicht erreichbar ist.
     pub async fn health(&self) -> Result<TritonHealth, BackendError> {
-        let mut client = GrpcInferenceServiceClient::new(self.channel().await?);
+        let mut client = self.client(self.channel().await?);
         let live = client
             .server_live(ServerLiveRequest {})
             .await
@@ -136,7 +180,7 @@ impl TritonClient {
     ///
     /// [`BackendError`], wenn das Backend nicht erreichbar ist.
     pub async fn model_ready(&self, model: &str) -> Result<bool, BackendError> {
-        let mut client = GrpcInferenceServiceClient::new(self.channel().await?);
+        let mut client = self.client(self.channel().await?);
         let response = client
             .model_ready(ModelReadyRequest {
                 name: model.to_owned(),
@@ -153,7 +197,7 @@ impl TritonClient {
     ///
     /// [`BackendError::UnknownModel`], wenn das Backend das Modell nicht kennt.
     pub async fn model_metadata(&self, model: &str) -> Result<ModelMetadataResponse, BackendError> {
-        let mut client = GrpcInferenceServiceClient::new(self.channel().await?);
+        let mut client = self.client(self.channel().await?);
         let response = client
             .model_metadata(ModelMetadataRequest {
                 name: model.to_owned(),
@@ -188,7 +232,7 @@ impl TritonClient {
         request: ModelInferRequest,
     ) -> Result<ModelInferResponse, BackendError> {
         let channel = self.channel().await?;
-        let mut client = GrpcInferenceServiceClient::new(channel);
+        let mut client = self.client(channel);
         match client.model_infer(request).await {
             Ok(response) => Ok(response.into_inner()),
             Err(status) => {

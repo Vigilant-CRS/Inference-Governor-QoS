@@ -20,6 +20,7 @@
 
 use crate::actor::Handle;
 use crate::clock::MonotonicClock;
+use crate::shm::{Region, ShmRegistry};
 use onetimer_backend_triton::TritonClient;
 use onetimer_config::schema::Resolved;
 use onetimer_core::{Duration, PayloadRef, RequestDescriptor, RequestId, SupersessionKey};
@@ -46,6 +47,7 @@ pub struct GatewayService {
     scheduler: Handle,
     clock: MonotonicClock,
     next_id: AtomicU64,
+    shm: ShmRegistry,
 }
 
 impl GatewayService {
@@ -63,7 +65,14 @@ impl GatewayService {
             scheduler,
             clock,
             next_id: AtomicU64::new(1),
+            shm: ShmRegistry::new(),
         }
+    }
+
+    /// Der Bestand durchgereichter Shared-Memory-Regionen.
+    #[must_use]
+    pub const fn shm_registry(&self) -> &ShmRegistry {
+        &self.shm
     }
 
     fn allocate_id(&self) -> RequestId {
@@ -291,20 +300,43 @@ impl GrpcInferenceService for GatewayService {
         &self,
         request: Request<SystemSharedMemoryRegisterRequest>,
     ) -> Result<Response<SystemSharedMemoryRegisterResponse>, Status> {
-        self.raw()
-            .await?
-            .system_shared_memory_register(request.into_inner())
-            .await
+        Box::pin(async move {
+            let inner = request.into_inner();
+            let region = Region {
+                byte_size: inner.byte_size,
+                offset: inner.offset,
+                cuda: false,
+            };
+            let name = inner.name.clone();
+            let response = self
+                .raw()
+                .await?
+                .system_shared_memory_register(inner)
+                .await?;
+            // Erst nach der Bestaetigung buchen: sonst fuehrte OneTimer
+            // Regionen, die es im Backend gar nicht gibt.
+            self.shm.record(name, region);
+            Ok(response)
+        })
+        .await
     }
 
     async fn system_shared_memory_unregister(
         &self,
         request: Request<SystemSharedMemoryUnregisterRequest>,
     ) -> Result<Response<SystemSharedMemoryUnregisterResponse>, Status> {
-        self.raw()
-            .await?
-            .system_shared_memory_unregister(request.into_inner())
-            .await
+        Box::pin(async move {
+            let inner = request.into_inner();
+            let name = inner.name.clone();
+            let response = self
+                .raw()
+                .await?
+                .system_shared_memory_unregister(inner)
+                .await?;
+            self.shm.forget(&name);
+            Ok(response)
+        })
+        .await
     }
 
     async fn cuda_shared_memory_status(

@@ -1,6 +1,6 @@
 # Arbeitsstand
 
-Stand: 2026-08-31 · Gate S bestanden, Phase 2a fertig
+Stand: 2026-08-31 · Gate S bestanden, Phase 2 fertig
 
 ## Fertig
 
@@ -83,13 +83,23 @@ Zusatzaufwand des Governors rund 0,1 bis 0,2 ms je Request. In einem Burst von
 `onetimer-reason: superseded` abgewiesen — die Frische-Semantik wirkt auf dem
 Draht, nicht nur im Simulator.
 
-## Als naechstes
+### Phase 2b — Shared-Memory-Referenz-Passthrough
 
-**Phase 2b — Shared-Memory-Referenz-Passthrough (WP14, ADR-0003).**
-Die Shm-Endpunkte werden bereits durchgereicht; was fehlt, ist die
-Lebenszyklusverwaltung der Regionen und der Nachweis, dass OneTimer die
-Payload dabei nie beruehrt. Ohne diesen Pfad misst jeder Datenebenen-Benchmark
-den Bootstrap-Transport statt das Produkt.
+- Shm-Registrierungen werden durchgereicht und **gebucht** (`ShmRegistry`).
+  Regionen werden bewusst nicht automatisch beim Verbindungsabbruch
+  freigegeben: gRPC kennt keine Sitzung, und eine Zuordnung ueber die
+  Gegenstelle waere bei mehreren Clients hinter einem Proxy falsch. Im Zweifel
+  wuerde OneTimer eine Region abmelden, die ein anderer noch benutzt — das
+  waere schlimmer als ein Leck.
+- Transportgrenzen auf beiden Seiten gleich gesetzt: 64 MiB
+  Nachrichtenobergrenze (tonics Default von 4 MiB lehnt einen gewoehnlichen
+  Kameraframe ab) und 4/8 MiB HTTP/2-Fenster.
+
+**Gemessen:** auf dem Copy-Pfad kostet ein 6,2-MB-Frame 11,7 ms Zusatzaufwand
+(89 %), als Shm-Referenz 160 us (2 %). Faktor 73. Details in
+`docs/benchmark/data-plane.md`.
+
+## Als naechstes
 
 **Phase 3 — Profiler, Online Estimator, Metrics.** Der Scheduler emittiert
 `Action::ObservedRuntime` samt Belegungsgrad; verarbeitet wird das noch nicht.

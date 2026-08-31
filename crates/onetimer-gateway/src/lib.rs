@@ -11,12 +11,15 @@
 //! * [`actor`] — der Single-Owner-Scheduler-Task.
 //! * [`service`] — der gRPC-Dienst; uebersetzt zwischen Draht und Kern.
 //! * [`outcome`] — die Uebersetzung terminaler Zustaende in gRPC-Antworten.
+//! * [`shm`] — Buchfuehrung ueber die durchgereichten Shared-Memory-Regionen.
 
 pub mod actor;
 pub mod clock;
 pub mod outcome;
 pub mod service;
+pub mod shm;
 
 pub use actor::{Handle, Msg};
 pub use clock::MonotonicClock;
 pub use service::GatewayService;
+pub use shm::{Region, ShmRegistry};

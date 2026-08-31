@@ -11,7 +11,8 @@
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects,
     clippy::integer_division,
-    clippy::manual_div_ceil
+    clippy::manual_div_ceil,
+    clippy::too_many_lines
 )]
 
 mod mock_backend;
@@ -21,6 +22,7 @@ use onetimer_gateway::{GatewayService, MonotonicClock, actor};
 use onetimer_protocol_oip::inference::grpc_inference_service_client::GrpcInferenceServiceClient;
 use onetimer_protocol_oip::inference::grpc_inference_service_server::GrpcInferenceServiceServer;
 use onetimer_protocol_oip::inference::infer_parameter::ParameterChoice;
+use onetimer_protocol_oip::inference::model_infer_request::InferInputTensor;
 use onetimer_protocol_oip::inference::{InferParameter, ModelInferRequest, ModelMetadataRequest};
 use onetimer_protocol_oip::params::{P_CLASS, P_DEADLINE_US, P_MAX_AGE_US};
 use std::collections::HashMap;
@@ -94,16 +96,94 @@ async fn start(
     tokio::spawn(async move {
         let stream = tokio_stream::wrappers::TcpListenerStream::new(listener);
         let _ = tonic::transport::Server::builder()
-            .add_service(GrpcInferenceServiceServer::new(service))
+            .initial_stream_window_size(onetimer_backend_triton::STREAM_WINDOW_BYTES)
+            .initial_connection_window_size(onetimer_backend_triton::CONNECTION_WINDOW_BYTES)
+            .add_service(
+                GrpcInferenceServiceServer::new(service)
+                    .max_decoding_message_size(onetimer_backend_triton::DEFAULT_MAX_MESSAGE_BYTES)
+                    .max_encoding_message_size(onetimer_backend_triton::DEFAULT_MAX_MESSAGE_BYTES),
+            )
             .serve_with_incoming(stream)
             .await;
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let client = GrpcInferenceServiceClient::connect(format!("http://{gateway_address}"))
+    let client = tuned_client(&gateway_address.to_string()).await;
+    (client, backend, backend_address)
+}
+
+/// Ein Client mit denselben Transportgrenzen wie der Governor.
+///
+/// Spec 19.1 verlangt, dass die Vergleichsseite nicht schlechter konfiguriert
+/// ist als die eigene. Ein Direktclient mit tonic-Voreinstellungen wuerde bei
+/// Tensornutzlasten kuenstlich langsam wirken.
+async fn tuned_client(address: &str) -> GrpcInferenceServiceClient<Channel> {
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+        .unwrap()
+        .initial_stream_window_size(onetimer_backend_triton::STREAM_WINDOW_BYTES)
+        .initial_connection_window_size(onetimer_backend_triton::CONNECTION_WINDOW_BYTES)
+        .tcp_nodelay(true)
+        .connect()
         .await
         .unwrap();
-    (client, backend, backend_address)
+    GrpcInferenceServiceClient::new(channel)
+        .max_decoding_message_size(onetimer_backend_triton::DEFAULT_MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(onetimer_backend_triton::DEFAULT_MAX_MESSAGE_BYTES)
+}
+
+/// Ein Request mit einer Nutzlast der angegebenen Groesse.
+///
+/// Bildet den gRPC-Copy-Pfad ab: die Tensordaten reisen im Request selbst.
+fn request_with_payload(model: &str, id: u64, bytes: usize) -> ModelInferRequest {
+    let mut r = request(model, id);
+    r.raw_input_contents = vec![vec![0_u8; bytes]];
+    r
+}
+
+/// Ein Request, der seine Nutzlast per Shared-Memory-Referenz uebergibt.
+///
+/// Der eigentliche Produktpfad (ADR-0003): im Request steht nur, **wo** die
+/// Daten liegen — Regionsname, Offset, Groesse. OneTimer reicht diese Angaben
+/// weiter und beruehrt die Tensordaten nie. Der Aufwand des Governors wird
+/// damit unabhaengig von der Tensorgroesse.
+fn request_with_shm_reference(
+    model: &str,
+    id: u64,
+    region: &str,
+    bytes: usize,
+) -> ModelInferRequest {
+    let mut r = request(model, id);
+    let mut parameters = HashMap::new();
+    parameters.insert(
+        "shared_memory_region".to_owned(),
+        InferParameter {
+            parameter_choice: Some(ParameterChoice::StringParam(region.to_owned())),
+        },
+    );
+    parameters.insert(
+        "shared_memory_byte_size".to_owned(),
+        InferParameter {
+            parameter_choice: Some(ParameterChoice::Int64Param(
+                i64::try_from(bytes).unwrap_or(i64::MAX),
+            )),
+        },
+    );
+    parameters.insert(
+        "shared_memory_offset".to_owned(),
+        InferParameter {
+            parameter_choice: Some(ParameterChoice::Int64Param(0)),
+        },
+    );
+    r.inputs = vec![InferInputTensor {
+        name: "input".to_owned(),
+        datatype: "UINT8".to_owned(),
+        shape: vec![1, 1080, 1920, 3],
+        parameters,
+        contents: None,
+    }];
+    // Entscheidend: keine Rohdaten im Request.
+    r.raw_input_contents = Vec::new();
+    r
 }
 
 fn request(model: &str, id: u64) -> ModelInferRequest {
@@ -363,4 +443,137 @@ async fn report_proxy_overhead_on_the_grpc_copy_path() {
         );
     }
     println!();
+}
+
+/// Misst, was der Governor auf dem gRPC-Copy-Pfad bei **echten Tensorgroessen**
+/// kostet.
+///
+/// Das ist die Zahl, die ADR-0003 zum Kill-Kriterium erklaert: ein
+/// 1920x1080x3-uint8-Frame sind 6,2 MB, und auf dem Copy-Pfad durchlaeuft die
+/// Nutzlast pro Hop eine Deserialisierung und eine Reserialisierung. Der
+/// Aufwand ist damit eine Eigenschaft des Transports, nicht des Schedulings —
+/// und genau deshalb wird er getrennt ausgewiesen (Spec 4.4).
+#[tokio::test(flavor = "multi_thread")]
+async fn report_data_plane_overhead_by_payload_size() {
+    println!("\n  Nutzlast   | direkt      | ueber OneTimer | Zusatz       | relativ");
+    println!("  -----------|-------------|----------------|--------------|--------");
+
+    // 224x224x3 (Klassifikation), 640x640x3 (YOLO), 1920x1080x3 (Vollbild).
+    for (label, bytes) in [
+        ("150 KB", 224 * 224 * 3_usize),
+        ("1,2 MB", 640 * 640 * 3),
+        ("6,2 MB", 1920 * 1080 * 3),
+    ] {
+        let (mut via_gateway, _, backend_address) =
+            start(Duration::from_millis(5), 5_000, 7_000, 60_000).await;
+        let mut direct = tuned_client(&backend_address.to_string()).await;
+
+        let rounds = 40_u32;
+        for _ in 0..10 {
+            let _ = direct
+                .model_infer(request_with_payload("detector_large", 0, bytes))
+                .await;
+            let _ = via_gateway
+                .model_infer(request_with_payload("detector", 0, bytes))
+                .await;
+        }
+
+        let t0 = Instant::now();
+        for id in 0..rounds {
+            direct
+                .model_infer(request_with_payload("detector_large", u64::from(id), bytes))
+                .await
+                .unwrap();
+        }
+        let direct_us = t0.elapsed().as_micros() / u128::from(rounds);
+
+        let t1 = Instant::now();
+        for id in 0..rounds {
+            via_gateway
+                .model_infer(request_with_payload("detector", u64::from(id), bytes))
+                .await
+                .unwrap();
+        }
+        let proxied_us = t1.elapsed().as_micros() / u128::from(rounds);
+
+        let overhead = proxied_us.saturating_sub(direct_us);
+        let relative = overhead
+            .saturating_mul(100)
+            .checked_div(direct_us)
+            .unwrap_or(0);
+        println!(
+            "  {label:>10} | {direct_us:>6} us/R | {proxied_us:>9} us/R | \
+{overhead:>7} us/R | {relative:>4} %"
+        );
+    }
+    // Zum Vergleich derselbe nominale Tensor, aber als Shm-Referenz.
+    let (mut via_gateway, backend, backend_address) =
+        start(Duration::from_millis(5), 5_000, 7_000, 60_000).await;
+    let mut direct = tuned_client(&backend_address.to_string()).await;
+    let bytes = 1920 * 1080 * 3_usize;
+
+    for _ in 0..10 {
+        let _ = direct
+            .model_infer(request_with_shm_reference(
+                "detector_large",
+                0,
+                "frames",
+                bytes,
+            ))
+            .await;
+        let _ = via_gateway
+            .model_infer(request_with_shm_reference("detector", 0, "frames", bytes))
+            .await;
+    }
+
+    let rounds = 40_u32;
+    let t0 = Instant::now();
+    for id in 0..rounds {
+        direct
+            .model_infer(request_with_shm_reference(
+                "detector_large",
+                u64::from(id),
+                "frames",
+                bytes,
+            ))
+            .await
+            .unwrap();
+    }
+    let direct_us = t0.elapsed().as_micros() / u128::from(rounds);
+
+    let t1 = Instant::now();
+    for id in 0..rounds {
+        via_gateway
+            .model_infer(request_with_shm_reference(
+                "detector",
+                u64::from(id),
+                "frames",
+                bytes,
+            ))
+            .await
+            .unwrap();
+    }
+    let proxied_us = t1.elapsed().as_micros() / u128::from(rounds);
+    let overhead = proxied_us.saturating_sub(direct_us);
+    let relative = overhead
+        .saturating_mul(100)
+        .checked_div(direct_us)
+        .unwrap_or(0);
+    println!(
+        "  6,2 MB shm | {direct_us:>6} us/R | {proxied_us:>9} us/R | \
+{overhead:>7} us/R | {relative:>4} %"
+    );
+
+    // Der Nachweis, dass die Referenz wirklich durchgereicht wurde und nicht
+    // etwa aufgeloest: das Backend hat Rohdaten nie gesehen.
+    assert_eq!(
+        backend.raw_bytes_seen.load(Ordering::Relaxed),
+        0,
+        "auf dem Shm-Pfad duerfen keine Rohdaten uebertragen werden"
+    );
+
+    println!(
+        "\n  Auf dem Copy-Pfad waechst der Anteil mit der Nutzlast; auf dem\n  \
+         Shm-Pfad bleibt er flach. Genau das ist die Aussage von ADR-0003."
+    );
 }

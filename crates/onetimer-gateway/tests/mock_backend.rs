@@ -35,6 +35,11 @@ pub struct MockBackend {
     pub served: AtomicU64,
     /// Namen der Modelle, die tatsaechlich angefragt wurden.
     pub seen_models: std::sync::Mutex<Vec<String>>,
+    /// Summe der Rohdatenbytes, die tatsaechlich uebertragen wurden.
+    ///
+    /// Auf dem Shm-Pfad muss dieser Zaehler null bleiben: der Request traegt
+    /// dann nur eine Referenz.
+    pub raw_bytes_seen: AtomicU64,
 }
 
 impl MockBackend {
@@ -44,6 +49,7 @@ impl MockBackend {
             compute,
             served: AtomicU64::new(0),
             seen_models: std::sync::Mutex::new(Vec::new()),
+            raw_bytes_seen: AtomicU64::new(0),
         }
     }
 }
@@ -55,8 +61,16 @@ pub async fn start(backend: Arc<MockBackend>) -> SocketAddr {
     let service = Service { inner: backend };
     tokio::spawn(async move {
         let stream = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        // Dieselben Transportgrenzen wie im Gateway. Ein Backend mit engeren
+        // Grenzen wuerde den Vergleich zugunsten des Proxys verfaelschen.
         let _ = tonic::transport::Server::builder()
-            .add_service(GrpcInferenceServiceServer::new(service))
+            .initial_stream_window_size(onetimer_backend_triton::STREAM_WINDOW_BYTES)
+            .initial_connection_window_size(onetimer_backend_triton::CONNECTION_WINDOW_BYTES)
+            .add_service(
+                GrpcInferenceServiceServer::new(service)
+                    .max_decoding_message_size(onetimer_backend_triton::DEFAULT_MAX_MESSAGE_BYTES)
+                    .max_encoding_message_size(onetimer_backend_triton::DEFAULT_MAX_MESSAGE_BYTES),
+            )
             .serve_with_incoming(stream)
             .await;
     });

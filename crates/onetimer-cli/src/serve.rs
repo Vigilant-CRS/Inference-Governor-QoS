@@ -2,7 +2,9 @@
 
 #![allow(clippy::print_stdout)]
 
-use onetimer_backend_triton::TritonClient;
+use onetimer_backend_triton::{
+    CONNECTION_WINDOW_BYTES, DEFAULT_MAX_MESSAGE_BYTES, STREAM_WINDOW_BYTES, TritonClient,
+};
 use onetimer_config::Config;
 use onetimer_gateway::{GatewayService, MonotonicClock, actor};
 use onetimer_protocol_oip::inference::grpc_inference_service_server::GrpcInferenceServiceServer;
@@ -45,8 +47,18 @@ pub(crate) async fn run(path: &Path, listen: &str) -> Result<ExitCode, Box<dyn s
         "OneTimer laeuft"
     );
 
+    // Dieselben Transportgrenzen wie zum Backend. tonics Voreinstellungen sind
+    // fuer Steuernachrichten gedacht: 4 MiB Nachrichtengrenze lehnt einen
+    // gewoehnlichen Kameraframe ab, und das 64-KiB-HTTP/2-Fenster zwingt bei
+    // Tensornutzlasten zu einer Kette von WINDOW_UPDATE-Runden.
     Server::builder()
-        .add_service(GrpcInferenceServiceServer::new(service))
+        .initial_stream_window_size(STREAM_WINDOW_BYTES)
+        .initial_connection_window_size(CONNECTION_WINDOW_BYTES)
+        .add_service(
+            GrpcInferenceServiceServer::new(service)
+                .max_decoding_message_size(DEFAULT_MAX_MESSAGE_BYTES)
+                .max_encoding_message_size(DEFAULT_MAX_MESSAGE_BYTES),
+        )
         .serve_with_shutdown(address, async {
             let _ = tokio::signal::ctrl_c().await;
             tracing::info!("Abbruchsignal empfangen, fahre herunter");

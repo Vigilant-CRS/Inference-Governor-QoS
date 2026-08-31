@@ -30,7 +30,7 @@ kein Gateway und keine Triton-Anbindung.
 | 1 | Queue-Policies, Deadline/Slack, Slot-Look-ahead, Varianten, Ueberlast-FSM | **fertig** |
 | 1b | Simulierte Kernvergleiche — **Gate S** | **bestanden** |
 | 2a | OIP-Gateway, Triton-Adapter, Konfiguration, CLI | **fertig** |
-| 2b | Shared-Memory-Referenz-Passthrough | offen |
+| 2b | Shared-Memory-Referenz-Passthrough | **fertig** |
 | 3 | Profiler, Online Estimator, Metrics | offen |
 | 4 | Benchmark-Harness, getunte Triton-Baseline — **Gate M3** | offen |
 
@@ -63,11 +63,25 @@ Gegen ein echtes gRPC-Backend, Release-Build, leere Tensoren:
 | 5 ms | 6249 µs/Req | 6329 µs/Req | +80 µs |
 | 20 ms | 21227 µs/Req | 21435 µs/Req | +208 µs |
 
-Rund 0,1 bis 0,2 ms je Request. **Das ist die Steuerebene, nicht der
-Datenpfad**: die Tensoren sind in dieser Messung leer. Die Kopierkosten eines
-6-MB-Frames auf dem gRPC-Pfad sind darin nicht enthalten — genau deshalb ist
-der Shared-Memory-Referenz-Passthrough nach ADR-0003 der eigentliche
-Produktpfad, und genau deshalb weist der Benchmark beides getrennt aus.
+Rund 0,1 bis 0,2 ms je Request — das ist die Steuerebene.
+
+### Der Datenpfad entscheidet
+
+Mit echten Tensorgrößen, beide Seiten gleich getunt:
+
+| Nutzlast | direkt | über OneTimer | Zusatz |
+|---|---:|---:|---:|
+| 150 KB | 8130 µs | 8368 µs | +238 µs (2 %) |
+| 1,2 MB | 9592 µs | 12151 µs | +2559 µs (26 %) |
+| 6,2 MB | 13126 µs | 24818 µs | +11692 µs (**89 %**) |
+| **6,2 MB als Shm-Referenz** | 6229 µs | 6389 µs | **+160 µs (2 %)** |
+
+Der gRPC-Copy-Pfad ist für Kameraframes unbrauchbar — der Proxy verdoppelt die
+Übertragungszeit. Der Shm-Referenz-Pfad kostet stattdessen 160 µs bei
+demselben Tensor, **unabhängig von seiner Größe**: im Request steht nur, wo die
+Daten liegen, und OneTimer berührt sie nie. Faktor 73.
+
+Details und Methodik: [`docs/benchmark/data-plane.md`](docs/benchmark/data-plane.md).
 
 > **Es liegen keine Messwerte gegen echte Hardware vor.** Alle Zahlen in der
 > Spezifikation sind Zielwerte, Rechenbeispiele oder Validierungsschwellen. Die

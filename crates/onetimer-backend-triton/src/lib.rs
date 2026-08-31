@@ -21,5 +21,8 @@
 pub mod client;
 pub mod error;
 
-pub use client::{TritonClient, TritonHealth};
+pub use client::{
+    CONNECTION_WINDOW_BYTES, DEFAULT_MAX_MESSAGE_BYTES, STREAM_WINDOW_BYTES, TritonClient,
+    TritonHealth,
+};
 pub use error::BackendError;
