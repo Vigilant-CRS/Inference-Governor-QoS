@@ -212,6 +212,45 @@ impl Resolved {
             .map(ModelIdx)
     }
 
+    /// Die geschuetzte serialisierte Auslastung in Promille (Spec 10.9).
+    ///
+    /// `U = Summe(C_i / T_i)` ueber alle geschuetzten Modelle, geteilt durch die
+    /// Slotzahl. `C_i` ist die **konservative** Planungslaufzeit, also
+    /// `p99 * Sicherheitsmarge` — genau der Wert, mit dem der Scheduler
+    /// tatsaechlich plant.
+    ///
+    /// Keine vollstaendige Schedulability-Garantie: bei realer Nebenlaeufigkeit
+    /// und nicht-praeemptiven Abschnitten waere das falsch. Aber ein Wert ueber
+    /// 1000 bedeutet, dass die geschuetzten Vertraege allein die Kapazitaet
+    /// uebersteigen — dann bleibt fuer Best-Effort-Arbeit strukturell nichts
+    /// uebrig, und der Look-ahead wird jeden Start verhindern.
+    ///
+    /// Diese Rechnung gehoert hierher und nicht nur ins CLI: wer eine
+    /// Konfiguration programmatisch aufloest, braucht dieselbe Warnung.
+    #[must_use]
+    pub fn protected_utilization_permille(&self) -> u64 {
+        let mut total = 0_u64;
+        for contract in self.contracts.iter() {
+            if !contract.criticality.is_guarded() {
+                continue;
+            }
+            let (Some(period), Some(best)) = (contract.period, contract.variants.get(0)) else {
+                continue;
+            };
+            let Ok(runtime) = best.profile.conservative_at(0, self.margin) else {
+                continue;
+            };
+            let share = runtime
+                .as_nanos()
+                .saturating_mul(1_000)
+                .checked_div(period.as_nanos().max(1))
+                .unwrap_or(0);
+            total = total.saturating_add(share);
+        }
+        let slots = u64::try_from(self.slots.len()).unwrap_or(1).max(1);
+        total.checked_div(slots).unwrap_or(0)
+    }
+
     /// Den Backend-Modellnamen einer Variante nachschlagen.
     #[must_use]
     pub fn backend_model(&self, model: ModelIdx, variant: usize) -> Option<&str> {

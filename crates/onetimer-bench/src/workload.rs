@@ -1,0 +1,258 @@
+//! Der Lasttreiber: Kameras, die unabhaengig vom Systemzustand weiter liefern.
+//!
+//! Der Punkt der Uebung ist, dass ein Sensor **nicht** langsamer wird, wenn das
+//! System ueberlastet ist. Ein Treiber, der auf die Antwort wartet, bevor er
+//! den naechsten Frame schickt, wuerde das Problem wegdefinieren, um das es
+//! geht — und beiden Seiten einen Vorteil verschaffen, den es real nicht gibt.
+//!
+//! Beide Vergleichslaeufe bekommen denselben Treiber, dieselben Perioden,
+//! dieselbe Obergrenze offener Requests und dieselben Frame-Nummern. Der
+//! einzige Unterschied ist, wohin die Requests gehen.
+
+use onetimer_protocol_oip::inference::grpc_inference_service_client::GrpcInferenceServiceClient;
+use onetimer_protocol_oip::inference::infer_parameter::ParameterChoice;
+use onetimer_protocol_oip::inference::{InferParameter, ModelInferRequest};
+use onetimer_protocol_oip::params::P_AGE_US;
+use onetimer_sim::coverage::{Coverage, CoverageTracker};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
+use tonic::transport::Channel;
+
+/// Ein Sensorstrom im Lastmodell.
+#[derive(Debug, Clone, Copy)]
+pub struct StreamDef {
+    /// Name im Report.
+    pub name: &'static str,
+    /// Modellname, den der Client anfragt.
+    ///
+    /// Ueber den Governor ist das der logische Name, direkt der physische.
+    pub model: &'static str,
+    /// Periode zwischen zwei Frames.
+    pub period: Duration,
+    /// Fachliches Hoechstalter fuer die Coverage-Bewertung.
+    pub max_age: Duration,
+    /// Obergrenze gleichzeitig offener Requests dieses Stroms.
+    ///
+    /// Bildet einen Client mit endlichem Puffer ab. Ohne Grenze wuerde der
+    /// Treiber selbst unbegrenzt Speicher belegen und damit etwas anderes
+    /// messen als das System.
+    pub in_flight_cap: usize,
+}
+
+/// Das Ergebnis eines Stroms.
+#[derive(Debug, Clone)]
+pub struct StreamReport {
+    /// Name des Stroms.
+    pub name: &'static str,
+    /// Vom Sensor erzeugte Frames.
+    pub emitted: u64,
+    /// Tatsaechlich gesendete Requests.
+    pub sent: u64,
+    /// Frames, die der Client wegen seiner eigenen Grenze nicht senden konnte.
+    pub client_dropped: u64,
+    /// Beantwortete Requests.
+    pub delivered: u64,
+    /// Vom System abgewiesene Requests.
+    pub rejected: u64,
+    /// Abdeckung und Age of Information.
+    pub coverage: Coverage,
+}
+
+struct StreamState {
+    tracker: Mutex<CoverageTracker>,
+    emitted: AtomicU64,
+    sent: AtomicU64,
+    client_dropped: AtomicU64,
+    delivered: AtomicU64,
+    rejected: AtomicU64,
+    permits: Arc<Semaphore>,
+}
+
+/// Faehrt den Lauf und gibt je Strom einen Bericht zurueck.
+///
+/// `via_governor` steuert nur, ob der Client die OneTimer-Altersangabe
+/// mitschickt; das Ziel bestimmt der Aufrufer ueber `endpoint`.
+///
+/// # Panics
+///
+/// Wenn keine Verbindung zum Ziel aufgebaut werden kann.
+pub async fn drive(
+    endpoint: &str,
+    streams: &[StreamDef],
+    duration: Duration,
+    via_governor: bool,
+) -> Vec<StreamReport> {
+    let origin = Instant::now();
+    let core_duration = onetimer_core::Duration::from_nanos_unbounded(
+        u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX),
+    );
+
+    let mut states = Vec::new();
+    for stream in streams {
+        states.push(Arc::new(StreamState {
+            tracker: Mutex::new(CoverageTracker::new(
+                to_core(stream.period),
+                to_core(stream.max_age),
+                onetimer_core::Instant::ZERO,
+                core_duration,
+            )),
+            emitted: AtomicU64::new(0),
+            sent: AtomicU64::new(0),
+            client_dropped: AtomicU64::new(0),
+            delivered: AtomicU64::new(0),
+            rejected: AtomicU64::new(0),
+            permits: Arc::new(Semaphore::new(stream.in_flight_cap)),
+        }));
+    }
+
+    let mut tasks = Vec::new();
+    for (index, stream) in streams.iter().enumerate() {
+        let Some(state) = states.get(index).cloned() else {
+            continue;
+        };
+        let stream = *stream;
+        let client = connect(endpoint).await;
+        tasks.push(tokio::spawn(async move {
+            run_stream(client, stream, state, origin, duration, via_governor).await;
+        }));
+    }
+    for task in tasks {
+        let _ = task.await;
+    }
+
+    streams
+        .iter()
+        .zip(states.iter())
+        .map(|(stream, state)| StreamReport {
+            name: stream.name,
+            emitted: state.emitted.load(Ordering::Relaxed),
+            sent: state.sent.load(Ordering::Relaxed),
+            client_dropped: state.client_dropped.load(Ordering::Relaxed),
+            delivered: state.delivered.load(Ordering::Relaxed),
+            rejected: state.rejected.load(Ordering::Relaxed),
+            coverage: state.tracker.lock().map_or(
+                Coverage {
+                    covered: 0,
+                    total: 0,
+                    aoi_p50_ns: 0,
+                    aoi_p95_ns: 0,
+                    aoi_p99_ns: 0,
+                    delivered: 0,
+                },
+                |tracker| tracker.finish(),
+            ),
+        })
+        .collect()
+}
+
+async fn run_stream(
+    client: GrpcInferenceServiceClient<Channel>,
+    stream: StreamDef,
+    state: Arc<StreamState>,
+    origin: Instant,
+    duration: Duration,
+    via_governor: bool,
+) {
+    let mut ticker = tokio::time::interval(stream.period);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut frame = 0_u64;
+
+    loop {
+        ticker.tick().await;
+        let capture = Instant::now();
+        if capture.duration_since(origin) >= duration {
+            break;
+        }
+        frame = frame.saturating_add(1);
+        state.emitted.fetch_add(1, Ordering::Relaxed);
+
+        // Der Client hat einen endlichen Puffer. Ist er voll, geht der Frame
+        // verloren - in beiden Laeufen gleichermassen.
+        let Ok(permit) = Arc::clone(&state.permits).try_acquire_owned() else {
+            state.client_dropped.fetch_add(1, Ordering::Relaxed);
+            continue;
+        };
+
+        let mut client = client.clone();
+        let state = Arc::clone(&state);
+        let id = format!("{}:{frame}", stream.name);
+        tokio::spawn(async move {
+            let _permit = permit;
+            let age = capture.elapsed();
+            let request = build_request(stream.model, &id, via_governor, age);
+            state.sent.fetch_add(1, Ordering::Relaxed);
+
+            match client.model_infer(request).await {
+                Ok(_) => {
+                    state.delivered.fetch_add(1, Ordering::Relaxed);
+                    let completion = Instant::now().duration_since(origin);
+                    let generation = capture.duration_since(origin);
+                    if let Ok(mut tracker) = state.tracker.lock() {
+                        tracker.record_delivery(
+                            onetimer_core::Instant::from_nanos(
+                                u64::try_from(completion.as_nanos()).unwrap_or(u64::MAX),
+                            ),
+                            onetimer_core::Instant::from_nanos(
+                                u64::try_from(generation.as_nanos()).unwrap_or(u64::MAX),
+                            ),
+                        );
+                    }
+                }
+                Err(_) => {
+                    state.rejected.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        });
+    }
+}
+
+fn build_request(model: &str, id: &str, via_governor: bool, age: Duration) -> ModelInferRequest {
+    let mut parameters = HashMap::new();
+    if via_governor {
+        // ADR-0011: der hosttopologieunabhaengige Weg. Der Client sagt, wie alt
+        // das Sensordatum beim Senden war.
+        parameters.insert(
+            P_AGE_US.to_owned(),
+            InferParameter {
+                parameter_choice: Some(ParameterChoice::Int64Param(
+                    i64::try_from(age.as_micros()).unwrap_or(i64::MAX),
+                )),
+            },
+        );
+    }
+    ModelInferRequest {
+        model_name: model.to_owned(),
+        model_version: String::new(),
+        id: id.to_owned(),
+        parameters,
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        raw_input_contents: Vec::new(),
+    }
+}
+
+fn to_core(d: Duration) -> onetimer_core::Duration {
+    onetimer_core::Duration::from_nanos_unbounded(u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+}
+
+/// Baut eine Clientverbindung mit denselben Transportgrenzen wie der Governor.
+///
+/// # Panics
+///
+/// Wenn keine Verbindung aufgebaut werden kann.
+pub async fn connect(endpoint: &str) -> GrpcInferenceServiceClient<Channel> {
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://{endpoint}"))
+        .expect("gueltiger Endpunkt")
+        .initial_stream_window_size(onetimer_backend_triton::STREAM_WINDOW_BYTES)
+        .initial_connection_window_size(onetimer_backend_triton::CONNECTION_WINDOW_BYTES)
+        .tcp_nodelay(true)
+        .connect()
+        .await
+        .expect("Verbindung zum Ziel");
+    GrpcInferenceServiceClient::new(channel)
+        .max_decoding_message_size(onetimer_backend_triton::DEFAULT_MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(onetimer_backend_triton::DEFAULT_MAX_MESSAGE_BYTES)
+}

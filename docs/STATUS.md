@@ -1,6 +1,6 @@
 # Arbeitsstand
 
-Stand: 2026-08-31 · Gate S bestanden, Phase 2 fertig
+Stand: 2026-08-31 · Gate S bestanden, Phasen 0-2 fertig, Phase 3 begonnen
 
 ## Fertig
 
@@ -98,6 +98,39 @@ Draht, nicht nur im Simulator.
 **Gemessen:** auf dem Copy-Pfad kostet ein 6,2-MB-Frame 11,7 ms Zusatzaufwand
 (89 %), als Shm-Referenz 160 us (2 %). Faktor 73. Details in
 `docs/benchmark/data-plane.md`.
+
+### Phase 3 — Online Runtime Estimator (WP11)
+
+- `estimator` — gleitendes Fenster beobachteter Laufzeiten je Modell, Variante
+  und **Slot-Belegungsgrad**. Der Belegungsgrad ist der Ersatz fuer die
+  Interferenzmatrix (ADR-0006): dieselbe Variante wird unter Nebenlast
+  langsamer, und genau das wird gemessen statt modelliert.
+- Planungsregel `max(offline_p99, online_p95) * Marge` (Spec 13.2). Der
+  Schaetzer darf die Planung **verschaerfen, aber nie optimistischer machen**
+  als das Profil — wer sein Profil unterbieten will, misst es neu.
+- `MarginController` je Modell: nach einer Vertragsverletzung schnell straffen
+  (+10 Prozentpunkte), in ruhigen Phasen langsam entspannen (-1), harte
+  Grenzen. Dieselbe Asymmetrie wie bei der Variantenhysterese.
+- `ProfileHealth` als Circuit Breaker (Spec 30.3): liegt die Wirklichkeit
+  dauerhaft ueber dem Doppelten des Profil-p99, ist nicht die Marge zu klein,
+  sondern das Profil falsch — dann hilft eine Meldung und keine groessere Marge.
+- Quantile werden auf der **Schreibseite** berechnet. Gelesen wird bei jeder
+  Planungsentscheidung, geschrieben nur bei jeder Fertigstellung; das Sortieren
+  gehoert deshalb dorthin, wo es seltener passiert (Spec 8.1).
+
+Offen in Phase 3: Profiler-CLI (WP10) und Prometheus-Export (WP13).
+
+### Wire-Benchmark
+
+`crates/onetimer-bench` faehrt denselben Workload zweimal durch den echten
+Stack — einmal direkt zum Backend, einmal ueber OneTimer. Gleiche Frames,
+gleiche Laufzeiten, gleiche Kapazitaet, gleicher Client. Die Baseline wird mit
+mehreren Puffertiefen gefahren; je Strom zaehlt ihr bestes Ergebnis.
+
+Daraus entstand ADR-0012: ein nicht unterbrechbarer Best-Effort-Job, der
+laenger dauert als die kuerzeste geschuetzte Periode, startet unter Last nie —
+unabhaengig von der Auslastung. Das betrifft genau das Szenario, mit dem
+Spec 1.3 das Produkt begruendet.
 
 ## Als naechstes
 

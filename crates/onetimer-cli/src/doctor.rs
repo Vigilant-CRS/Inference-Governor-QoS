@@ -80,6 +80,7 @@ pub(crate) async fn run(
 
     verdict = verdict.max(check_contracts(&resolved));
     verdict = verdict.max(check_utilization(&resolved));
+    verdict = verdict.max(check_best_effort_feasibility(&resolved));
     verdict = verdict.max(check_backend(&resolved, offline).await);
 
     println!("\nRESULT {}", verdict.label());
@@ -139,44 +140,78 @@ fn check_contracts(resolved: &Resolved) -> Verdict {
     verdict
 }
 
+/// Warnt vor Best-Effort-Modellen, die unter Last strukturell nie starten.
+///
+/// ADR-0012: ein nicht unterbrechbarer Job, der laenger dauert als die kuerzeste
+/// geschuetzte Periode, gefaehrdet immer die naechste geschuetzte Ankunft — der
+/// Look-ahead verschiebt ihn dann bei jeder Gelegenheit. Das ist zur
+/// Konfigurationszeit ausrechenbar, und der Nutzer soll es hier erfahren und
+/// nicht nach zwei Wochen aus einer leeren Metrik.
+fn check_best_effort_feasibility(resolved: &Resolved) -> Verdict {
+    let shortest_guarded = resolved
+        .contracts
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.criticality.is_guarded())
+        .filter_map(|(i, c)| c.period.map(|p| (i, p)))
+        .min_by_key(|(_, p)| p.as_nanos());
+
+    let Some((guarded_index, guarded_period)) = shortest_guarded else {
+        return Verdict::Ready;
+    };
+    let guarded_name = resolved
+        .model_names
+        .get(guarded_index)
+        .map_or("?", String::as_str);
+
+    let mut verdict = Verdict::Ready;
+    let slots = resolved.slots.len();
+    for (i, contract) in resolved.contracts.iter().enumerate() {
+        if contract.criticality.is_guarded() {
+            continue;
+        }
+        let name = resolved.model_names.get(i).map_or("?", String::as_str);
+        let Some(fastest) = contract.variants.iter().last() else {
+            continue;
+        };
+        let Ok(runtime) = fastest.profile.conservative_at(0, resolved.margin) else {
+            continue;
+        };
+        if slots <= 1 && runtime.as_nanos() > guarded_period.as_nanos() {
+            warn(&format!(
+                "{name}: konservative Laufzeit {runtime} uebersteigt die kuerzeste \
+                 geschuetzte Periode {guarded_period} ({guarded_name}). Auf einem Slot \
+                 wird das Modell unter Last nie starten. Abhilfe: mehr Slots, kuerzere \
+                 Quanten oder eine hoehere Klasse."
+            ));
+            verdict = verdict.max(Verdict::ReadyWithWarnings);
+        }
+    }
+    verdict
+}
+
 /// Die einfache Demand-Warnung aus Spec 10.9: `U = Summe(C_i / T_i)`.
 ///
 /// Keine vollstaendige Schedulability-Garantie — bei realer GPU-Konkurrenz und
 /// nicht-praeemptiven Abschnitten waere das falsch. Aber sehr nuetzlich, um
 /// offensichtlich unmoegliche Vertraege vor dem Start zu erkennen.
 fn check_utilization(resolved: &Resolved) -> Verdict {
-    let mut protected_permille = 0_u64;
-
-    for contract in resolved.contracts.iter() {
-        if !contract.criticality.is_guarded() {
-            continue;
-        }
-        let (Some(period), Some(best)) = (contract.period, contract.variants.get(0)) else {
-            continue;
-        };
-        let Ok(runtime) = best.profile.conservative_at(0, resolved.margin) else {
-            continue;
-        };
-        let share = runtime
-            .as_nanos()
-            .saturating_mul(1_000)
-            .checked_div(period.as_nanos().max(1))
-            .unwrap_or(0);
-        protected_permille = protected_permille.saturating_add(share);
-    }
-
-    let slots = u64::try_from(resolved.slots.len()).unwrap_or(1).max(1);
-    let utilization = protected_permille.checked_div(slots).unwrap_or(0);
+    let utilization = resolved.protected_utilization_permille();
     let percent = utilization.checked_div(10).unwrap_or(0);
+    let slots = resolved.slots.len();
 
     if utilization > 1_000 {
         fail(&format!(
             "PROTECTED_WORKLOAD_UNSCHEDULABLE: geschuetzte Auslastung {percent} %, \
-             ueber {slots} Slot(s) nicht tragbar"
+             ueber {slots} Slot(s) nicht tragbar. Best-Effort-Arbeit kommt damit \
+             strukturell nie zum Zug."
         ));
         Verdict::NotReady
     } else if utilization > 800 {
-        warn(&format!("geschuetzte serialisierte Auslastung {percent} %"));
+        warn(&format!(
+            "geschuetzte serialisierte Auslastung {percent} %; fuer Best-Effort \
+             bleibt kaum Reserve"
+        ));
         Verdict::ReadyWithWarnings
     } else {
         ok(&format!("geschuetzte serialisierte Auslastung {percent} %"));

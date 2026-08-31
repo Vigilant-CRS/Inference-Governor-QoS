@@ -102,6 +102,7 @@ struct Backend {
     pending: Vec<(Instant, RequestId, onetimer_core::SlotIdx)>,
     dispatched: Vec<RequestId>,
     terminated: Vec<(RequestId, RequestState)>,
+    observed: Vec<u64>,
 }
 
 impl Backend {
@@ -119,7 +120,10 @@ impl Backend {
                     self.pending.push((finish, request, slot));
                 }
                 Action::Terminate { request, state } => self.terminated.push((request, state)),
-                Action::ObservedRuntime { .. } | Action::WakeAt(_) => {}
+                Action::ObservedRuntime { runtime, .. } => {
+                    self.observed.push(runtime.as_millis());
+                }
+                Action::WakeAt(_) => {}
             }
         }
     }
@@ -199,6 +203,15 @@ fn latest_policy_prevents_backlog_under_sustained_overload() {
     });
 
     let m = scheduler.metrics();
+    // Die beobachtete Laufzeit muss der geplanten entsprechen. Weicht sie ab,
+    // stimmt die Prognose nicht mit dem ueberein, was tatsaechlich passiert —
+    // und der Online-Schaetzer wuerde eine Rueckkopplung aufbauen, die niemand
+    // beabsichtigt hat.
+    assert!(
+        backend.observed.iter().all(|ms| *ms == 50),
+        "geplante 50 ms, beobachtet {:?}",
+        backend.observed.iter().take(8).collect::<Vec<_>>()
+    );
     assert!(m.received >= 60, "rund 60 Frames in 2 s");
     assert!(
         m.forwarded >= 30,
@@ -362,4 +375,50 @@ fn g008_overload_stays_bounded_and_every_request_terminates() {
         "{still_open} Requests ohne terminalen Zustand; nur laufende duerfen offen sein"
     );
     assert!(m.received > 140, "rund 150 Frames in 3 s");
+}
+
+/// Der Belegungsgrad, unter dem gemessen wird, muss derselbe sein, mit dem
+/// geplant wurde.
+///
+/// Wird er **nach** dem eigenen Dispatch erfasst, ist er um eins zu hoch: die
+/// Planung fragt Zelle 0 („laeuft allein"), die Beobachtung landet in Zelle 1.
+/// Der Schaetzer waere damit vorhanden, aber wirkungslos — ein Fehler, der
+/// keine Meldung erzeugt und nur an ausbleibender Wirkung zu erkennen waere.
+#[test]
+fn observations_land_in_the_cell_that_planning_reads() {
+    let detector = contract(
+        Criticality::Protected,
+        QueuePolicy::Latest,
+        Some(50),
+        200,
+        400,
+        &[20],
+    );
+    let mut scheduler = build(vec![detector.clone()], 1);
+    let mut backend = Backend::default();
+
+    let mut next_id = 0_u64;
+    run(&mut scheduler, &mut backend, 600, |t| {
+        if t % 50 == 0 {
+            next_id = next_id.saturating_add(1);
+            vec![frame(next_id, 0, t, &detector)]
+        } else {
+            Vec::new()
+        }
+    });
+
+    let alone = scheduler
+        .estimator()
+        .observations(ModelIdx(0), onetimer_core::VariantIdx(0), 0);
+    let beside_one =
+        scheduler
+            .estimator()
+            .observations(ModelIdx(0), onetimer_core::VariantIdx(0), 1);
+
+    assert!(
+        alone > 0,
+        "bei einem einzigen Modell auf einem Slot laeuft jede Inferenz allein; \
+         Zelle 0 haette {alone} Beobachtungen, Zelle 1 hat {beside_one}"
+    );
+    assert_eq!(beside_one, 0, "es lief nie etwas parallel");
 }

@@ -41,6 +41,12 @@ pub struct Metrics {
     pub total_compute_nanos: u64,
     /// Wie oft welche Variante gewaehlt wurde.
     pub variant_selected: [u64; MAX_VARIANTS],
+    /// Best-Effort-Requests, die terminal wurden, ohne je gelaufen zu sein.
+    ///
+    /// ADR-0012: Aushungerung ist ein Befund, kein Nebeneffekt. Ohne diesen
+    /// Zaehler waere eine nie ausgefuehrte Hintergrundlast nur an ausbleibenden
+    /// Antworten zu erkennen — also praktisch gar nicht.
+    pub best_effort_starved: u64,
     /// Requests, die bewusst trotz verfehlbarer Deadline gestartet wurden.
     ///
     /// Nach ADR-0009 ist eine verspaetete, aber frische Inferenz besser als

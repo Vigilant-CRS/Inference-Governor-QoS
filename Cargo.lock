@@ -565,6 +565,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "onetimer-bench"
+version = "0.1.0"
+dependencies = [
+ "onetimer-backend-triton",
+ "onetimer-config",
+ "onetimer-core",
+ "onetimer-gateway",
+ "onetimer-protocol-oip",
+ "onetimer-sim",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+]
+
+[[package]]
 name = "onetimer-cli"
 version = "0.1.0"
 dependencies = [

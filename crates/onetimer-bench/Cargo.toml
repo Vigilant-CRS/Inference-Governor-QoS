@@ -1,0 +1,23 @@
+[package]
+name = "onetimer-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Wire-level benchmark: does the governor actually help?"
+
+[dependencies]
+onetimer-core = { path = "../onetimer-core", version = "0.1.0" }
+onetimer-sim = { path = "../onetimer-sim", version = "0.1.0" }
+onetimer-config = { path = "../onetimer-config", version = "0.1.0" }
+onetimer-protocol-oip = { path = "../onetimer-protocol-oip", version = "0.1.0" }
+onetimer-backend-triton = { path = "../onetimer-backend-triton", version = "0.1.0" }
+onetimer-gateway = { path = "../onetimer-gateway", version = "0.1.0" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = "0.14.6"
+
+[lints]
+workspace = true

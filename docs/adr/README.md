@@ -20,6 +20,7 @@ Spec-Stelle explizit.
 | [0009](0009-infeasibility-does-not-mean-worthless.md) | Verworfen wird, was wertlos ist — nicht, was zu spaet kommt | §10.3, §10.6 | Akzeptiert |
 | [0010](0010-pessimistic-promises-optimistic-discards.md) | Pessimistisch versprechen, optimistisch verwerfen | §10.3, §13.2 | Akzeptiert |
 | [0011](0011-client-clock-domains.md) | Die Erzeugungszeit kommt aus einer fremden Uhr | §16.2, §10.2, L-019 | Akzeptiert |
+| [0012](0012-best-effort-starvation.md) | Aushungerung ist ein Befund, kein Nebeneffekt | §1.3, §10.6, §15 | Akzeptiert |
 
 ## Format
 

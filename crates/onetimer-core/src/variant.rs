@@ -14,6 +14,7 @@
 //!   degradieren wuerde die Wahrnehmung verschlechtern, waehrend die eigenen
 //!   Metriken gruen bleiben.
 
+use crate::estimator::RuntimeEstimator;
 use crate::feasibility::{Feasibility, evaluate};
 use crate::ids::{ModelIdx, VariantIdx};
 use crate::model::ModelContract;
@@ -82,21 +83,44 @@ impl VariantState {
     }
 }
 
+/// Alles, was eine Planungsentscheidung ausser dem Vertrag braucht.
+///
+/// Gebuendelt, weil die Bestandteile immer gemeinsam auftreten und einzeln
+/// durchgereicht eine Parameterliste ergaeben, die niemand mehr liest.
+#[derive(Debug, Clone, Copy)]
+pub struct PlanningContext<'a> {
+    /// Der Belegungszustand des Backends.
+    pub slots: &'a SlotSet,
+    /// Die beobachteten Laufzeiten.
+    ///
+    /// Ein frisch angelegter Schaetzer ohne Beobachtungen faellt vollstaendig
+    /// auf die Offline-Profile zurueck — die Variantenwahl funktioniert also
+    /// von der ersten Sekunde an.
+    pub estimator: &'a RuntimeEstimator,
+    /// Die aktuell wirksame Sicherheitsmarge.
+    pub margin: SafetyMargin,
+    /// Die aktuelle Zeit.
+    pub now: Instant,
+}
+
 /// Waehlt die hoechstwertige machbare Variante.
 ///
 /// `state` wird nur gelesen; die Uebernahme der Wahl macht der Aufrufer ueber
 /// [`VariantState::record`], damit eine verworfene Planung den Hysteresezustand
 /// nicht verschiebt.
+///
+/// `estimator` liefert die beobachteten Laufzeiten. Ein frisch angelegter
+/// Schaetzer ohne Beobachtungen faellt vollstaendig auf die Offline-Profile
+/// zurueck — die Variantenwahl funktioniert also von der ersten Sekunde an.
 #[must_use]
 pub fn resolve(
     contract: &ModelContract,
     state: &VariantState,
-    slots: &SlotSet,
     model: ModelIdx,
-    now: Instant,
     deadline: Option<Instant>,
-    margin: SafetyMargin,
+    ctx: &PlanningContext<'_>,
 ) -> Resolution {
+    let (slots, estimator, margin, now) = (ctx.slots, ctx.estimator, ctx.margin, ctx.now);
     if contract.variants.is_empty() {
         return Resolution::NoVariant;
     }
@@ -126,7 +150,10 @@ pub fn resolve(
         };
         any_variant_considered = true;
 
-        let Ok(runtime) = variant.profile.conservative_at(occupancy, margin) else {
+        // Der Online-Schaetzer darf die Planung verschaerfen, aber nie
+        // optimistischer machen als das Profil (Spec 13.2).
+        let Some(runtime) = estimator.conservative(model, idx, occupancy, &variant.profile, margin)
+        else {
             continue;
         };
         let Some(feasibility) = evaluate(slots, model, now, runtime, deadline) else {

@@ -23,6 +23,7 @@
 //! work-conserving Scheduler trennt.
 
 use crate::arrayvec::ArrayVec;
+use crate::estimator::{MarginController, RuntimeEstimator};
 use crate::feasibility::{DEFAULT_HORIZON, ExpectedArrival, GuardVerdict, guard_protected};
 use crate::ids::{MAX_MODELS, ModelIdx, RequestId, SlotIdx, VariantIdx};
 use crate::metrics::Metrics;
@@ -33,7 +34,7 @@ use crate::queue::{DropReason, ModelQueue, QueueConfigError};
 use crate::request::{Criticality, RequestDescriptor, RequestState};
 use crate::slots::SlotSet;
 use crate::time::{Duration, Instant};
-use crate::variant::{Resolution, VariantState, resolve};
+use crate::variant::{PlanningContext, Resolution, VariantState, resolve};
 
 /// Hoechstzahl gleichzeitig an das Backend uebergebener Requests.
 const MAX_INFLIGHT: usize = crate::ids::MAX_SLOTS * crate::slots::MAX_SLOT_DEPTH;
@@ -130,6 +131,12 @@ struct Dispatched {
     variant: VariantIdx,
     at: Instant,
     occupancy: usize,
+    /// Die Laufzeit, mit der geplant wurde.
+    ///
+    /// Nur im Vergleich dazu ist die beobachtete Laufzeit eine Aussage: sie
+    /// sagt, ob die **Prognose** falsch war. Eine verpasste Deadline sagt das
+    /// nicht — die kann genauso aus Warteschlangenzeit entstehen.
+    predicted: Duration,
 }
 
 /// Die Planung eines Kandidaten: welche Variante, wie lange, und reicht es.
@@ -198,7 +205,12 @@ pub struct Scheduler {
     next_expected: [Option<Instant>; MAX_MODELS],
     slots: SlotSet,
     overload: OverloadController,
+    /// Die vom Betreiber gesetzte Ausgangsmarge.
     margin: SafetyMargin,
+    /// Je Modell eine langsam angepasste Marge (Spec 13.3).
+    margins: [MarginController; MAX_MODELS],
+    /// Beobachtete Backendlaufzeiten je Modell, Variante und Belegungsgrad.
+    estimator: RuntimeEstimator,
     horizon: Duration,
     inflight: ArrayVec<Dispatched, MAX_INFLIGHT>,
     metrics: Metrics,
@@ -241,6 +253,8 @@ impl Scheduler {
             slots,
             overload,
             margin,
+            margins: [MarginController::new(margin); MAX_MODELS],
+            estimator: RuntimeEstimator::new(),
             horizon: DEFAULT_HORIZON,
             inflight: ArrayVec::new(),
             metrics: Metrics::default(),
@@ -250,6 +264,20 @@ impl Scheduler {
     /// Setzt den Look-ahead-Horizont (Spec 10.8).
     pub const fn set_horizon(&mut self, horizon: Duration) {
         self.horizon = horizon;
+    }
+
+    /// Der Online Runtime Estimator, fuer Diagnose und Tests.
+    #[must_use]
+    pub const fn estimator(&self) -> &RuntimeEstimator {
+        &self.estimator
+    }
+
+    /// Die aktuell wirksame Marge eines Modells.
+    #[must_use]
+    pub fn margin_of(&self, model: ModelIdx) -> SafetyMargin {
+        self.margins
+            .get(model.get())
+            .map_or(self.margin, MarginController::margin)
     }
 
     /// Die aktuellen Zaehler.
@@ -360,6 +388,15 @@ impl Scheduler {
             .metrics
             .total_compute_nanos
             .saturating_add(compute.as_nanos());
+        // Der Kern verarbeitet die Beobachtung selbst und meldet sie zusaetzlich
+        // nach aussen: die Umgebung braucht sie fuer Metriken, der Scheduler
+        // fuer die naechste Planung.
+        self.estimator.record(
+            entry.descriptor.logical_model,
+            entry.variant,
+            entry.occupancy,
+            compute,
+        );
         sink.emit(Action::ObservedRuntime {
             model: entry.descriptor.logical_model,
             variant: entry.variant,
@@ -395,6 +432,19 @@ impl Scheduler {
                     self.metrics.protected_deadline_misses.saturating_add(1);
             }
         }
+        // Die Marge korrigiert **Prognosefehler**, nicht Vertragsverletzungen
+        // (ADR-0013). Ausloeser ist deshalb allein, ob die Arbeit laenger
+        // gedauert hat als geplant. Eine verpasste Deadline aus Wartezeit
+        // wuerde durch eine groessere Marge nur schlimmer.
+        let underpredicted = compute.as_nanos() > entry.predicted.as_nanos();
+        if let Some(controller) = self.margins.get_mut(entry.descriptor.logical_model.get()) {
+            if underpredicted {
+                controller.tighten();
+            } else {
+                controller.relax();
+            }
+        }
+
         self.observe_pressure(now, entry.descriptor.criticality, missed || obsolete);
         sink.emit(Action::Terminate { request, state });
     }
@@ -508,6 +558,7 @@ impl Scheduler {
             if worthless_on_arrival && descriptor.queue_policy.allows_stale_drop() {
                 self.drop_candidate(model, id, RequestState::Stale, sink);
                 self.metrics.stale = self.metrics.stale.saturating_add(1);
+                self.count_if_starved(descriptor.criticality);
                 self.observe_pressure(now, descriptor.criticality, true);
                 continue;
             }
@@ -538,6 +589,13 @@ impl Scheduler {
             let Some(slot) = self.slots.ready_slot(model, now) else {
                 return false;
             };
+
+            // Der Belegungsgrad **vor** dem eigenen Dispatch: das ist die
+            // Groesse, mit der geplant wurde, und nur unter demselben Index
+            // ist die spaetere Beobachtung fuer die naechste Planung
+            // verwertbar. Nach dem Dispatch gemessen waere jede Zelle um eins
+            // verschoben und der Schaetzer wirkungslos.
+            let occupancy_at_start = self.slots.occupancy();
             if self
                 .slots
                 .dispatch(slot, id, model, now, predicted_runtime)
@@ -556,7 +614,8 @@ impl Scheduler {
                 descriptor,
                 variant,
                 at: now,
-                occupancy: self.slots.occupancy(),
+                occupancy: occupancy_at_start,
+                predicted: predicted_runtime,
             });
             self.metrics.forwarded = self.metrics.forwarded.saturating_add(1);
             self.metrics.count_variant(variant);
@@ -582,17 +641,21 @@ impl Scheduler {
         let resolution = resolve(
             contract,
             state,
-            &self.slots,
             model,
-            now,
             descriptor.absolute_deadline,
-            self.margin,
+            &PlanningContext {
+                slots: &self.slots,
+                estimator: &self.estimator,
+                margin: self.margin_of(model),
+                now,
+            },
         );
         match resolution {
             Resolution::Feasible(sel) => Some(Plan {
                 variant: sel.variant,
                 optimistic_finish: self.optimistic_finish(
                     contract,
+                    model,
                     sel.variant,
                     sel.feasibility.start,
                 ),
@@ -606,6 +669,7 @@ impl Scheduler {
                 variant: fastest.variant,
                 optimistic_finish: self.optimistic_finish(
                     contract,
+                    model,
                     fastest.variant,
                     fastest.feasibility.start,
                 ),
@@ -623,12 +687,16 @@ impl Scheduler {
     fn optimistic_finish(
         &self,
         contract: &ModelContract,
+        model: ModelIdx,
         variant: VariantIdx,
         start: Instant,
     ) -> Instant {
         contract
             .variant(variant)
-            .and_then(|v| v.profile.optimistic_at(self.slots.occupancy()).ok())
+            .and_then(|v| {
+                self.estimator
+                    .optimistic(model, variant, self.slots.occupancy(), &v.profile)
+            })
             .and_then(|runtime| start.checked_add(runtime))
             .unwrap_or(start)
     }
@@ -741,6 +809,13 @@ impl Scheduler {
                 violated,
             },
         );
+    }
+
+    /// Zaehlt einen Best-Effort-Request, der nie gelaufen ist (ADR-0012).
+    fn count_if_starved(&mut self, criticality: Criticality) {
+        if matches!(criticality, Criticality::BestEffort) {
+            self.metrics.best_effort_starved = self.metrics.best_effort_starved.saturating_add(1);
+        }
     }
 
     fn count_drop(&mut self, reason: DropReason) {

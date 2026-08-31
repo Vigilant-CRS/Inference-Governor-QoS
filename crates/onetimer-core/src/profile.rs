@@ -31,7 +31,13 @@ pub struct SafetyMargin {
 
 impl SafetyMargin {
     /// Marge ohne Aufschlag.
-    pub const NONE: Self = Self { num: 1, den: 1 };
+    ///
+    /// Bewusst als `100/100` und nicht als `1/1` dargestellt: beide rechnen
+    /// gleich, aber nur bei `100/100` liefert [`SafetyMargin::as_percent`] den
+    /// erwarteten Wert. Die kuerzere Form lieferte 1 Prozent, was jeder
+    /// Leser dieses Wertes als „unzulaessig" interpretieren muss — und dann
+    /// still auf einen anderen Wert ausweicht.
+    pub const NONE: Self = Self { num: 100, den: 100 };
 
     /// Die Startmarge aus Spec 13.2: Faktor 1,10.
     pub const DEFAULT: Self = Self { num: 110, den: 100 };
@@ -279,6 +285,22 @@ mod tests {
 
     fn ms(v: u64) -> Duration {
         Duration::from_millis(v).unwrap()
+    }
+
+    /// Alle Margen muessen dieselbe Darstellung benutzen, sonst liest ein
+    /// Verbraucher aus `as_percent()` einen Wert, den `from_percent` ablehnt.
+    #[test]
+    fn every_margin_round_trips_through_its_percent_value() {
+        for margin in [SafetyMargin::NONE, SafetyMargin::DEFAULT] {
+            let percent = margin.as_percent();
+            assert!(
+                SafetyMargin::from_percent(percent).is_some(),
+                "as_percent() lieferte {percent}, was from_percent ablehnt"
+            );
+            assert_eq!(SafetyMargin::from_percent(percent), Some(margin));
+        }
+        assert_eq!(SafetyMargin::NONE.as_percent(), 100);
+        assert_eq!(SafetyMargin::DEFAULT.as_percent(), 110);
     }
 
     #[test]

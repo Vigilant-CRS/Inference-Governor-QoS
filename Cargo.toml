@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/onetimer-core",
     "crates/onetimer-backend-triton",
+    "crates/onetimer-bench",
     "crates/onetimer-cli",
     "crates/onetimer-config",
     "crates/onetimer-gateway",

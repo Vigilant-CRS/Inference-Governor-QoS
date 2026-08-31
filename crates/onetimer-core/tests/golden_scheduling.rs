@@ -4,6 +4,7 @@
 #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 
 use onetimer_core::arrayvec::ArrayVec;
+use onetimer_core::estimator::RuntimeEstimator;
 use onetimer_core::feasibility::{
     DEFAULT_HORIZON, ExpectedArrival, GuardVerdict, absolute_deadline, evaluate, guard_protected,
 };
@@ -15,7 +16,7 @@ use onetimer_core::profile::{RuntimeProfile, SafetyMargin, VariantProfile};
 use onetimer_core::queue::QueueConfig;
 use onetimer_core::request::OverflowPolicy;
 use onetimer_core::slots::{SlotError, SlotSet};
-use onetimer_core::variant::{Resolution, VariantState, resolve};
+use onetimer_core::variant::{PlanningContext, Resolution, VariantState, resolve};
 use onetimer_core::{Criticality, Duration, Instant, ModelIdx, QueuePolicy, RequestId, SlotIdx};
 
 fn ms(v: u64) -> Duration {
@@ -64,6 +65,35 @@ fn contract(
         variant_dwell: ms(dwell_ms),
         variants: list,
     }
+}
+
+/// Ruft den Resolver mit einem leeren Schaetzer auf.
+///
+/// Die Golden Tests pruefen die Auswahlregel gegen die Offline-Profile; ein
+/// gefuellter Schaetzer waere hier eine zweite Variable und wuerde die Aussage
+/// verwaessern. Sein Verhalten ist in `estimator::tests` eigens geprueft.
+fn resolve_with(
+    contract: &ModelContract,
+    state: &VariantState,
+    slots: &SlotSet,
+    model: ModelIdx,
+    now: Instant,
+    deadline: Option<Instant>,
+    margin: SafetyMargin,
+) -> Resolution {
+    let estimator = RuntimeEstimator::new();
+    resolve(
+        contract,
+        state,
+        model,
+        deadline,
+        &PlanningContext {
+            slots,
+            estimator: &estimator,
+            margin,
+            now,
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -130,7 +160,7 @@ fn g006_picks_the_highest_quality_variant_that_still_fits() {
     let deadline = now.checked_add(ms(14)).unwrap();
     let state = VariantState::default();
 
-    let r = resolve(
+    let r = resolve_with(
         &c,
         &state,
         &slots,
@@ -166,7 +196,7 @@ fn g006_when_nothing_fits_the_fastest_variant_is_named() {
     let now = at(0);
     let deadline = now.checked_add(ms(5)).unwrap();
 
-    match resolve(
+    match resolve_with(
         &c,
         &VariantState::default(),
         &slots,
@@ -200,7 +230,7 @@ fn unknown_quality_provenance_disables_automatic_variant_selection() {
     let deadline = now.checked_add(ms(14)).unwrap();
     // Die beste Variante passt nicht — es wird trotzdem nicht auf eine
     // Variante mit geratener Qualitaet ausgewichen.
-    match resolve(
+    match resolve_with(
         &c,
         &VariantState::default(),
         &slots,
@@ -232,7 +262,7 @@ fn variant_hysteresis_is_asymmetric() {
 
     // Bei t=10 waere die grosse Variante machbar - zu frueh fuer eine Aufwertung.
     let d = at(10).checked_add(ms(30)).unwrap();
-    match resolve(&c, &state, &slots, M0, at(10), Some(d), SafetyMargin::NONE) {
+    match resolve_with(&c, &state, &slots, M0, at(10), Some(d), SafetyMargin::NONE) {
         Resolution::Feasible(sel) => {
             assert_eq!(
                 sel.variant.get(),
@@ -245,7 +275,7 @@ fn variant_hysteresis_is_asymmetric() {
 
     // Bei t=60 ist die Verweildauer abgelaufen.
     let d = at(60).checked_add(ms(30)).unwrap();
-    match resolve(&c, &state, &slots, M0, at(60), Some(d), SafetyMargin::NONE) {
+    match resolve_with(&c, &state, &slots, M0, at(60), Some(d), SafetyMargin::NONE) {
         Resolution::Feasible(sel) => assert_eq!(sel.variant.get(), 0, "jetzt aufwerten"),
         other => panic!("erwartet Feasible, war {other:?}"),
     }
@@ -254,7 +284,7 @@ fn variant_hysteresis_is_asymmetric() {
     let mut high = VariantState::default();
     high.record(onetimer_core::VariantIdx(0), at(0));
     let d = at(10).checked_add(ms(14)).unwrap();
-    match resolve(&c, &high, &slots, M0, at(10), Some(d), SafetyMargin::NONE) {
+    match resolve_with(&c, &high, &slots, M0, at(10), Some(d), SafetyMargin::NONE) {
         Resolution::Feasible(sel) => assert_eq!(sel.variant.get(), 1, "sofort abwerten"),
         other => panic!("erwartet Feasible, war {other:?}"),
     }
@@ -279,7 +309,7 @@ fn g009_a_growing_safety_margin_forces_a_smaller_variant() {
     let deadline = now.checked_add(ms(12)).unwrap();
 
     let normal = SafetyMargin::from_percent(110).unwrap();
-    match resolve(
+    match resolve_with(
         &c,
         &VariantState::default(),
         &slots,
@@ -294,7 +324,7 @@ fn g009_a_growing_safety_margin_forces_a_smaller_variant() {
 
     // Das Backend wird langsamer; der Estimator hebt die Marge auf 200 %.
     let degraded = SafetyMargin::from_percent(200).unwrap();
-    match resolve(
+    match resolve_with(
         &c,
         &VariantState::default(),
         &slots,

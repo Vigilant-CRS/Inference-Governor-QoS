@@ -25,6 +25,7 @@
 //! ADR-0004 (Execution Slots) und ADR-0005 (Erfolgsmetrik).
 
 pub mod arrayvec;
+pub mod estimator;
 pub mod feasibility;
 pub mod ids;
 pub mod metrics;
@@ -38,6 +39,7 @@ pub mod slots;
 pub mod time;
 pub mod variant;
 
+pub use estimator::{MarginController, ProfileHealth, RuntimeEstimator};
 pub use feasibility::{ExpectedArrival, Feasibility, GuardVerdict};
 pub use ids::{ModelIdx, PayloadRef, RequestId, SlotIdx, SupersessionKey, VariantIdx};
 pub use metrics::Metrics;
