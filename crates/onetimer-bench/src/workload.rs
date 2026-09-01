@@ -65,6 +65,17 @@ pub struct StreamDef {
     ///
     /// `None` fuer das Mock-Backend, das keine Tensoren auswertet.
     pub input: Option<InputSpec>,
+    /// Verwirft der Client selbst veraltete Frames?
+    ///
+    /// Das ist der naheliegende Eigenbau: nur der neueste Frame zaehlt, es ist
+    /// immer nur einer unterwegs, und trifft ein neuer ein, waehrend der alte
+    /// noch laeuft, wird der alte fallengelassen. Genau die LATEST-Semantik
+    /// aus Spec 9.3 — aber im Client statt im Governor.
+    ///
+    /// Der Vergleich dieser Betriebsart gegen den Governor beantwortet den
+    /// haertesten Einwand gegen das ganze Produkt: was kann der Governor, das
+    /// eine Stunde Clientcode nicht auch kann?
+    pub pump: bool,
 }
 
 /// Das Ergebnis eines Stroms.
@@ -141,7 +152,11 @@ pub async fn drive(
         let stream = stream.clone();
         let client = connect(endpoint).await;
         tasks.push(tokio::spawn(async move {
-            run_stream(client, stream, state, origin, duration, via_governor).await;
+            if stream.pump {
+                run_stream_pump(client, stream, state, origin, duration, via_governor).await;
+            } else {
+                run_stream(client, stream, state, origin, duration, via_governor).await;
+            }
         }));
     }
     for task in tasks {
@@ -234,6 +249,97 @@ async fn run_stream(
             }
         });
     }
+}
+
+/// Der Eigenbau: LATEST-Semantik im Client.
+///
+/// Ein Erzeuger legt jeden Frame in ein Fach, das nur den neuesten haelt; ein
+/// Sender nimmt ihn heraus, sobald die vorige Antwort da ist. Ueberschriebene
+/// Frames sind verworfen — sie waren beim Absenden schon nicht mehr die
+/// aktuelle Lage.
+///
+/// Was diese Schleife nicht kann, ist der Kern des Vergleichs: sie sieht nur
+/// ihren eigenen Strom. Zwei solche Pumpen nebeneinander wissen nichts
+/// voneinander, und am Server entscheidet weiter die Ankunftsreihenfolge.
+async fn run_stream_pump(
+    client: GrpcInferenceServiceClient<Channel>,
+    stream: StreamDef,
+    state: Arc<StreamState>,
+    origin: Instant,
+    duration: Duration,
+    via_governor: bool,
+) {
+    let slot: Arc<Mutex<Option<(u64, Instant)>>> = Arc::new(Mutex::new(None));
+    let ready = Arc::new(tokio::sync::Notify::new());
+
+    let producer = {
+        let slot = Arc::clone(&slot);
+        let ready = Arc::clone(&ready);
+        let state = Arc::clone(&state);
+        let period = stream.period;
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(period);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut frame = 0_u64;
+            loop {
+                ticker.tick().await;
+                let capture = Instant::now();
+                if capture.duration_since(origin) >= duration {
+                    break;
+                }
+                frame = frame.saturating_add(1);
+                state.emitted.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut guard) = slot.lock()
+                    && guard.replace((frame, capture)).is_some()
+                {
+                    // Ein noch nicht gesendeter Frame wurde ueberholt.
+                    state.client_dropped.fetch_add(1, Ordering::Relaxed);
+                }
+                ready.notify_one();
+            }
+        })
+    };
+
+    let mut client = client;
+    loop {
+        if Instant::now().duration_since(origin) >= duration {
+            break;
+        }
+        let next = slot.lock().ok().and_then(|mut guard| guard.take());
+        let Some((frame, capture)) = next else {
+            // Nichts zu tun; auf den naechsten Frame warten, aber nicht
+            // ueber das Ende des Laufs hinaus.
+            let _ = tokio::time::timeout(Duration::from_millis(5), ready.notified()).await;
+            continue;
+        };
+
+        let id = format!("{}:{frame}", stream.name);
+        let age = capture.elapsed();
+        let request = build_request(stream.model, &id, via_governor, age, stream.input.as_ref());
+        state.sent.fetch_add(1, Ordering::Relaxed);
+
+        match client.model_infer(request).await {
+            Ok(_) => {
+                state.delivered.fetch_add(1, Ordering::Relaxed);
+                let completion = Instant::now().duration_since(origin);
+                let generation = capture.duration_since(origin);
+                if let Ok(mut tracker) = state.tracker.lock() {
+                    tracker.record_delivery(
+                        onetimer_core::Instant::from_nanos(
+                            u64::try_from(completion.as_nanos()).unwrap_or(u64::MAX),
+                        ),
+                        onetimer_core::Instant::from_nanos(
+                            u64::try_from(generation.as_nanos()).unwrap_or(u64::MAX),
+                        ),
+                    );
+                }
+            }
+            Err(_) => {
+                state.rejected.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    producer.abort();
 }
 
 fn build_request(

@@ -1,21 +1,22 @@
-//! `load-ramp` — ab welcher Auslastung lohnt sich der Governor? (Spec 19.4)
+//! `diy-baseline` — was kann der Governor, das Clientcode nicht auch kann?
 //!
-//! Punktmessungen beantworten die Frage nicht, die ein Anwender zuerst stellt.
-//! Er will nicht wissen, ob OneTimer bei 116 % Auslastung hilft — er will
-//! wissen, **ab wann** es sich lohnt und ob es bei geringer Last schadet.
+//! Der haerteste Einwand gegen dieses Produkt lautet: *"Wozu ein Governor? Ich
+//! verwerfe veraltete Frames einfach im Client."* Der Einwand ist gut, und er
+//! ist zur Haelfte richtig. Supersession — nur der neueste Frame zaehlt, es
+//! ist immer nur einer unterwegs — sind vielleicht fuenfzig Zeilen und
+//! verhindert, dass ein Strom sich selbst zustaut.
 //!
-//! Gemessen wird gegen echten Triton auf echter GPU, über System Shared
-//! Memory, mit denselben Modellen auf beiden Seiten. Die Angebotslast wird
-//! über die Sensorperioden variiert: die Kamera liefert schneller oder
-//! langsamer, die Modelle bleiben dieselben. Das ist der realistische Fall —
-//! nicht die Modelle werden teurer, die Bildrate steigt.
+//! Dieser Benchmark misst genau diesen Eigenbau als dritten Arm neben dem
+//! naiven Client und dem Governor. Die Hypothese, die er pruefen soll:
 //!
-//! ## Warum Wiederholungen
+//! - **Selbststau** kann der Client selbst loesen. Dafuer braucht es uns nicht.
+//! - **Vorrang zwischen Stroemen** kann er nicht. Drei Pumpen nebeneinander
+//!   wissen nichts voneinander; am Server entscheidet weiter die
+//!   Ankunftsreihenfolge, und der geschuetzte Strom wartet hinter Arbeit, die
+//!   niemand braucht.
 //!
-//! Ein einzelner Lauf dieses Benchmarks lieferte einmal 52 % statt 98 % auf
-//! **unverändertem Code**, nur weil andere Prozesse mitliefen. Jeder Punkt
-//! wird deshalb mehrfach gefahren, berichtet werden Median und Spannweite, und
-//! die Systemlast steht im Protokoll.
+//! Faellt die Hypothese, ist das eine ernste Nachricht ueber den Wert des
+//! Produkts — und sie gehoert dann genauso ins Repository wie ein Erfolg.
 
 #![allow(
     clippy::print_stdout,
@@ -39,32 +40,38 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
-const SECONDS: u64 = 15;
+const SECONDS: u64 = 12;
 const REPEATS: usize = 3;
-/// Angebotslast in Prozent (Spec 19.4).
-const LOADS: [u64; 7] = [50, 75, 90, 100, 110, 125, 150];
-/// Client-Puffertiefen; je Strom zählt das bessere Ergebnis, auf beiden Seiten.
-const CAPS: [usize; 2] = [1, 8];
+/// Der interessante Bereich: ab dem Knick aus `load-ramp`.
+const LOADS: [u64; 3] = [100, 125, 150];
 
-/// Die Basiskonfiguration: Perioden bei 100 % Angebotslast.
-///
-/// Kalibriert gegen die **tatsaechliche** Laufzeit (p50), nicht gegen die
-/// konservative Planungsgroesse. Der Unterschied ist erheblich und war in der
-/// ersten Fassung dieses Benchmarks ein Fehler: mit p99 mal Marge kalibriert
-/// lag die reale Auslastung bei nominell 150 % erst bei rund 95 %, und die
-/// Rampe hat nie gesaettigt. Triton zeigte folgerichtig ueberall null
-/// unabgedeckte Perioden — ein Ergebnis, das nur besagte, dass nichts
-/// gemessen wurde.
-///
-/// Gemessene Mediane: RF-DETR 14,9 ms, Pose 4,0 ms, Tiefe 7,9 ms.
-/// Mit Periode `P` fuer Detektor und Pose und `2P` fuer Tiefe gilt
-/// `U = (14,9 + 4,0 + 3,95) / P`; fuer `U = 1` folgt `P = 23 ms`.
+/// Wie in `load-ramp` gegen die gemessenen Mediane kalibriert.
 const BASE: [(&str, &str, u64, u64); 3] = [
-    // (logisch, physisch, Periode ms bei 100 %, max_age ms)
     ("detector", "rfdetr", 23, 46),
     ("pose", "pose_main", 23, 46),
     ("depth", "depth_main", 46, 92),
 ];
+
+/// Die drei Betriebsarten.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Arm {
+    /// Client schickt jeden Frame, Puffer 8. Der Strohmann.
+    Naiv,
+    /// Client haelt nur den neuesten Frame, einer unterwegs. Der Eigenbau.
+    Eigenbau,
+    /// Governor davor, Client wie im naiven Fall.
+    Governor,
+}
+
+impl Arm {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Naiv => "Triton, naiver Client",
+            Self::Eigenbau => "Triton + Supersession im Client",
+            Self::Governor => "OneTimer",
+        }
+    }
+}
 
 fn scaled_period(base_ms: u64, load_percent: u64) -> u64 {
     // Höhere Last bedeutet kürzere Periode.
@@ -107,21 +114,18 @@ fn config_yaml(load: u64, endpoint: &str) -> String {
     )
 }
 
-fn streams(
-    load: u64,
-    cap: usize,
-    logical: bool,
-    specs: &HashMap<String, InputSpec>,
-) -> Vec<StreamDef> {
+fn streams(load: u64, arm: Arm, specs: &HashMap<String, InputSpec>) -> Vec<StreamDef> {
     BASE.iter()
         .map(|(name, physical, base_period, base_age)| StreamDef {
             name,
-            model: if logical { name } else { physical },
+            model: if arm == Arm::Governor { name } else { physical },
             period: Duration::from_millis(scaled_period(*base_period, load)),
             max_age: Duration::from_millis(scaled_period(*base_age, load)),
-            in_flight_cap: cap,
+            // Die Pumpe haelt selbst nur einen Request offen; fuer die
+            // anderen Arme der Puffer aus `load-ramp`.
+            in_flight_cap: if arm == Arm::Eigenbau { 1 } else { 8 },
             input: specs.get(*name).cloned(),
-            pump: false,
+            pump: arm == Arm::Eigenbau,
         })
         .collect()
 }
@@ -223,7 +227,6 @@ async fn run() {
     let triton_endpoint = "127.0.0.1:8001";
     let triton = onetimer_backend_triton::TritonClient::new(triton_endpoint);
 
-    // Shared-Memory-Regionen je Modell, einmal fuer den ganzen Lauf.
     let mut specs = HashMap::new();
     let mut regions = Vec::new();
     for (logical, physical, _, _) in BASE {
@@ -248,7 +251,7 @@ async fn run() {
         let elements: i64 = shape.iter().copied().product();
         let byte_size = u64::try_from(elements).unwrap_or(0) * 4;
         let region =
-            Region::create(&format!("onetimer_ramp_{logical}"), byte_size).expect("Shm-Region");
+            Region::create(&format!("onetimer_diy_{logical}"), byte_size).expect("Shm-Region");
         let _ = triton
             .raw()
             .await
@@ -282,99 +285,57 @@ async fn run() {
         regions.push(region);
     }
 
-    println!("load-ramp: ab welcher Auslastung lohnt sich der Governor?");
+    println!("diy-baseline: was kann der Governor, das Clientcode nicht auch kann?");
     println!(
-        "Triton {triton_endpoint} · RF-DETR, Pose, Tiefe · ein Slot · \
-         Shared Memory auf beiden Seiten"
+        "Triton {triton_endpoint} · RF-DETR (protected), Pose, Tiefe (high) · \
+         ein Slot · Shared Memory"
     );
-    println!(
-        "{SECONDS} s je Lauf, {REPEATS} Wiederholungen je Punkt, \
-         Puffertiefen {CAPS:?} auf beiden Seiten\n"
-    );
-    println!(
-        "  Last | Detektor Triton | OneTimer | Faktor | alle Stroeme T/O | AoI p95 T/O | Last-Ø"
-    );
-    println!(
-        "  -----|-----------------|----------|--------|------------------|-------------|-------"
-    );
+    println!("{SECONDS} s je Lauf, {REPEATS} Wiederholungen, Median berichtet\n");
+    println!("  Last | Betriebsart                     | Detektor | alle Stroeme | AoI p95");
+    println!("  -----|---------------------------------|----------|--------------|--------");
 
     let duration = Duration::from_secs(SECONDS);
     for load in LOADS {
         let yaml = config_yaml(load, triton_endpoint);
         let gateway = start_gateway(&yaml).await;
 
-        let mut direct_unc = Vec::new();
-        let mut direct_aoi = Vec::new();
-        let mut gov_unc = Vec::new();
-        let mut gov_aoi = Vec::new();
-        let mut direct_all = Vec::new();
-        let mut gov_all = Vec::new();
-        let mut loads = Vec::new();
-
-        for _ in 0..REPEATS {
-            loads.push(load_average());
-
-            let mut best_direct = u64::MAX;
-            let mut best_direct_aoi = u64::MAX;
-            let mut best_gov = u64::MAX;
-            let mut best_gov_aoi = u64::MAX;
-            let mut best_direct_all = u64::MAX;
-            let mut best_gov_all = u64::MAX;
-            for cap in CAPS {
-                let d = drive(
-                    triton_endpoint,
-                    &streams(load, cap, false, &specs),
+        for arm in [Arm::Naiv, Arm::Eigenbau, Arm::Governor] {
+            let mut prot = Vec::new();
+            let mut all = Vec::new();
+            let mut aoi = Vec::new();
+            for _ in 0..REPEATS {
+                let endpoint = if arm == Arm::Governor {
+                    gateway.as_str()
+                } else {
+                    triton_endpoint
+                };
+                let reports = drive(
+                    endpoint,
+                    &streams(load, arm, &specs),
                     duration,
-                    false,
+                    arm == Arm::Governor,
                 )
                 .await;
-                best_direct = best_direct.min(protected_uncovered(&d));
-                best_direct_all = best_direct_all.min(worst_uncovered(&d));
-                best_direct_aoi = best_direct_aoi.min(worst_aoi_ms(&d));
-
-                let g = drive(&gateway, &streams(load, cap, true, &specs), duration, true).await;
-                best_gov = best_gov.min(protected_uncovered(&g));
-                best_gov_all = best_gov_all.min(worst_uncovered(&g));
-                best_gov_aoi = best_gov_aoi.min(worst_aoi_ms(&g));
+                prot.push(protected_uncovered(&reports));
+                all.push(worst_uncovered(&reports));
+                aoi.push(worst_aoi_ms(&reports));
             }
-            direct_unc.push(best_direct);
-            direct_aoi.push(best_direct_aoi);
-            gov_unc.push(best_gov);
-            gov_aoi.push(best_gov_aoi);
-            direct_all.push(best_direct_all);
-            gov_all.push(best_gov_all);
+            let (pmin, pmax) = spread(&prot);
+            println!(
+                "  {load:>3} % | {:<31} | {:>4} ‰ [{pmin}-{pmax}] | {:>8} ‰ | {:>4} ms",
+                arm.label(),
+                median(prot.clone()),
+                median(all),
+                median(aoi),
+            );
         }
-
-        let d = median(direct_unc.clone());
-        let g = median(gov_unc.clone());
-        let (dmin, dmax) = spread(&direct_unc);
-        let (gmin, gmax) = spread(&gov_unc);
-        let factor = if g == 0 {
-            if d == 0 {
-                "—".to_owned()
-            } else {
-                "besser".to_owned()
-            }
-        } else if d >= g {
-            format!("{:.1}x", d as f64 / g as f64)
-        } else {
-            format!("-{:.1}x", g as f64 / d.max(1) as f64)
-        };
-        println!(
-            "  {load:>3} % | {d:>6} ‰ [{dmin}-{dmax}] | {g:>3} ‰ [{gmin}-{gmax}] | {factor:>6} | \
-             {:>5} / {:>5} ‰ | {:>3} / {:>3} ms | {}",
-            median(direct_all),
-            median(gov_all),
-            median(direct_aoi),
-            median(gov_aoi),
-            loads.join(" "),
-        );
+        println!("  -----|---------------------------------|----------|--------------|--------");
     }
 
+    println!("\nUnabgedeckte Perioden nach ADR-0005. `Detektor` ist der geschuetzte");
     println!(
-        "\nUnabgedeckte Perioden nach ADR-0005, schlechtester Strom je Lauf.\n\
-         In eckigen Klammern die Spannweite ueber {REPEATS} Wiederholungen.\n\
-         Last-Ø ist die Systemlast beim Start jeder Wiederholung — eine\n\
-         Latenzmessung neben anderer Arbeit misst die andere Arbeit."
+        "Strom, `alle Stroeme` der schlechteste. Systemlast: {}",
+        load_average()
     );
+    drop(regions);
 }

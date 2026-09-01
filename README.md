@@ -147,6 +147,24 @@ Der Preis steht daneben: bei 150 % werden die `high`-Ströme praktisch nicht
 mehr bedient. OneTimer entscheidet nicht, *ob* etwas verloren geht, sondern
 *was*. Details: [`docs/benchmark/load-ramp.md`](docs/benchmark/load-ramp.md).
 
+### Reicht nicht einfach Clientcode?
+
+Der härteste Einwand: *"Ich verwerfe veraltete Frames einfach im Client."* Zur
+Hälfte stimmt das. Unabgedeckte Perioden des geschützten Stroms:
+
+| Last | naiver Client | Supersession im Client | OneTimer |
+|---:|---:|---:|---:|
+| 100 % | 0 ‰ | 0 ‰ | 8 ‰ |
+| 125 % | 275 ‰ | 350 ‰ | **13 ‰** |
+| 150 % | 1000 ‰ | 375 ‰ | **8 ‰** |
+
+Supersession im Client rettet bei 150 % sehr viel (1000 → 375 ‰) und ist rund
+fünfzig Zeilen. **Wer einen einzigen Strom hat, sollte genau das bauen.** Bei
+375 ‰ ist aber Schluss, weil drei unabhängige Pumpen nichts voneinander wissen
+und am Server weiter die Ankunftsreihenfolge entscheidet — Faktor 47 bleibt
+für den Governor. Details:
+[`docs/benchmark/diy-baseline.md`](docs/benchmark/diy-baseline.md).
+
 ### Detektor neben Sprachmodell — das Szenario aus §1.3
 
 RF-DETR bei 30 Hz und Qwen3-0.6B auf derselben RTX 3070, ein Slot:

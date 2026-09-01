@@ -136,6 +136,7 @@ impl Scenario {
                 max_age: Duration::from_millis(*max_age),
                 in_flight_cap: cap,
                 input: None,
+                pump: false,
             })
             .collect()
     }
@@ -150,6 +151,7 @@ impl Scenario {
                 max_age: Duration::from_millis(*max_age),
                 in_flight_cap: cap,
                 input: None,
+                pump: false,
             })
             .collect()
     }

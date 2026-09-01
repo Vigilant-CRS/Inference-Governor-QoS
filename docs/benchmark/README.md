@@ -11,7 +11,8 @@ beschrieben und **nicht** als allgemeingültige Produktleistung zu lesen.
 | [`gate-m3.md`](gate-m3.md) | Schlägt er einen getunten Triton? | ja, 22,4x weniger unabgedeckte Perioden |
 | [`wire-bench.md`](wire-bench.md) | Wo wirkt er, wo nicht? | nur unter Konkurrenz |
 | [`wp26.md`](wp26.md) | Lösen kooperative Quanten die Aushungerung? | nein, gemessen und begründet |
-| [`load-ramp.md`](load-ramp.md) | Ab welcher Auslastung lohnt es sich? | siehe Kurve |
+| [`load-ramp.md`](load-ramp.md) | Ab welcher Auslastung lohnt es sich? | Knick zwischen 100 % und 110 % |
+| [`diy-baseline.md`](diy-baseline.md) | Reicht Supersession im Client? | 47x gegen den Eigenbau |
 
 ## Regeln, die für jede Zahl hier gelten
 

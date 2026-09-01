@@ -200,6 +200,7 @@ async fn run() {
                 max_age: p.max_age,
                 in_flight_cap: cap,
                 input: Some(p.input.clone()),
+                pump: false,
             })
             .collect()
     };
