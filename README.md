@@ -21,8 +21,26 @@ beste noch rechtzeitig ausfuehrbare Modellvariante.
 
 ## Status
 
-**Phase 1 von 5.** Der Scheduling-Kern und sein Simulator stehen; es gibt noch
-kein Gateway und keine Triton-Anbindung.
+**Phase 4 von 5.** Kern, Gateway, Triton-Anbindung, Shared-Memory-Passthrough
+und der Benchmark-Harness stehen und sind gegen echte Hardware gemessen. Offen
+ist Phase 5: Betrieb im Feld — Paketierung, Langzeitstabilität, Hardware
+jenseits dieser einen Maschine.
+
+### Wann lohnt sich OneTimer — und wann nicht
+
+Die Benchmarks beantworten das mit Zahlen, und die Antwort ist nicht überall
+"ja":
+
+| Situation | Empfehlung |
+|---|---|
+| unterhalb der Sättigung | **kein Governor.** Triton ist dort fehlerfrei, OneTimer kostet 0,8 % der Regelzyklen |
+| ein einziger Strom, oberhalb der Sättigung | **Supersession im Client.** Rund fünfzig Zeilen, holt bei 150 % Last den größten Teil heraus |
+| mehrere Ströme unterschiedlicher Wichtigkeit, oberhalb der Sättigung | **Governor.** Faktor 47 gegenüber dem Eigenbau, Faktor 20–28 gegenüber getuntem Triton |
+
+Der Knick liegt zwischen 100 % und 110 % Angebotslast
+([`load-ramp.md`](docs/benchmark/load-ramp.md)); der Vergleich gegen
+Clientcode steht in
+[`diy-baseline.md`](docs/benchmark/diy-baseline.md).
 
 | Phase | Inhalt | Stand |
 |---|---|---|
@@ -31,8 +49,9 @@ kein Gateway und keine Triton-Anbindung.
 | 1b | Simulierte Kernvergleiche — **Gate S** | **bestanden** |
 | 2a | OIP-Gateway, Triton-Adapter, Konfiguration, CLI | **fertig** |
 | 2b | Shared-Memory-Referenz-Passthrough | **fertig** |
-| 3 | Online Runtime Estimator | **fertig** · Profiler und Prometheus offen |
+| 3 | Online Runtime Estimator, Profiler, Prometheus-Export | **fertig** |
 | 4 | Benchmark-Harness, getunte Triton-Baseline — **Gate M3** | **bestanden** |
+| 5 | Betrieb im Feld: Paketierung, Langzeitlauf, weitere Hardware | offen |
 
 ### Gate S — simulierte Falsifikation
 
