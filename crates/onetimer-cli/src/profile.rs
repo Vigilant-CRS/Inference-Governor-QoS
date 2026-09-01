@@ -29,7 +29,9 @@
 use onetimer_backend_triton::{BackendError, TritonClient};
 use onetimer_config::Config;
 use onetimer_protocol_oip::inference::model_infer_request::InferInputTensor;
-use onetimer_protocol_oip::inference::{ModelInferRequest, ModelMetadataResponse};
+use onetimer_protocol_oip::inference::{
+    ModelInferRequest, ModelMetadataResponse, ServerMetadataResponse,
+};
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::ExitCode;
@@ -76,18 +78,23 @@ pub(crate) async fn run(
     // Deploymentkontext kommen.
     println!("# Erzeugt von `onetimer profile`");
     println!("# Backend: {endpoint}");
-    match client
+    let server_meta = if let Ok(response) = client
         .raw()
         .await?
         .server_metadata(onetimer_protocol_oip::inference::ServerMetadataRequest {})
         .await
     {
-        Ok(response) => {
-            let meta = response.into_inner();
-            println!("# Server: {} {}", meta.name, meta.version);
-        }
-        Err(_) => println!("# Server: Version nicht abfragbar"),
-    }
+        let meta = response.into_inner();
+        println!("# Server: {} {}", meta.name, meta.version);
+        meta
+    } else {
+        // Ohne Servermetadaten laesst sich kein Fingerabdruck bilden, der die
+        // Serverversion einschliesst. Das Profil entsteht trotzdem — es ist
+        // dann nur nicht pruefbar, und `doctor` sagt das.
+        println!("# Server: Version nicht abfragbar");
+        ServerMetadataResponse::default()
+    };
+
     println!("# Aufwaermlaeufe: {WARMUP}, Messlaeufe: {samples}");
     println!(
         "# ACHTUNG Ein Profil gilt nur fuer diese Umgebung. Aendern sich GPU,\n\
@@ -102,13 +109,18 @@ pub(crate) async fn run(
         for physical in names {
             // Die generierten OIP-Typen sind gross; ungeboxt landet das
             // Future auf dem Stack des Aufrufers.
-            match Box::pin(profile_variant(&client, physical, samples)).await {
+            match Box::pin(profile_variant(&client, physical, samples, &server_meta)).await {
                 Ok(measured) => {
                     println!("      - id: <unveraendert lassen>");
                     println!("        backend_model: {physical}");
                     println!(
-                        "        profile: {{ p50_us: {}, p95_us: {}, p99_us: {}, samples: {} }}",
-                        measured.p50_us, measured.p95_us, measured.p99_us, measured.samples
+                        "        profile: {{ p50_us: {}, p95_us: {}, p99_us: {}, samples: {}, \
+                         fingerprint: \"{}\" }}",
+                        measured.p50_us,
+                        measured.p95_us,
+                        measured.p99_us,
+                        measured.samples,
+                        measured.fingerprint
                     );
                     if measured.p99_us > measured.p50_us.saturating_mul(3) {
                         println!(
@@ -144,12 +156,15 @@ struct Measured {
     p95_us: u64,
     p99_us: u64,
     samples: u32,
+    /// G-010: unter welcher Umgebung diese Zahlen entstanden sind.
+    fingerprint: String,
 }
 
 async fn profile_variant(
     client: &TritonClient,
     model: &str,
     samples: usize,
+    server: &ServerMetadataResponse,
 ) -> Result<Measured, BackendError> {
     let metadata = client.model_metadata(model).await?;
     let request = build_request(model, &metadata)?;
@@ -184,6 +199,7 @@ async fn profile_variant(
         p95_us: pick(95),
         p99_us: pick(99),
         samples: u32::try_from(measurements.len()).unwrap_or(u32::MAX),
+        fingerprint: onetimer_backend_triton::fingerprint(server, &metadata),
     })
 }
 

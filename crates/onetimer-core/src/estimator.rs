@@ -308,6 +308,13 @@ impl MarginController {
     /// Deutlich kleiner als der Schritt nach oben: eine zu knappe Marge kostet
     /// eine verpasste Deadline, eine zu grosse nur Durchsatz.
     pub const RELAX_STEP: u32 = 1;
+    /// Aufschlag fuer ein nicht verifiziertes Profil (G-010, ADR-0016).
+    ///
+    /// Der Wert muss nicht richtig sein, weil der Estimator ihn korrigiert,
+    /// sobald er eigene Beobachtungen hat. Er muss nur deutlich konservativ
+    /// und begrenzt sein: zu gross kostet Durchsatz, zu klein waere ein
+    /// stillschweigend falsches Versprechen — und genau das verbietet G-010.
+    pub const UNVERIFIED_SURCHARGE: u32 = 40;
 
     /// Startet bei der uebergebenen Marge.
     #[must_use]
@@ -315,6 +322,24 @@ impl MarginController {
         Self {
             percent: start.as_percent(),
             floor: start.as_percent(),
+            ceiling: SafetyMargin::MAX_PERCENT,
+        }
+    }
+
+    /// Startet erhoeht, weil das Profil nicht verifiziert werden konnte.
+    ///
+    /// Der Boden bleibt die konfigurierte Marge: sobald der Online Estimator
+    /// genug eigene Messungen hat, darf er bis dorthin zurueckregeln. Ein
+    /// unbestaetigtes Profil ist ein Grund zur Vorsicht, kein Dauerurteil —
+    /// und nach wenigen Sekunden Betrieb misst das System ohnehin selbst.
+    #[must_use]
+    pub fn provisional(configured: SafetyMargin) -> Self {
+        let floor = configured.as_percent();
+        Self {
+            percent: floor
+                .saturating_add(Self::UNVERIFIED_SURCHARGE)
+                .min(SafetyMargin::MAX_PERCENT),
+            floor,
             ceiling: SafetyMargin::MAX_PERCENT,
         }
     }
@@ -365,6 +390,31 @@ mod tests {
 
     const M: ModelIdx = ModelIdx(0);
     const V: VariantIdx = VariantIdx(0);
+
+    /// Ein nicht verifiziertes Profil wird vorsichtiger geplant — und der
+    /// Estimator darf genau bis zur konfigurierten Marge zurueck, nie darunter.
+    #[test]
+    fn provisional_margin_starts_high_and_relaxes_to_the_configured_floor() {
+        let configured = SafetyMargin::from_percent(110).unwrap();
+        let mut controller = MarginController::provisional(configured);
+        assert_eq!(
+            controller.margin().as_percent(),
+            110 + MarginController::UNVERIFIED_SURCHARGE
+        );
+
+        for _ in 0..1_000 {
+            controller.relax();
+        }
+        assert_eq!(controller.margin().as_percent(), 110);
+    }
+
+    /// Der Aufschlag darf die Obergrenze nicht ueberschreiten.
+    #[test]
+    fn provisional_margin_stays_within_the_ceiling() {
+        let high = SafetyMargin::from_percent(SafetyMargin::MAX_PERCENT).unwrap();
+        let controller = MarginController::provisional(high);
+        assert_eq!(controller.margin().as_percent(), SafetyMargin::MAX_PERCENT);
+    }
 
     /// Ein einzelner Ausreisser darf die Planung nicht verschieben.
     #[test]

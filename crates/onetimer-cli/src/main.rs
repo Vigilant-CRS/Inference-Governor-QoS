@@ -15,6 +15,7 @@
 mod doctor;
 mod profile;
 mod serve;
+mod verify;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;

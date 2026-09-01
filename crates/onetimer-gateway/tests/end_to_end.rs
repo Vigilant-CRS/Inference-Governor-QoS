@@ -88,7 +88,7 @@ async fn start(
     let triton = Arc::new(onetimer_backend_triton::TritonClient::new(
         backend_address.to_string(),
     ));
-    let handle = actor::spawn(Arc::clone(&resolved), &triton, clock).unwrap();
+    let handle = actor::spawn(Arc::clone(&resolved), &triton, clock, &[]).unwrap();
     let service = GatewayService::new(resolved, triton, handle, clock);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

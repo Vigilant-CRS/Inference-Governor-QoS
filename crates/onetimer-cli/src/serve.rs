@@ -39,7 +39,35 @@ pub(crate) async fn run(
 
     let clock = MonotonicClock::start();
     let backend = Arc::new(TritonClient::new(&resolved.backend_endpoint));
-    let handle = actor::spawn(Arc::clone(&resolved), &backend, clock)?;
+    // G-010: bevor irgendetwas geplant wird, pruefen, ob die hinterlegten
+    // Profile ueberhaupt noch zur laufenden Umgebung gehoeren.
+    let checked = crate::verify::check(&resolved).await;
+    for entry in &checked {
+        match &entry.trust {
+            crate::verify::Trust::Mismatch { declared, actual } => tracing::warn!(
+                model = %entry.logical,
+                backend_model = %entry.physical,
+                %declared,
+                %actual,
+                "Profil gehoert zu einer anderen Umgebung; wird vorsichtiger geplant, \
+                 bis eigene Messungen vorliegen (G-010). Neu profilieren mit \
+                 `onetimer profile`."
+            ),
+            crate::verify::Trust::Missing => tracing::warn!(
+                model = %entry.logical,
+                backend_model = %entry.physical,
+                "Profil ohne Fingerabdruck; es konnte nicht geprueft werden (G-010)."
+            ),
+            crate::verify::Trust::Unavailable(reason) => tracing::warn!(
+                model = %entry.logical,
+                %reason,
+                "Profil konnte nicht geprueft werden (G-010)."
+            ),
+            crate::verify::Trust::Verified => {}
+        }
+    }
+    let unverified = crate::verify::unverified_models(&checked);
+    let handle = actor::spawn(Arc::clone(&resolved), &backend, clock, &unverified)?;
     let service = GatewayService::new(Arc::clone(&resolved), backend, handle.clone(), clock);
 
     // Der Metrik-Endpunkt laeuft auf einem eigenen Port und in einem eigenen

@@ -213,6 +213,18 @@ fn default_quality_source() -> String {
     "unknown".to_owned()
 }
 
+/// Die Profil-Fingerabdruecke eines Modells, in Variantenreihenfolge (G-010).
+///
+/// `None` heisst "nicht hinterlegt" und nicht "passt nicht" — der Unterschied
+/// entscheidet spaeter darueber, ob die Marge angehoben wird (ADR-0016).
+fn fingerprints_of(model: &ModelConfig) -> Vec<Option<String>> {
+    model
+        .variants
+        .iter()
+        .map(|v| v.profile.as_ref().and_then(|p| p.fingerprint.clone()))
+        .collect()
+}
+
 /// Ein Laufzeitprofil je Belegungsgrad.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -225,6 +237,14 @@ pub struct ProfileConfig {
     pub p99_us: u64,
     /// Anzahl der Messungen.
     pub samples: u32,
+    /// Der Fingerabdruck der Umgebung, unter der gemessen wurde (G-010).
+    ///
+    /// Von `onetimer profile` eingetragen. Weicht er beim Start von dem ab,
+    /// was das Backend meldet, gilt das Profil als nicht verifiziert und wird
+    /// vorsichtiger geplant (ADR-0016). Fehlt er, kann nichts verglichen
+    /// werden — `doctor` sagt das dann auch.
+    #[serde(default)]
+    pub fingerprint: Option<String>,
 }
 
 /// Die aufgeloeste, gepruefte Konfiguration.
@@ -240,6 +260,11 @@ pub struct Resolved {
     pub model_names: Vec<String>,
     /// Backend-Modellnamen je `[Modell][Variante]`.
     pub backend_models: Vec<Vec<String>>,
+    /// Der beim Profilieren aufgezeichnete Fingerabdruck je `[Modell][Variante]`.
+    ///
+    /// `None`, wenn das Profil vor Einfuehrung von G-010 entstanden ist oder
+    /// von Hand geschrieben wurde.
+    pub profile_fingerprints: Vec<Vec<Option<String>>>,
     /// Der Backend-Endpunkt je Modell, in Indexreihenfolge.
     pub model_endpoints: Vec<String>,
     /// Ob das Backendmodell nur ueber den Stream-Endpunkt antwortet.
@@ -573,6 +598,7 @@ impl Config {
         let model_decoupled: Vec<bool> = self.models.values().map(|m| m.decoupled).collect();
         let mut contracts = ArrayVec::new();
         let mut backend_models = Vec::new();
+        let mut profile_fingerprints: Vec<Vec<Option<String>>> = Vec::new();
 
         for (name, model) in &self.models {
             let path = format!("models.{name}");
@@ -589,6 +615,7 @@ impl Config {
                         return None;
                     }
                     backend_models.push(physical);
+                    profile_fingerprints.push(fingerprints_of(model));
                 }
                 None => return None,
             }
@@ -602,6 +629,7 @@ impl Config {
             contracts,
             model_names,
             backend_models,
+            profile_fingerprints,
             model_endpoints,
             model_decoupled,
             margin,

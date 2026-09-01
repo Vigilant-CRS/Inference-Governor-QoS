@@ -82,6 +82,7 @@ pub(crate) async fn run(
     verdict = verdict.max(check_utilization(&resolved));
     verdict = verdict.max(check_best_effort_feasibility(&resolved));
     verdict = verdict.max(check_backend(&resolved, offline).await);
+    verdict = verdict.max(check_profiles(&resolved, offline).await);
 
     println!("\nRESULT {}", verdict.label());
     Ok(match verdict {
@@ -227,6 +228,54 @@ fn check_utilization(resolved: &Resolved) -> Verdict {
         ok(&format!("geschuetzte serialisierte Auslastung {percent} %"));
         Verdict::Ready
     }
+}
+
+/// Gehoeren die hinterlegten Profile noch zur laufenden Umgebung? (G-010)
+///
+/// Kein `FAIL`: ein veraltetes Profil macht die Konfiguration nicht ungueltig,
+/// es macht sie unzuverlaessig. `serve` startet trotzdem, plant aber
+/// vorsichtiger (ADR-0016) — und der Betreiber soll hier erfahren, warum.
+async fn check_profiles(resolved: &Resolved, offline: bool) -> Verdict {
+    if offline {
+        warn("Profile nicht gegen das Backend geprueft (--offline)");
+        return Verdict::ReadyWithWarnings;
+    }
+
+    let checked = crate::verify::check(resolved).await;
+    if checked.is_empty() {
+        return Verdict::Ready;
+    }
+
+    let mut verdict = Verdict::Ready;
+    for entry in &checked {
+        let name = format!("{} -> {}", entry.logical, entry.physical);
+        match &entry.trust {
+            crate::verify::Trust::Verified => {
+                ok(&format!("{name}: Profil passt zur Umgebung"));
+            }
+            crate::verify::Trust::Missing => {
+                warn(&format!(
+                    "{name}: Profil ohne Fingerabdruck — nicht pruefbar. \
+                     Neu messen mit `onetimer profile`."
+                ));
+                verdict = verdict.max(Verdict::ReadyWithWarnings);
+            }
+            crate::verify::Trust::Mismatch { declared, actual } => {
+                warn(&format!(
+                    "{name}: Profil gehoert zu einer anderen Umgebung \
+                     (hinterlegt {declared}, gemessen {actual}). Es wird bis auf \
+                     Weiteres mit erhoehter Marge geplant; neu messen mit \
+                     `onetimer profile`."
+                ));
+                verdict = verdict.max(Verdict::ReadyWithWarnings);
+            }
+            crate::verify::Trust::Unavailable(reason) => {
+                warn(&format!("{name}: nicht pruefbar ({reason})"));
+                verdict = verdict.max(Verdict::ReadyWithWarnings);
+            }
+        }
+    }
+    verdict
 }
 
 /// Erreichbarkeit des Backends und Bereitschaft aller Varianten.

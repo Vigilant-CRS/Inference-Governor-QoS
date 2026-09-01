@@ -281,6 +281,17 @@ impl Scheduler {
         &self.estimator
     }
 
+    /// Behandelt das Profil dieses Modells als nicht verifiziert (G-010).
+    ///
+    /// Wird beim Start aufgerufen, wenn der Fingerabdruck des Backends nicht
+    /// zu dem passt, unter dem das Profil gemessen wurde. Die Planung wird
+    /// dadurch vorsichtiger, ohne den Betrieb zu verweigern (ADR-0016).
+    pub fn mark_profile_unverified(&mut self, model: ModelIdx) {
+        if let Some(controller) = self.margins.get_mut(model.get()) {
+            *controller = MarginController::provisional(self.margin);
+        }
+    }
+
     /// Die aktuell wirksame Marge eines Modells.
     #[must_use]
     pub fn margin_of(&self, model: ModelIdx) -> SafetyMargin {

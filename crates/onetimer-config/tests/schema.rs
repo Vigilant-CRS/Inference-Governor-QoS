@@ -124,3 +124,49 @@ fn out_of_range_values_are_rejected_not_clamped() {
         "{findings:?}"
     );
 }
+
+/// G-010: der Fingerabdruck muss aus der Datei bis in `Resolved` durchkommen —
+/// sonst kann `serve` beim Start nichts vergleichen.
+#[test]
+fn the_profile_fingerprint_survives_resolution() {
+    let yaml = r#"
+version: 1
+backend:
+  type: triton
+  grpc_endpoint: 127.0.0.1:8001
+  slots: 1
+  pipelining_depth: 0
+  safety_margin_percent: 110
+models:
+  detector:
+    class: protected
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 33, deadline_ms: 33, max_age_ms: 66 }
+    variants:
+      - id: main
+        backend_model: rfdetr
+        quality: { value: 1.0, source: measured }
+        profile: { p50_us: 1000, p95_us: 1200, p99_us: 1400, samples: 120, fingerprint: "abc123" }
+  other:
+    class: high
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 50, deadline_ms: 50, max_age_ms: 100 }
+    variants:
+      - id: main
+        backend_model: pose_main
+        quality: { value: 1.0, source: measured }
+        profile: { p50_us: 500, p95_us: 600, p99_us: 700, samples: 120 }
+"#;
+    let resolved = Config::from_yaml(yaml).unwrap().resolve().unwrap();
+    let detector = resolved.model_index("detector").unwrap();
+    let other = resolved.model_index("other").unwrap();
+
+    assert_eq!(
+        resolved.profile_fingerprints[detector.get()][0].as_deref(),
+        Some("abc123")
+    );
+    // Ohne Fingerabdruck bleibt es `None`. Das wird spaeter als "nicht
+    // pruefbar" gemeldet und nicht als Abweichung — ein Profil aus der Zeit
+    // vor G-010 darf nicht stillschweigend die Marge erhoehen (ADR-0016).
+    assert_eq!(resolved.profile_fingerprints[other.get()][0], None);
+}

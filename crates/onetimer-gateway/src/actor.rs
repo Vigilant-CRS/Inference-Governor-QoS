@@ -156,6 +156,7 @@ pub fn spawn(
     config: Arc<Resolved>,
     backend: &Arc<TritonClient>,
     clock: MonotonicClock,
+    unverified: &[onetimer_core::ModelIdx],
 ) -> Result<Handle, SchedulerError> {
     // Fuer jeden in der Konfiguration genannten Endpunkt ein Client. Der
     // uebergebene deckt den Standardendpunkt ab.
@@ -171,12 +172,17 @@ pub fn spawn(
 
     let overload = OverloadController::new(OverloadConfig::default(), clock.now())
         .map_err(|_| SchedulerError::NoModels)?;
-    let scheduler = Scheduler::new(
+    let mut scheduler = Scheduler::new(
         config.contracts.clone(),
         config.slots.clone(),
         overload,
         config.margin,
     )?;
+    // G-010: Profile, deren Umgebung sich geaendert hat, werden vorsichtiger
+    // geplant, bis der Estimator eigene Messungen hat (ADR-0016).
+    for model in unverified {
+        scheduler.mark_profile_unverified(*model);
+    }
 
     let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
     let actor = Actor {

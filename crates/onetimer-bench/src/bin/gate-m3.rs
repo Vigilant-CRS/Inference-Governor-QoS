@@ -229,7 +229,8 @@ async fn run() {
 
     // --- Mit OneTimer -----------------------------------------------------
     let clock = MonotonicClock::start();
-    let handle = actor::spawn(Arc::clone(&resolved), &triton, clock).expect("Scheduler startet");
+    let handle =
+        actor::spawn(Arc::clone(&resolved), &triton, clock, &[]).expect("Scheduler startet");
     let service = GatewayService::new(Arc::clone(&resolved), triton, handle.clone(), clock);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

@@ -24,6 +24,7 @@ Spec-Stelle explizit.
 | [0013](0013-margin-corrects-forecasts-not-contracts.md) | Die Marge korrigiert Prognosefehler, nicht Vertragsverletzungen | §13.3 | Akzeptiert |
 | [0014](0014-cooperative-quanta.md) | Das Quantum ist so gross, wie der Slack es zulaesst | §15.3, WP26 | Akzeptiert |
 | [0015](0015-quantum-sizing-must-not-spend-the-deadline-reserve.md) | Ein Quantum darf die Deadline-Reserve nicht aufzehren | ADR-0014 | Akzeptiert |
+| [0016](0016-unverified-profiles-widen-the-margin.md) | Ein unbestaetigtes Profil weitet die Marge, es verweigert nicht den Start | G-010, L-014 | Akzeptiert |
 
 ## Format
 

@@ -20,6 +20,9 @@
 
 pub mod client;
 pub mod error;
+pub mod fingerprint;
+
+pub use fingerprint::fingerprint;
 
 pub use client::{
     CONNECTION_WINDOW_BYTES, DEFAULT_MAX_MESSAGE_BYTES, STREAM_WINDOW_BYTES, TritonClient,
