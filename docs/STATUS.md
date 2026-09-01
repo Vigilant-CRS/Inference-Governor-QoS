@@ -1,6 +1,6 @@
 # Arbeitsstand
 
-Stand: 2026-08-31 · Gate S bestanden, Phasen 0-2 fertig, Phase 3 begonnen
+Stand: 2026-09-01 · **Gate M3 bestanden** · Phasen 0-4 fertig
 
 ## Fertig
 
@@ -132,21 +132,40 @@ laenger dauert als die kuerzeste geschuetzte Periode, startet unter Last nie —
 unabhaengig von der Auslastung. Das betrifft genau das Szenario, mit dem
 Spec 1.3 das Produkt begruendet.
 
+### Phase 4 — Gate M3: bestanden
+
+- `onetimer profile` (WP10) misst echte Laufzeitprofile am Backend. Es
+  verlangt bewusst **keine** vorhandenen Profile: sonst muesste der Nutzer von
+  Hand hinschreiben, was das Werkzeug gerade messen soll.
+- Prometheus-Export (WP13) mit den Zaehlern aus Spec 18. Die wichtigsten sind
+  die, die zeigen, was das System bewusst **nicht** getan hat.
+- `gate-m3` faehrt denselben Workload gegen echten Triton, einmal direkt und
+  einmal ueber OneTimer, ueber System Shared Memory.
+- Ergebnis gegen die **getunte** Baseline (Rate Limiter mit Prioritaeten):
+  22,4x weniger unabgedeckte Perioden beim Detektor, AoI p95 von 77 ms auf
+  33 ms. Details in `docs/benchmark/gate-m3.md`.
+
+Drei Umgebungsdetails, die kein Quickstart erwaehnt und die den Lauf je einmal
+zum Absturz gebracht haben, stehen jetzt in `deploy/triton/README.md`:
+`--device nvidia.com/gpu=all` statt `--gpus all`, `--allow-client-shm=true`
+und `--ipc=host`.
+
 ## Als naechstes
 
 **Phase 3 — Profiler, Online Estimator, Metrics.** Der Scheduler emittiert
 `Action::ObservedRuntime` samt Belegungsgrad; verarbeitet wird das noch nicht.
 
-**Phase 4 — Gate M3.** Der eigentliche Produktbeweis: gegen eine **getunte**
-Triton-Baseline auf echter Hardware.
+**Der Best-Effort-Fall (ADR-0012).** Das gemessene Ergebnis bestaetigt ihn auf
+echter Hardware: der lange Block laeuft nicht. Bis WP26 (kooperative Quanten)
+gilt die Zusage aus Spec 3.4 nur ab zwei Slots. Entweder rueckt WP26 vor, oder
+die Positionierung wird eingeschraenkt.
 
-### Was Gate M3 hier blockiert
+**Die Luecken im Messbild.** Bursts und Lastrampe aus Spec 19.4, ein zweiter
+Betriebspunkt, die Qualitaets-Deadline-Frontier aus Spec 19.7 und ein Vergleich
+gegen Holoscan.
 
-Auf dieser Maschine ist kein `nvidia-container-toolkit` installiert, also hat
-Docker keinen Zugriff auf die RTX 3070. Ohne das laeuft Triton nur auf der CPU,
-und die GPU-Konkurrenz — der eigentliche Gegenstand der Produkthypothese —
-laesst sich nicht messen. Ausserdem sind auf `/` nur rund 48 GB frei; ein
-Triton-Image belegt davon einen erheblichen Teil.
+**Product Preview (WP21).** Docker-Compose, Quickstart, Beispielmodelle nach
+Lizenz getrennt.
 
 ## Offene Punkte
 

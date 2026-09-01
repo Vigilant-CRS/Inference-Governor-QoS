@@ -13,6 +13,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 mod doctor;
+mod profile;
 mod serve;
 
 use clap::{Parser, Subcommand};
@@ -37,6 +38,15 @@ enum Command {
         /// Nur die Datei pruefen, das Backend nicht kontaktieren.
         #[arg(long)]
         offline: bool,
+    },
+    /// Misst Laufzeitprofile am Backend und gibt sie einfuegefertig aus.
+    Profile {
+        /// Pfad zur Konfigurationsdatei.
+        #[arg(short, long, value_name = "DATEI")]
+        config: PathBuf,
+        /// Anzahl der Messlaeufe je Variante.
+        #[arg(long, default_value_t = profile::DEFAULT_SAMPLES)]
+        samples: usize,
     },
     /// Startet den Governor.
     Serve {
@@ -86,6 +96,7 @@ async fn run() -> ExitCode {
     // 90-KB-Future auf dem Stack des Aufrufers.
     let result = match cli.command {
         Command::Doctor { config, offline } => Box::pin(doctor::run(&config, offline)).await,
+        Command::Profile { config, samples } => Box::pin(profile::run(&config, samples)).await,
         Command::Serve { config, listen } => Box::pin(serve::run(&config, &listen)).await,
     };
 

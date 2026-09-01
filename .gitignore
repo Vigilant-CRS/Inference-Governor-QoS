@@ -2,3 +2,9 @@
 **/*.rs.bk
 *.pdb
 /artifacts
+
+# Modellgewichte gehoeren nicht in die Versionsverwaltung.
+*.onnx
+*.pth
+*.plan
+*.engine

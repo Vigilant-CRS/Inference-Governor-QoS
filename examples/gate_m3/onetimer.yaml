@@ -1,0 +1,65 @@
+# Gate-M3-Konfiguration: echte Modelle auf einer echten GPU.
+#
+# Modellrepository und Startbefehl: deploy/triton/README.md
+# Die Profile stammen aus `onetimer profile` und gelten nur fuer die dort
+# vermerkte Umgebung (Spec 13.5):
+#   RTX 3070 Laptop, Treiber 580.173.02, Triton 2.70.0 (26.06-py3),
+#   onnxruntime-Backend, gemessen am 2026-09-01.
+#
+# Geschuetzte serialisierte Auslastung: 92 %. Zusammen mit dem VLM rund 116 %,
+# also echte Ueberlast - der Bereich, in dem sich entscheidet, ob Steuerung
+# etwas bringt.
+version: 1
+
+backend:
+  type: triton
+  grpc_endpoint: "127.0.0.1:8001"
+  slots: 1
+  pipelining_depth: 0
+  safety_margin_percent: 110
+  # Der lange VLM-Block darf die zeitkritische Wahrnehmung nicht begleiten.
+  no_corun:
+    - [detector, vlm]
+
+models:
+  # RF-DETR bei 512 px - das tatsaechliche Detektionsmodell, kein Stellvertreter.
+  detector:
+    class: protected
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 33, deadline_ms: 33, max_age_ms: 66, variant_dwell_ms: 200 }
+    variants:
+      - id: rfdetr
+        backend_model: rfdetr
+        quality: { value: 1.00, source: user_declared }
+        profile: { p50_us: 14916, p95_us: 17081, p99_us: 17470, samples: 120 }
+
+  pose:
+    class: high
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 33, deadline_ms: 33, max_age_ms: 66 }
+    variants:
+      - id: main
+        backend_model: pose_main
+        quality: { value: 1.00, source: user_declared }
+        profile: { p50_us: 3987, p95_us: 4630, p99_us: 5506, samples: 120 }
+
+  depth:
+    class: high
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 66, deadline_ms: 66, max_age_ms: 132 }
+    variants:
+      - id: main
+        backend_model: depth_main
+        quality: { value: 1.00, source: user_declared }
+        profile: { p50_us: 7908, p95_us: 9367, p99_us: 9534, samples: 120 }
+
+  # Ein langer, nicht unterbrechbarer Block - das Verhalten eines VLM auf der GPU.
+  vlm:
+    class: best_effort
+    queue: { policy: fifo, capacity: 4, overflow: backpressure_client }
+    contract: { deadline_ms: 800, max_age_ms: 1500 }
+    variants:
+      - id: main
+        backend_model: vlm_main
+        quality: { value: 1.00, source: user_declared }
+        profile: { p50_us: 94547, p95_us: 102136, p99_us: 109791, samples: 120 }

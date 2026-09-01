@@ -11,6 +11,7 @@
 
 use onetimer_protocol_oip::inference::grpc_inference_service_client::GrpcInferenceServiceClient;
 use onetimer_protocol_oip::inference::infer_parameter::ParameterChoice;
+use onetimer_protocol_oip::inference::model_infer_request::InferInputTensor;
 use onetimer_protocol_oip::inference::{InferParameter, ModelInferRequest};
 use onetimer_protocol_oip::params::P_AGE_US;
 use onetimer_sim::coverage::{Coverage, CoverageTracker};
@@ -21,8 +22,28 @@ use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use tonic::transport::Channel;
 
+/// Die Eingabe, die ein Strom mitschickt.
+///
+/// Als **Shared-Memory-Referenz**: der Request nennt nur Region, Offset und
+/// Groesse. Ein Gate-M3-Vergleich ueber den Copy-Pfad wuerde den Transport
+/// messen statt das Scheduling, und der Governor traegt diese Kosten doppelt
+/// (ADR-0003).
+#[derive(Debug, Clone)]
+pub struct InputSpec {
+    /// Name des Eingabetensors laut Modellmetadaten.
+    pub name: String,
+    /// Datentyp laut Modellmetadaten.
+    pub datatype: String,
+    /// Vollstaendige Form einschliesslich Batchdimension.
+    pub shape: Vec<i64>,
+    /// Die beim Backend registrierte Region.
+    pub region: String,
+    /// Groesse des Tensors in Bytes.
+    pub byte_size: u64,
+}
+
 /// Ein Sensorstrom im Lastmodell.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct StreamDef {
     /// Name im Report.
     pub name: &'static str,
@@ -40,6 +61,10 @@ pub struct StreamDef {
     /// Treiber selbst unbegrenzt Speicher belegen und damit etwas anderes
     /// messen als das System.
     pub in_flight_cap: usize,
+    /// Die Eingabe, falls das Backend eine braucht.
+    ///
+    /// `None` fuer das Mock-Backend, das keine Tensoren auswertet.
+    pub input: Option<InputSpec>,
 }
 
 /// Das Ergebnis eines Stroms.
@@ -113,7 +138,7 @@ pub async fn drive(
         let Some(state) = states.get(index).cloned() else {
             continue;
         };
-        let stream = *stream;
+        let stream = stream.clone();
         let client = connect(endpoint).await;
         tasks.push(tokio::spawn(async move {
             run_stream(client, stream, state, origin, duration, via_governor).await;
@@ -179,10 +204,12 @@ async fn run_stream(
         let mut client = client.clone();
         let state = Arc::clone(&state);
         let id = format!("{}:{frame}", stream.name);
+        let model = stream.model;
+        let input = stream.input.clone();
         tokio::spawn(async move {
             let _permit = permit;
             let age = capture.elapsed();
-            let request = build_request(stream.model, &id, via_governor, age);
+            let request = build_request(model, &id, via_governor, age, input.as_ref());
             state.sent.fetch_add(1, Ordering::Relaxed);
 
             match client.model_infer(request).await {
@@ -209,7 +236,13 @@ async fn run_stream(
     }
 }
 
-fn build_request(model: &str, id: &str, via_governor: bool, age: Duration) -> ModelInferRequest {
+fn build_request(
+    model: &str,
+    id: &str,
+    via_governor: bool,
+    age: Duration,
+    input: Option<&InputSpec>,
+) -> ModelInferRequest {
     let mut parameters = HashMap::new();
     if via_governor {
         // ADR-0011: der hosttopologieunabhaengige Weg. Der Client sagt, wie alt
@@ -223,13 +256,45 @@ fn build_request(model: &str, id: &str, via_governor: bool, age: Duration) -> Mo
             },
         );
     }
+    let inputs = input.map_or_else(Vec::new, |spec| {
+        let mut tensor_params = HashMap::new();
+        tensor_params.insert(
+            "shared_memory_region".to_owned(),
+            InferParameter {
+                parameter_choice: Some(ParameterChoice::StringParam(spec.region.clone())),
+            },
+        );
+        tensor_params.insert(
+            "shared_memory_byte_size".to_owned(),
+            InferParameter {
+                parameter_choice: Some(ParameterChoice::Int64Param(
+                    i64::try_from(spec.byte_size).unwrap_or(i64::MAX),
+                )),
+            },
+        );
+        tensor_params.insert(
+            "shared_memory_offset".to_owned(),
+            InferParameter {
+                parameter_choice: Some(ParameterChoice::Int64Param(0)),
+            },
+        );
+        vec![InferInputTensor {
+            name: spec.name.clone(),
+            datatype: spec.datatype.clone(),
+            shape: spec.shape.clone(),
+            parameters: tensor_params,
+            contents: None,
+        }]
+    });
+
     ModelInferRequest {
         model_name: model.to_owned(),
         model_version: String::new(),
         id: id.to_owned(),
         parameters,
-        inputs: Vec::new(),
+        inputs,
         outputs: Vec::new(),
+        // Leer: die Nutzlast reist als Referenz, nicht im Request.
         raw_input_contents: Vec::new(),
     }
 }

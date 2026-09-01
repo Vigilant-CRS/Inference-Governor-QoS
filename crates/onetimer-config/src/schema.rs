@@ -351,6 +351,32 @@ impl Config {
         })
     }
 
+    /// Die Backend-Adresse und die physischen Modellnamen, ohne
+    /// vollstaendige Aufloesung.
+    ///
+    /// `onetimer profile` braucht genau das und **nicht mehr**: es soll
+    /// Laufzeitprofile erst erzeugen. Wuerde es die volle Aufloesung
+    /// verlangen, muesste die Konfiguration bereits Profile enthalten — der
+    /// Nutzer haette also von Hand hinschreiben muessen, was das Werkzeug
+    /// gerade messen soll. Der Workflow aus Spec 6.3 (doctor, profile, serve)
+    /// waere damit unbenutzbar.
+    #[must_use]
+    pub fn profiling_targets(&self) -> (String, Vec<(String, Vec<String>)>) {
+        let models = self
+            .models
+            .iter()
+            .map(|(name, model)| {
+                let variants = model
+                    .variants
+                    .iter()
+                    .map(|v| v.backend_model.clone())
+                    .collect();
+                (name.clone(), variants)
+            })
+            .collect();
+        (self.backend.grpc_endpoint.clone(), models)
+    }
+
     /// Prueft die Konfiguration und uebersetzt sie in Kerntypen.
     ///
     /// # Errors

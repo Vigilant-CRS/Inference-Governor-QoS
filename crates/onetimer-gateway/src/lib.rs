@@ -11,15 +11,18 @@
 //! * [`actor`] — der Single-Owner-Scheduler-Task.
 //! * [`service`] — der gRPC-Dienst; uebersetzt zwischen Draht und Kern.
 //! * [`outcome`] — die Uebersetzung terminaler Zustaende in gRPC-Antworten.
+//! * [`exporter`] — der Prometheus-Endpunkt.
 //! * [`shm`] — Buchfuehrung ueber die durchgereichten Shared-Memory-Regionen.
 
 pub mod actor;
 pub mod clock;
+pub mod exporter;
 pub mod outcome;
 pub mod service;
 pub mod shm;
 
 pub use actor::{Handle, Msg};
 pub use clock::MonotonicClock;
+pub use exporter::render as render_metrics;
 pub use service::GatewayService;
 pub use shm::{Region, ShmRegistry};

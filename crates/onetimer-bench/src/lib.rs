@@ -30,6 +30,7 @@
 
 pub mod backend;
 pub mod service;
+pub mod shm;
 pub mod workload;
 
 pub use backend::Backend;

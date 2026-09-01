@@ -32,7 +32,7 @@ kein Gateway und keine Triton-Anbindung.
 | 2a | OIP-Gateway, Triton-Adapter, Konfiguration, CLI | **fertig** |
 | 2b | Shared-Memory-Referenz-Passthrough | **fertig** |
 | 3 | Online Runtime Estimator | **fertig** · Profiler und Prometheus offen |
-| 4 | Benchmark-Harness, getunte Triton-Baseline — **Gate M3** | offen |
+| 4 | Benchmark-Harness, getunte Triton-Baseline — **Gate M3** | **bestanden** |
 
 ### Gate S — simulierte Falsifikation
 
@@ -104,7 +104,28 @@ eine Eigenschaft nicht unterbrechbarer Ausführung und in
 
 Details: [`docs/benchmark/wire-bench.md`](docs/benchmark/wire-bench.md).
 
-> **Es liegen keine Messwerte gegen echte Hardware vor.** Alle Zahlen in der
+### Gate M3 — gegen getunten Triton, auf echter GPU
+
+RTX 3070, Triton 2.70.0, RF-DETR 512 px als Detektor, System Shared Memory auf
+beiden Seiten, Triton mit Rate Limiter und Prioritäten. Geschützte Auslastung
+92 %, mit dem langen Block zusammen rund 116 %:
+
+| Strom | Abdeckung Triton | OneTimer | AoI p95 Triton | OneTimer | Faktor |
+|---|---:|---:|---:|---:|---:|
+| detector (RF-DETR) | 84 % | **99 %** | 77 ms | **33 ms** | **22,4x** |
+| pose | 91 % | **99 %** | 51 ms | **33 ms** | **10,6x** |
+| depth | 97 % | **99 %** | 53 ms | 61 ms | **2,6x** |
+| vlm | 100 % | **0 %** | 84 ms | — | — |
+
+**Ziel A′ ist erreicht** — mindestens 2x weniger unabgedeckte Perioden für
+geschützte Ströme, tatsächlich 2,6x bis 22,4x. Der Preis steht daneben: der
+lange Best-Effort-Block läuft nicht, und `onetimer doctor` sagt das vor dem
+Start.
+
+Details, Grenzen und Reproduktion:
+[`docs/benchmark/gate-m3.md`](docs/benchmark/gate-m3.md).
+
+> **Diese Werte stammen von einer Maschine, einem Lastprofil und einer GPU.** Alle Zahlen in der
 > Spezifikation sind Zielwerte, Rechenbeispiele oder Validierungsschwellen. Die
 > Produkthypothese ist unbewiesen, bis Gate M3 sie gegen eine **getunte**
 > Triton-Baseline bestaetigt oder widerlegt.
