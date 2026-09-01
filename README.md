@@ -125,6 +125,28 @@ Start.
 Details, Grenzen und Reproduktion:
 [`docs/benchmark/gate-m3.md`](docs/benchmark/gate-m3.md).
 
+### Ab welcher Auslastung lohnt es sich?
+
+Unabgedeckte Perioden des geschützten Stroms, Median aus drei Wiederholungen:
+
+| Angebotslast | Triton | OneTimer | Faktor |
+|---:|---:|---:|---:|
+| 50 % | 0 ‰ | 7 ‰ | −7,0x |
+| 90 % | 0 ‰ | 7 ‰ | −7,0x |
+| 100 % | 2 ‰ | 7 ‰ | −3,5x |
+| **110 %** | **299 ‰** | **15 ‰** | **19,9x** |
+| **125 %** | **476 ‰** | **17 ‰** | **28,0x** |
+| **150 %** | **500 ‰** | **24 ‰** | **20,8x** |
+
+**Der Knick liegt zwischen 100 % und 110 %.** Darunter ist Triton perfekt und
+OneTimer kostet 0,7 % der Regelzyklen. Darüber bricht Triton ein — bei 150 %
+fehlt in jedem zweiten Zyklus ein frisches Ergebnis — während OneTimer den
+Detektor bei 97,6 % hält.
+
+Der Preis steht daneben: bei 150 % werden die `high`-Ströme praktisch nicht
+mehr bedient. OneTimer entscheidet nicht, *ob* etwas verloren geht, sondern
+*was*. Details: [`docs/benchmark/load-ramp.md`](docs/benchmark/load-ramp.md).
+
 ### Detektor neben Sprachmodell — das Szenario aus §1.3
 
 RF-DETR bei 30 Hz und Qwen3-0.6B auf derselben RTX 3070, ein Slot:

@@ -1,0 +1,63 @@
+# OneTimer-Quickstart.
+#
+# Das NVIDIA-Image wird NICHT mitgeliefert, sondern aus der offiziellen
+# Registry bezogen; die NVIDIA-Bedingungen sind dabei zu akzeptieren
+# (Spec 6.4, 20.3).
+#
+# Voraussetzung: GPU-Zugriff im Container. Prüfen mit
+#   docker run --rm --device nvidia.com/gpu=all ubuntu:24.04 nvidia-smi -L
+# Details und Fallstricke: ../triton/README.md
+
+services:
+  triton:
+    image: nvcr.io/nvidia/tritonserver:26.06-py3
+    command: >
+      tritonserver
+      --model-repository=/models
+      --allow-client-shm=true
+      --rate-limit=execution_count
+    volumes:
+      - ${ONETIMER_MODELS:?Pfad zum Triton-Modellrepository setzen}:/models:ro
+    devices:
+      - nvidia.com/gpu=all
+    # Nicht optional: der Datenpfad läuft über System Shared Memory, und ein
+    # Container hat standardmäßig sein eigenes /dev/shm. Ohne das findet
+    # Triton die Region des Clients nicht (ADR-0003).
+    ipc: host
+    ports:
+      - "8000:8000"   # HTTP
+      - "8001:8001"   # gRPC
+      - "8002:8002"   # Prometheus des Backends
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v2/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  onetimer:
+    image: onetimer:latest
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    command:
+      - serve
+      - "-c"
+      - /etc/onetimer/onetimer.yaml
+      - "--listen"
+      - "0.0.0.0:9001"
+      - "--metrics"
+      - "0.0.0.0:9090"
+    volumes:
+      - ${ONETIMER_CONFIG:?Pfad zur onetimer.yaml setzen}:/etc/onetimer/onetimer.yaml:ro
+    # Dieselbe IPC-Sicht wie Triton: der Governor reicht Shm-Referenzen durch
+    # und muss dieselben Regionen sehen können wie der Client.
+    ipc: host
+    ports:
+      - "9001:9001"
+      - "9090:9090"   # /metrics und /healthz
+    depends_on:
+      triton:
+        condition: service_healthy
+    environment:
+      RUST_LOG: "${RUST_LOG:-info}"

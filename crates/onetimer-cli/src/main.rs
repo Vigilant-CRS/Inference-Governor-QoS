@@ -56,6 +56,9 @@ enum Command {
         /// Adresse, auf der das Gateway lauscht.
         #[arg(short, long, default_value = "0.0.0.0:9001")]
         listen: String,
+        /// Adresse fuer den Prometheus-Endpunkt (`/metrics`, `/healthz`).
+        #[arg(long, default_value = "0.0.0.0:9090")]
+        metrics: String,
     },
 }
 
@@ -97,7 +100,11 @@ async fn run() -> ExitCode {
     let result = match cli.command {
         Command::Doctor { config, offline } => Box::pin(doctor::run(&config, offline)).await,
         Command::Profile { config, samples } => Box::pin(profile::run(&config, samples)).await,
-        Command::Serve { config, listen } => Box::pin(serve::run(&config, &listen)).await,
+        Command::Serve {
+            config,
+            listen,
+            metrics,
+        } => Box::pin(serve::run(&config, &listen, &metrics)).await,
     };
 
     match result {

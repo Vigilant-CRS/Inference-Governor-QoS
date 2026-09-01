@@ -20,7 +20,11 @@ use tonic::transport::Server;
 /// Wenn die Konfiguration ungueltig ist oder die Adresse nicht gebunden werden
 /// kann. Eine ungueltige Konfiguration startet den Prozess **nicht** mit
 /// Defaults (Spec L-020).
-pub(crate) async fn run(path: &Path, listen: &str) -> Result<ExitCode, Box<dyn std::error::Error>> {
+pub(crate) async fn run(
+    path: &Path,
+    listen: &str,
+    metrics: &str,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let text = std::fs::read_to_string(path)?;
     let config = Config::from_yaml(&text)?;
 
@@ -36,7 +40,21 @@ pub(crate) async fn run(path: &Path, listen: &str) -> Result<ExitCode, Box<dyn s
     let clock = MonotonicClock::start();
     let backend = Arc::new(TritonClient::new(&resolved.backend_endpoint));
     let handle = actor::spawn(Arc::clone(&resolved), &backend, clock)?;
-    let service = GatewayService::new(Arc::clone(&resolved), backend, handle, clock);
+    let service = GatewayService::new(Arc::clone(&resolved), backend, handle.clone(), clock);
+
+    // Der Metrik-Endpunkt laeuft auf einem eigenen Port und in einem eigenen
+    // Task: er darf den Inferenzpfad weder blockieren noch mit ihm um
+    // Verbindungen konkurrieren. Faellt er aus, laeuft der Governor weiter —
+    // umgekehrt waere es falsch herum.
+    let metrics_address = metrics.parse()?;
+    let metrics_handle = handle.clone();
+    tokio::spawn(async move {
+        if let Err(error) = onetimer_gateway::exporter::serve(metrics_handle, metrics_address).await
+        {
+            tracing::error!(%error, "Metrik-Endpunkt beendet");
+        }
+    });
+    tracing::info!(%metrics_address, "Metriken unter /metrics");
 
     let address = listen.parse()?;
     tracing::info!(
