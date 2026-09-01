@@ -168,6 +168,20 @@ fn render_derived(out: &mut String, metrics: &Metrics) {
         ratio(u64::from(metrics.stale_compute_permille()))
     );
 
+    for (index, percent) in metrics.margin_percent.iter().enumerate() {
+        if index == 0 {
+            let _ = writeln!(
+                out,
+                "# HELP onetimer_margin_percent Aktuell wirksame Sicherheitsmarge je Modell."
+            );
+            let _ = writeln!(out, "# TYPE onetimer_margin_percent gauge");
+        }
+        let _ = writeln!(
+            out,
+            "onetimer_margin_percent{{model=\"{index}\"}} {percent}"
+        );
+    }
+
     for (index, count) in metrics.variant_selected.iter().enumerate() {
         if index == 0 {
             let _ = writeln!(

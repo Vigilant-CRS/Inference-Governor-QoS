@@ -267,7 +267,19 @@ impl Actor {
             }
             Msg::Tick => self.scheduler.on_event(now, Event::Tick, &mut sink),
             Msg::Snapshot(tx) => {
-                let _ = tx.send(*self.scheduler.metrics());
+                // Die Margen liegen nicht im Zaehlerblock, sondern in den
+                // Reglern. Sie gehoeren trotzdem in den Snapshot: ueber Stunden
+                // gelesen zeigen sie, ob das System zur Ruhe kommt.
+                let mut metrics = *self.scheduler.metrics();
+                for (index, slot) in metrics.margin_percent.iter_mut().enumerate() {
+                    if let Ok(model) = u16::try_from(index) {
+                        *slot = self
+                            .scheduler
+                            .margin_of(onetimer_core::ModelIdx(model))
+                            .as_percent();
+                    }
+                }
+                let _ = tx.send(metrics);
                 return;
             }
         }

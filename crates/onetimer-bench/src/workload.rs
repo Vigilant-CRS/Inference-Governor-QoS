@@ -150,7 +150,11 @@ pub async fn drive(
             continue;
         };
         let stream = stream.clone();
-        let client = connect(endpoint).await;
+        // Ist das Ziel gerade weg, faellt dieser Strom fuer dieses Fenster aus
+        // und meldet null Lieferungen — der Lauf geht weiter.
+        let Ok(client) = try_connect(endpoint).await else {
+            continue;
+        };
         tasks.push(tokio::spawn(async move {
             if stream.pump {
                 run_stream_pump(client, stream, state, origin, duration, via_governor).await;
@@ -415,15 +419,30 @@ fn to_core(d: Duration) -> onetimer_core::Duration {
 ///
 /// Wenn keine Verbindung aufgebaut werden kann.
 pub async fn connect(endpoint: &str) -> GrpcInferenceServiceClient<Channel> {
-    let channel = tonic::transport::Endpoint::from_shared(format!("http://{endpoint}"))
-        .expect("gueltiger Endpunkt")
+    #[allow(clippy::expect_used)]
+    try_connect(endpoint).await.expect("Verbindung zum Ziel")
+}
+
+/// Wie [`connect`], aber ohne Panik bei unerreichbarem Ziel.
+///
+/// Fuer kurze Benchmarks ist ein Abbruch die richtige Antwort — laeuft das
+/// Backend nicht, ist die Messung sinnlos. Fuer einen Dauerlauf ueber Stunden
+/// waere sie falsch: ein einzelner Aussetzer des Backends darf nicht die
+/// gesamte Nacht kosten, sondern gehoert protokolliert und ueberstanden.
+///
+/// # Errors
+///
+/// Wenn der Endpunkt ungueltig ist oder die Verbindung nicht zustande kommt.
+pub async fn try_connect(
+    endpoint: &str,
+) -> Result<GrpcInferenceServiceClient<Channel>, tonic::transport::Error> {
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://{endpoint}"))?
         .initial_stream_window_size(onetimer_backend_triton::STREAM_WINDOW_BYTES)
         .initial_connection_window_size(onetimer_backend_triton::CONNECTION_WINDOW_BYTES)
         .tcp_nodelay(true)
         .connect()
-        .await
-        .expect("Verbindung zum Ziel");
-    GrpcInferenceServiceClient::new(channel)
+        .await?;
+    Ok(GrpcInferenceServiceClient::new(channel)
         .max_decoding_message_size(onetimer_backend_triton::DEFAULT_MAX_MESSAGE_BYTES)
-        .max_encoding_message_size(onetimer_backend_triton::DEFAULT_MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(onetimer_backend_triton::DEFAULT_MAX_MESSAGE_BYTES))
 }

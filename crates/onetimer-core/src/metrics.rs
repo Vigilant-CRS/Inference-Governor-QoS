@@ -5,7 +5,7 @@
 //! ADR-0005 gehoeren in den Exporter bzw. in das Benchmark-Harness, wo sie
 //! ueber einen definierten Messzeitraum gebildet werden.
 
-use crate::ids::MAX_VARIANTS;
+use crate::ids::{MAX_MODELS, MAX_VARIANTS};
 
 /// Die Zaehler eines Scheduler-Laufs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -41,6 +41,14 @@ pub struct Metrics {
     pub total_compute_nanos: u64,
     /// Wie oft welche Variante gewaehlt wurde.
     pub variant_selected: [u64; MAX_VARIANTS],
+    /// Die aktuell wirksame Sicherheitsmarge je Modell, in Prozent.
+    ///
+    /// Kein Zaehler, sondern ein Zustand: der Estimator zieht sie nach oben,
+    /// wenn er sich verschaetzt hat (ADR-0013), und ein unbestaetigtes Profil
+    /// startet sie erhoeht (ADR-0016). Ueber Stunden gelesen zeigt diese Reihe,
+    /// ob das System zur Ruhe kommt oder langsam immer vorsichtiger wird —
+    /// und das sieht man an keinem Zaehler.
+    pub margin_percent: [u32; MAX_MODELS],
     /// Best-Effort-Requests, die terminal wurden, ohne je gelaufen zu sein.
     ///
     /// ADR-0012: Aushungerung ist ein Befund, kein Nebeneffekt. Ohne diesen
