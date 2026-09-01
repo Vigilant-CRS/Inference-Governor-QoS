@@ -198,6 +198,8 @@ impl BaselineScheduler {
                 variant: VariantIdx::BEST,
                 slot,
                 predicted_runtime: predicted,
+                // Die Baseline zerlegt nichts - genau das ist der Punkt.
+                quantum: None,
             });
         }
     }

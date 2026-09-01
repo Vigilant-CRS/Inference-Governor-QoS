@@ -22,6 +22,8 @@ Spec-Stelle explizit.
 | [0011](0011-client-clock-domains.md) | Die Erzeugungszeit kommt aus einer fremden Uhr | §16.2, §10.2, L-019 | Akzeptiert |
 | [0012](0012-best-effort-starvation.md) | Aushungerung ist ein Befund, kein Nebeneffekt | §1.3, §10.6, §15 | Akzeptiert |
 | [0013](0013-margin-corrects-forecasts-not-contracts.md) | Die Marge korrigiert Prognosefehler, nicht Vertragsverletzungen | §13.3 | Akzeptiert |
+| [0014](0014-cooperative-quanta.md) | Das Quantum ist so gross, wie der Slack es zulaesst | §15.3, WP26 | Akzeptiert |
+| [0015](0015-quantum-sizing-must-not-spend-the-deadline-reserve.md) | Ein Quantum darf die Deadline-Reserve nicht aufzehren | ADR-0014 | Akzeptiert |
 
 ## Format
 

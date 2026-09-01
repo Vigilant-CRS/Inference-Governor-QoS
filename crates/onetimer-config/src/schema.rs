@@ -81,6 +81,49 @@ pub struct ModelConfig {
     /// Wahr fuer sequenzbasierte Modelle (Spec 12.5).
     #[serde(default)]
     pub stateful: bool,
+    /// Zerlegbarkeit in kooperative Quanten (ADR-0014).
+    ///
+    /// Nur fuer Modelle, deren Arbeit fachlich zerlegbar ist — also
+    /// generative. Ein Detektor gehoert nicht dazu; sein Vorwaertslauf ist
+    /// unteilbar.
+    #[serde(default)]
+    pub cooperative: Option<CooperativeConfig>,
+    /// Wahr, wenn das Backendmodell nur ueber den Stream-Endpunkt antwortet.
+    ///
+    /// Generative Backends — vLLM, TensorRT-LLM — sind in Triton grundsaetzlich
+    /// decoupled. Das ist eine Eigenschaft des **Modells**, nicht der
+    /// Zerlegung: ein decoupled Modell braucht den Stream-Aufruf auch dann,
+    /// wenn es gar nicht in Quanten zerlegt wird. Beides zu vermengen macht
+    /// jeden Vergleich zwischen "mit" und "ohne Zerlegung" wertlos.
+    #[serde(default)]
+    pub decoupled: bool,
+    /// Abweichender Backend-Endpunkt fuer dieses Modell.
+    ///
+    /// Reale Anlagen trennen Vision- und Sprachmodelle auf verschiedene
+    /// Server: die Backends brauchen unterschiedliche Bibliotheksstaende und
+    /// lassen sich nicht in einem Prozess betreiben. Das aendert nichts an der
+    /// Kapazitaetsrechnung — die Slots modellieren die **GPU**, nicht den
+    /// Prozess, und zwei Server auf einer GPU teilen sich weiterhin eine
+    /// Ausfuehrungseinheit.
+    #[serde(default)]
+    pub backend_endpoint: Option<String>,
+}
+
+/// Die Angaben eines zerlegbaren Modells.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CooperativeConfig {
+    /// Gemessene Erzeugungsrate in Token je Sekunde.
+    pub tokens_per_second: u32,
+    /// Kleinste sinnvolle Quantengroesse.
+    #[serde(default = "default_min_tokens")]
+    pub min_tokens: u32,
+    /// Obergrenze der insgesamt erzeugten Token je Auftrag.
+    pub max_total_tokens: u32,
+}
+
+const fn default_min_tokens() -> u32 {
+    8
 }
 
 /// Das Queue-Verhalten eines Modells.
@@ -197,6 +240,10 @@ pub struct Resolved {
     pub model_names: Vec<String>,
     /// Backend-Modellnamen je `[Modell][Variante]`.
     pub backend_models: Vec<Vec<String>>,
+    /// Der Backend-Endpunkt je Modell, in Indexreihenfolge.
+    pub model_endpoints: Vec<String>,
+    /// Ob das Backendmodell nur ueber den Stream-Endpunkt antwortet.
+    pub model_decoupled: Vec<bool>,
     /// Die Sicherheitsmarge.
     pub margin: SafetyMargin,
 }
@@ -249,6 +296,35 @@ impl Resolved {
         }
         let slots = u64::try_from(self.slots.len()).unwrap_or(1).max(1);
         total.checked_div(slots).unwrap_or(0)
+    }
+
+    /// Der Backend-Endpunkt eines Modells.
+    #[must_use]
+    pub fn endpoint_of(&self, model: ModelIdx) -> &str {
+        self.model_endpoints
+            .get(model.get())
+            .map_or(self.backend_endpoint.as_str(), String::as_str)
+    }
+
+    /// Ob ein Modell nur ueber den Stream-Endpunkt antwortet.
+    #[must_use]
+    pub fn is_decoupled(&self, model: ModelIdx) -> bool {
+        self.model_decoupled
+            .get(model.get())
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Alle verwendeten Backend-Endpunkte, ohne Doppelungen.
+    #[must_use]
+    pub fn endpoints(&self) -> Vec<String> {
+        let mut all = vec![self.backend_endpoint.clone()];
+        for endpoint in &self.model_endpoints {
+            if !all.contains(endpoint) {
+                all.push(endpoint.clone());
+            }
+        }
+        all
     }
 
     /// Den Backend-Modellnamen einer Variante nachschlagen.
@@ -404,6 +480,32 @@ impl Config {
         findings
     }
 
+    /// Traegt die Co-Run-Verbote in die Slot-Menge ein (ADR-0006).
+    fn apply_corun_rules(
+        rules: &[[String; 2]],
+        model_names: &[String],
+        slots: &mut SlotSet,
+        findings: &mut Vec<Located>,
+    ) {
+        for (i, pair) in rules.iter().enumerate() {
+            let path = format!("backend.no_corun[{i}]");
+            let mut indices = Vec::new();
+            for name in pair {
+                match model_names.iter().position(|n| n == name) {
+                    Some(idx) => indices.push(idx),
+                    None => findings.push(
+                        ConfigError::UnknownModelReference { name: name.clone() }.at(path.clone()),
+                    ),
+                }
+            }
+            if let [a, b] = indices.as_slice()
+                && let (Ok(a), Ok(b)) = (u16::try_from(*a), u16::try_from(*b))
+            {
+                slots.forbid_corun(ModelIdx(a), ModelIdx(b));
+            }
+        }
+    }
+
     fn resolve_collecting(&self, findings: &mut Vec<Located>) -> Option<Resolved> {
         if self.version != SCHEMA_VERSION {
             findings.push(
@@ -459,6 +561,16 @@ impl Config {
             };
 
         let model_names: Vec<String> = self.models.keys().cloned().collect();
+        let model_endpoints: Vec<String> = self
+            .models
+            .values()
+            .map(|m| {
+                m.backend_endpoint
+                    .clone()
+                    .unwrap_or_else(|| self.backend.grpc_endpoint.clone())
+            })
+            .collect();
+        let model_decoupled: Vec<bool> = self.models.values().map(|m| m.decoupled).collect();
         let mut contracts = ArrayVec::new();
         let mut backend_models = Vec::new();
 
@@ -482,23 +594,7 @@ impl Config {
             }
         }
 
-        for (i, pair) in self.backend.no_corun.iter().enumerate() {
-            let path = format!("backend.no_corun[{i}]");
-            let mut indices = Vec::new();
-            for name in pair {
-                match model_names.iter().position(|n| n == name) {
-                    Some(idx) => indices.push(idx),
-                    None => findings.push(
-                        ConfigError::UnknownModelReference { name: name.clone() }.at(path.clone()),
-                    ),
-                }
-            }
-            if let [a, b] = indices.as_slice()
-                && let (Ok(a), Ok(b)) = (u16::try_from(*a), u16::try_from(*b))
-            {
-                slots.forbid_corun(ModelIdx(a), ModelIdx(b));
-            }
-        }
+        Self::apply_corun_rules(&self.backend.no_corun, &model_names, &mut slots, findings);
 
         Some(Resolved {
             backend_endpoint: self.backend.grpc_endpoint.clone(),
@@ -506,6 +602,8 @@ impl Config {
             contracts,
             model_names,
             backend_models,
+            model_endpoints,
+            model_decoupled,
             margin,
         })
     }
@@ -674,6 +772,11 @@ impl ModelConfig {
             min_quality,
             variant_dwell,
             variants,
+            cooperative: self.cooperative.map(|c| onetimer_core::model::Cooperative {
+                tokens_per_second: c.tokens_per_second,
+                min_tokens: c.min_tokens,
+                max_total_tokens: c.max_total_tokens,
+            }),
         };
 
         if let Err(e) = contract.validate() {

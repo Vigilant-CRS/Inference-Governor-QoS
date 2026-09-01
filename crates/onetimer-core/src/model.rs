@@ -156,6 +156,45 @@ impl From<QueueConfigError> for ContractError {
     }
 }
 
+/// Die Angaben, die ein zerlegbares Modell mitbringen muss (ADR-0014).
+///
+/// Nur generative Modelle haben natuerliche Unterbrechungspunkte. Ein
+/// Detektor hat keine — sein Vorwaertslauf ist unteilbar. Deshalb steht das
+/// hier explizit in der Konfiguration und wird nicht geraten.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cooperative {
+    /// Erzeugungsrate in Token je Sekunde, gemessen.
+    ///
+    /// Ohne diesen Wert laesst sich aus einem Zeitbudget keine Tokenzahl
+    /// ableiten. Ein geratener Wert waere hier besonders teuer: zu hoch
+    /// geschaetzt entstehen Quanten, die laenger dauern als der Slack, und die
+    /// Zerlegung erreicht genau nichts.
+    pub tokens_per_second: u32,
+    /// Kleinste sinnvolle Quantengroesse.
+    ///
+    /// Unterhalb davon ueberwiegt der Aufwand je Auftrag den Nutzen: jeder
+    /// Auftrag kostet einen Round-Trip und, ohne Prefix-Caching, eine erneute
+    /// Prefill-Berechnung.
+    pub min_tokens: u32,
+    /// Obergrenze der insgesamt erzeugten Token je Auftrag.
+    ///
+    /// Spec 8.3: keine unbeschraenkte Arbeit aus fremd kontrollierter Eingabe.
+    pub max_total_tokens: u32,
+}
+
+impl Cooperative {
+    /// Wie viele Token in `budget` erzeugt werden koennen.
+    #[must_use]
+    pub fn tokens_in(&self, budget: Duration) -> u32 {
+        let tokens = budget
+            .as_nanos()
+            .saturating_mul(u64::from(self.tokens_per_second))
+            .checked_div(1_000_000_000)
+            .unwrap_or(0);
+        u32::try_from(tokens).unwrap_or(u32::MAX)
+    }
+}
+
 /// Der Vertrag eines logischen Modells.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelContract {
@@ -180,6 +219,8 @@ pub struct ModelContract {
     pub variant_dwell: Duration,
     /// Die physischen Varianten, absteigend nach Qualitaet.
     pub variants: ArrayVec<Variant, MAX_VARIANTS>,
+    /// Zerlegbarkeit in kooperative Quanten (ADR-0014), falls zutreffend.
+    pub cooperative: Option<Cooperative>,
 }
 
 impl ModelContract {

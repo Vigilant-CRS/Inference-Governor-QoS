@@ -35,7 +35,7 @@ pub(crate) async fn run(path: &Path, listen: &str) -> Result<ExitCode, Box<dyn s
 
     let clock = MonotonicClock::start();
     let backend = Arc::new(TritonClient::new(&resolved.backend_endpoint));
-    let handle = actor::spawn(Arc::clone(&resolved), Arc::clone(&backend), clock)?;
+    let handle = actor::spawn(Arc::clone(&resolved), &backend, clock)?;
     let service = GatewayService::new(Arc::clone(&resolved), backend, handle, clock);
 
     let address = listen.parse()?;

@@ -76,7 +76,16 @@ pub enum Action {
         /// Der Zielslot.
         slot: SlotIdx,
         /// Die konservativ prognostizierte Laufzeit.
+        ///
+        /// Bei einem Quantum die Dauer **dieses Quantums**, nicht die des
+        /// gesamten Auftrags. Sonst waere die Slot-Planung falsch und die
+        /// Zerlegung wirkungslos.
         predicted_runtime: Duration,
+        /// Die Tokenzahl dieses Quantums, falls der Auftrag zerlegt wird.
+        ///
+        /// `None` fuer alles, was nicht zerlegbar ist — also fuer jedes
+        /// Wahrnehmungsmodell (ADR-0014).
+        quantum: Option<u32>,
     },
     /// Den Request terminal abschliessen und den Client informieren.
     Terminate {
@@ -563,6 +572,8 @@ impl Scheduler {
                 continue;
             }
             // Look-ahead auf erwartbare wichtigere Arbeit (Spec 10.7).
+            // Bewertet wird die Dauer dessen, was tatsaechlich gestartet wird —
+            // bei einem zerlegten Auftrag also die des Quantums.
             match guard_protected(
                 &self.slots,
                 model,
@@ -581,6 +592,16 @@ impl Scheduler {
                 }
                 GuardVerdict::Clear => {}
             }
+
+            // ADR-0014: zerlegbare Auftraege werden auf das Zeitbudget
+            // zugeschnitten, das bis zur naechsten geschuetzten Ankunft bleibt.
+            let (predicted_runtime, quantum) = self.size_quantum(
+                model,
+                descriptor.criticality,
+                predicted_runtime,
+                now,
+                forecast.iter(),
+            );
 
             let Some(slot) = self.slots.ready_slot(model, now) else {
                 return false;
@@ -628,9 +649,77 @@ impl Scheduler {
                 variant,
                 slot,
                 predicted_runtime,
+                quantum,
             });
             return true;
         }
+    }
+
+    /// Schneidet einen zerlegbaren Auftrag auf das verbleibende Zeitbudget zu.
+    ///
+    /// Gibt die Laufzeit des **Quantums** zurueck, nicht die des gesamten
+    /// Auftrags: die Slot-Planung und der Look-ahead muessen bewerten, was
+    /// tatsaechlich gestartet wird, sonst waere die Zerlegung wirkungslos.
+    ///
+    /// Fuer alles, was nicht zerlegbar ist, bleibt die Laufzeit unveraendert.
+    fn size_quantum<'a, I>(
+        &self,
+        model: ModelIdx,
+        criticality: Criticality,
+        full_runtime: Duration,
+        now: Instant,
+        forecast: I,
+    ) -> (Duration, Option<u32>)
+    where
+        I: IntoIterator<Item = &'a ExpectedArrival>,
+    {
+        let Some(cooperative) = self.contracts.get(model.get()).and_then(|c| c.cooperative) else {
+            return (full_runtime, None);
+        };
+        let budget = Self::best_effort_budget(now, forecast, criticality);
+        let tokens = cooperative
+            .tokens_in(budget)
+            .clamp(cooperative.min_tokens, cooperative.max_total_tokens);
+        let duration = Duration::from_nanos_unbounded(
+            u64::from(tokens)
+                .saturating_mul(1_000_000_000)
+                .checked_div(u64::from(cooperative.tokens_per_second).max(1))
+                .unwrap_or(0),
+        );
+        (
+            duration.max(Duration::from_nanos_unbounded(1)),
+            Some(tokens),
+        )
+    }
+
+    /// Das Zeitbudget, das eine nicht geschuetzte Arbeit jetzt verbrauchen darf,
+    /// ohne eine erwartete geschuetzte Ankunft zu verzoegern.
+    ///
+    /// Das Budget reicht bis zur **Ankunft**, nicht bis zu ihrem spaetesten
+    /// zulaessigen Start. Der Unterschied ist die Deadline-Reserve, und die
+    /// planmaessig aufzuzehren waere falsch: sie ist dafuer da, Jitter,
+    /// Laufzeitausreisser und Prognosefehler aufzufangen. Ein Governor, der
+    /// sie bei jedem Quantum vollstaendig verbraucht, laesst die geschuetzte
+    /// Arbeit dauerhaft am Rand ihres Vertrags laufen — und die erste
+    /// Abweichung wird dann zum Miss.
+    ///
+    /// Gemessen (WP26, ADR-0015): mit der Reserve im Budget entstehen Quanten,
+    /// die der Look-ahead fast immer vetoiert; das Sprachmodell kam auf einen
+    /// einzigen Auftrag in 30 Sekunden. Die engere Regel erzeugt Quanten, die
+    /// in die Leerlaufluecken passen.
+    fn best_effort_budget<'a, I>(now: Instant, forecast: I, candidate: Criticality) -> Duration
+    where
+        I: IntoIterator<Item = &'a ExpectedArrival>,
+    {
+        let mut budget: Option<Duration> = None;
+        for expected in forecast {
+            if expected.criticality <= candidate {
+                continue;
+            }
+            let available = expected.at.saturating_since(now);
+            budget = Some(budget.map_or(available, |b: Duration| b.min(available)));
+        }
+        budget.unwrap_or(Duration::MAX_CONTRACT)
     }
 
     /// Loest Variante und Laufzeitprognose fuer einen Kandidaten auf.

@@ -21,6 +21,6 @@ pub mod schema;
 
 pub use error::{ConfigError, Located};
 pub use schema::{
-    BackendConfig, Config, ContractConfig, ModelConfig, QualityConfig, QueueConfigYaml,
-    VariantConfig,
+    BackendConfig, Config, ContractConfig, CooperativeConfig, ModelConfig, QualityConfig,
+    QueueConfigYaml, VariantConfig,
 };

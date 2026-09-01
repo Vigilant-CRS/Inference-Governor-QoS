@@ -14,6 +14,7 @@ onetimer-protocol-oip = { path = "../onetimer-protocol-oip", version = "0.1.0" }
 tonic = "0.14.6"
 tokio = { version = "1", features = ["time", "sync"] }
 tracing = "0.1"
+tokio-stream = "0.1.19"
 
 [lints]
 workspace = true

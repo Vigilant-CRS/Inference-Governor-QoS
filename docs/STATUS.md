@@ -1,6 +1,6 @@
 # Arbeitsstand
 
-Stand: 2026-09-01 · **Gate M3 bestanden** · Phasen 0-4 fertig
+Stand: 2026-09-01 · **Gate M3 bestanden** · Phasen 0-4 fertig · WP26 gemessen
 
 ## Fertig
 
@@ -149,6 +149,28 @@ Drei Umgebungsdetails, die kein Quickstart erwaehnt und die den Lauf je einmal
 zum Absturz gebracht haben, stehen jetzt in `deploy/triton/README.md`:
 `--device nvidia.com/gpu=all` statt `--gpus all`, `--allow-client-shm=true`
 und `--ipc=host`.
+
+### WP26 — kooperative Quanten
+
+Umgesetzt nach ADR-0014, Sizing-Regel korrigiert durch ADR-0015. Gemessen mit
+RF-DETR und Qwen3-0.6B auf einer RTX 3070.
+
+Dabei entstanden zwei Faehigkeiten, die vorher fehlten:
+
+- **Mehrere Backends.** Vision- und Sprachmodelle brauchen unvereinbare
+  Bibliotheksstaende und laufen in getrennten Triton-Instanzen. Neue Option
+  `backend_endpoint` je Modell. Die Kapazitaetsrechnung bleibt unberuehrt: die
+  Slots modellieren die GPU, nicht den Prozess.
+- **Decoupled-Backends.** Generative Backends antworten nur ueber den
+  Stream-Endpunkt. OneTimer nimmt den Request weiterhin unaer entgegen und
+  uebersetzt intern — die Zusage aus Spec 16.1 schuetzt die Frischelogik vor
+  Clients, sie sagt nichts darueber, wie der Adapter das Backend anspricht.
+
+Der wichtigste Befund steht in ADR-0015: eine veraltete Erzeugungsrate laesst
+die Zerlegung **lautlos versagen**. Sie tut dann nichts, ohne einen Fehler zu
+melden. `onetimer profile` muss die Rate messen koennen und `doctor` warnen,
+wenn Sockel plus ein Token nicht in die kuerzeste Leerlaufluecke passen —
+beides offen.
 
 ## Als naechstes
 

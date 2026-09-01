@@ -125,6 +125,27 @@ Start.
 Details, Grenzen und Reproduktion:
 [`docs/benchmark/gate-m3.md`](docs/benchmark/gate-m3.md).
 
+### Detektor neben Sprachmodell — das Szenario aus §1.3
+
+RF-DETR bei 30 Hz und Qwen3-0.6B auf derselben RTX 3070, ein Slot:
+
+| Betriebsart | Detektor-Abdeckung | AoI p95 | Generierungen |
+|---|---:|---:|---:|
+| direkt zu Triton | 77 % | 36 ms | 70 |
+| über OneTimer | **98 %** | **33 ms** | 2 |
+
+Ohne Governor sättigt das Sprachmodell die GPU und die Wahrnehmung bricht ein.
+Mit Governor bleibt sie stabil — zum Preis, dass das Sprachmodell kaum noch
+läuft.
+
+**Die Zerlegung in kooperative Quanten (WP26) behebt das nicht.** Sie ist
+umgesetzt und gemessen: das kleinstmögliche Quantum kostet 17 ms, die
+Leerlauflücke zwischen zwei Detektorläufen beträgt 14 ms. Die Zusage „VLM neben
+Detektor auf einer GPU" gilt deshalb bis auf Weiteres **ab zwei
+Ausführungseinheiten**. Details:
+[`docs/benchmark/wp26.md`](docs/benchmark/wp26.md),
+[ADR-0015](docs/adr/0015-quantum-sizing-must-not-spend-the-deadline-reserve.md).
+
 > **Diese Werte stammen von einer Maschine, einem Lastprofil und einer GPU.** Alle Zahlen in der
 > Spezifikation sind Zielwerte, Rechenbeispiele oder Validierungsschwellen. Die
 > Produkthypothese ist unbewiesen, bis Gate M3 sie gegen eine **getunte**

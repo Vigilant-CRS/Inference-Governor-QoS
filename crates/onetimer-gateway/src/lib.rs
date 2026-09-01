@@ -16,6 +16,7 @@
 
 pub mod actor;
 pub mod clock;
+pub mod cooperative;
 pub mod exporter;
 pub mod outcome;
 pub mod service;

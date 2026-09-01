@@ -178,13 +178,23 @@ fn check_best_effort_feasibility(resolved: &Resolved) -> Verdict {
             continue;
         };
         if slots <= 1 && runtime.as_nanos() > guarded_period.as_nanos() {
-            warn(&format!(
-                "{name}: konservative Laufzeit {runtime} uebersteigt die kuerzeste \
-                 geschuetzte Periode {guarded_period} ({guarded_name}). Auf einem Slot \
-                 wird das Modell unter Last nie starten. Abhilfe: mehr Slots, kuerzere \
-                 Quanten oder eine hoehere Klasse."
-            ));
-            verdict = verdict.max(Verdict::ReadyWithWarnings);
+            if contract.cooperative.is_some() {
+                // ADR-0014: genau dafuer gibt es die Zerlegung. Der Hinweis
+                // bleibt trotzdem stehen — der Betreiber soll wissen, dass
+                // dieses Modell ohne Zerlegung nicht laufen wuerde.
+                ok(&format!(
+                    "{name}: Laufzeit {runtime} uebersteigt die geschuetzte Periode \
+                     {guarded_period} ({guarded_name}), wird aber in Quanten zerlegt"
+                ));
+            } else {
+                warn(&format!(
+                    "{name}: konservative Laufzeit {runtime} uebersteigt die kuerzeste \
+                     geschuetzte Periode {guarded_period} ({guarded_name}). Auf einem \
+                     Slot wird das Modell unter Last nie starten. Abhilfe: mehr Slots, \
+                     Zerlegung in Quanten (cooperative) oder eine hoehere Klasse."
+                ));
+                verdict = verdict.max(Verdict::ReadyWithWarnings);
+            }
         }
     }
     verdict
@@ -226,30 +236,39 @@ async fn check_backend(resolved: &Resolved, offline: bool) -> Verdict {
         return Verdict::ReadyWithWarnings;
     }
 
-    let client = TritonClient::new(&resolved.backend_endpoint);
-    match client.health().await {
-        Ok(health) if health.live && health.ready => {
-            ok(&format!(
-                "Backend erreichbar unter {}",
-                resolved.backend_endpoint
-            ));
-        }
-        Ok(health) => {
-            fail(&format!(
-                "Backend antwortet, ist aber nicht bereit (live={}, ready={})",
-                health.live, health.ready
-            ));
-            return Verdict::NotReady;
-        }
-        Err(e) => {
-            fail(&e.to_string());
-            return Verdict::NotReady;
+    // Jedes Backend einzeln pruefen: Vision- und Sprachmodelle laufen in
+    // getrennten Servern, weil ihre Backends unvereinbare Bibliotheksstaende
+    // brauchen. Ein erreichbarer Server sagt nichts ueber den anderen.
+    let mut verdict = Verdict::Ready;
+    for endpoint in resolved.endpoints() {
+        let client = TritonClient::new(&endpoint);
+        match client.health().await {
+            Ok(health) if health.live && health.ready => {
+                ok(&format!("Backend erreichbar unter {endpoint}"));
+            }
+            Ok(health) => {
+                fail(&format!(
+                    "Backend {endpoint} antwortet, ist aber nicht bereit \
+                     (live={}, ready={})",
+                    health.live, health.ready
+                ));
+                verdict = Verdict::NotReady;
+            }
+            Err(e) => {
+                fail(&format!("{endpoint}: {e}"));
+                verdict = Verdict::NotReady;
+            }
         }
     }
+    if verdict == Verdict::NotReady {
+        return verdict;
+    }
 
-    let mut verdict = Verdict::Ready;
     for (i, names) in resolved.backend_models.iter().enumerate() {
         let logical = resolved.model_names.get(i).map_or("?", String::as_str);
+        let client = TritonClient::new(
+            resolved.endpoint_of(onetimer_core::ModelIdx(u16::try_from(i).unwrap_or(0))),
+        );
         for physical in names {
             match client.model_ready(physical).await {
                 Ok(true) => ok(&format!("{logical} -> {physical} bereit")),

@@ -16,6 +16,7 @@
 //! Aufrufer gebremst, statt Speicher wachsen zu lassen (Spec L-003, 26.4).
 
 use crate::clock::MonotonicClock;
+use crate::cooperative::GenerativeJob;
 use crate::outcome::{mark_obsolete, status_for};
 use onetimer_backend_triton::{BackendError, TritonClient};
 use onetimer_config::schema::Resolved;
@@ -117,7 +118,13 @@ impl Handle {
 struct Actor {
     scheduler: Scheduler,
     config: Arc<Resolved>,
-    backend: Arc<TritonClient>,
+    /// Ein Client je Backend-Endpunkt.
+    ///
+    /// Vision- und Sprachmodelle laufen in getrennten Servern, weil ihre
+    /// Backends unvereinbare Bibliotheksstaende brauchen. Die Kapazitaets-
+    /// rechnung bleibt davon unberuehrt: die Slots modellieren die GPU, nicht
+    /// den Prozess.
+    backends: HashMap<String, Arc<TritonClient>>,
     clock: MonotonicClock,
     tx: mpsc::Sender<Msg>,
     /// Wartende Clients je Request.
@@ -129,6 +136,12 @@ struct Actor {
     inbox: HashMap<RequestId, Box<ModelInferRequest>>,
     /// Bereits eingetroffene Backendantworten, die auf ihre Bewertung warten.
     responses: HashMap<RequestId, Result<ModelInferResponse, BackendError>>,
+    /// Laufende zerlegte Auftraege (ADR-0014).
+    jobs: HashMap<RequestId, GenerativeJob>,
+    /// Die Beschreibung eines laufenden Auftrags, fuer seine Fortsetzung.
+    descriptors: HashMap<RequestId, RequestDescriptor>,
+    /// Kennungen fuer Fortsetzungsauftraege.
+    next_id: u64,
     /// Naechster geplanter Weckruf.
     next_wake: Option<Instant>,
 }
@@ -141,9 +154,21 @@ struct Actor {
 /// Scheduler ergibt.
 pub fn spawn(
     config: Arc<Resolved>,
-    backend: Arc<TritonClient>,
+    backend: &Arc<TritonClient>,
     clock: MonotonicClock,
 ) -> Result<Handle, SchedulerError> {
+    // Fuer jeden in der Konfiguration genannten Endpunkt ein Client. Der
+    // uebergebene deckt den Standardendpunkt ab.
+    let mut backends: HashMap<String, Arc<TritonClient>> = HashMap::new();
+    for endpoint in config.endpoints() {
+        let client = if endpoint == config.backend_endpoint {
+            Arc::clone(backend)
+        } else {
+            Arc::new(TritonClient::new(&endpoint))
+        };
+        backends.insert(endpoint, client);
+    }
+
     let overload = OverloadController::new(OverloadConfig::default(), clock.now())
         .map_err(|_| SchedulerError::NoModels)?;
     let scheduler = Scheduler::new(
@@ -157,12 +182,17 @@ pub fn spawn(
     let actor = Actor {
         scheduler,
         config,
-        backend,
+        backends,
         clock,
         tx: tx.clone(),
         waiting: HashMap::new(),
         inbox: HashMap::new(),
         responses: HashMap::new(),
+        jobs: HashMap::new(),
+        descriptors: HashMap::new(),
+        // Fortsetzungen bekommen Kennungen aus einem eigenen Bereich, damit
+        // sie sich nicht mit denen des Gateways ueberschneiden.
+        next_id: u64::MAX.wrapping_div(2),
         next_wake: None,
     };
     tokio::spawn(actor.run(rx));
@@ -248,9 +278,10 @@ impl Actor {
                 model,
                 variant,
                 slot,
+                quantum,
                 ..
             } => {
-                self.forward(request, model, variant, slot);
+                self.forward(request, model, variant, slot, quantum);
             }
             Action::Terminate { request, state } => self.finish(request, state),
             Action::WakeAt(at) => {
@@ -273,6 +304,7 @@ impl Actor {
         model: onetimer_core::ModelIdx,
         variant: onetimer_core::VariantIdx,
         slot: SlotIdx,
+        quantum: Option<u32>,
     ) {
         let Some(mut oip) = self.inbox.remove(&request) else {
             tracing::warn!(%request, "Dispatch ohne zugehoerigen Request");
@@ -290,10 +322,31 @@ impl Actor {
         // (Spec 6.1).
         backend_model.clone_into(&mut oip.model_name);
 
-        let backend = Arc::clone(&self.backend);
+        // Bei einem zerlegten Auftrag wird nicht der urspruengliche Request
+        // weitergereicht, sondern das naechste Quantum: Prompt plus bisher
+        // Erzeugtes, begrenzt auf die vom Scheduler bestimmte Tokenzahl.
+        if let (Some(tokens), Some(job)) = (quantum, self.jobs.get(&request)) {
+            let quantum_request = job.build_quantum(&oip, tokens);
+            *oip = quantum_request;
+            backend_model.clone_into(&mut oip.model_name);
+        }
+
+        // Eigenschaft des Modells, nicht der Zerlegung: ein decoupled Modell
+        // braucht den Stream-Aufruf auch ungeteilt. Nach aussen bleibt der
+        // Request unaer.
+        let decoupled = self.config.is_decoupled(model);
+        let Some(backend) = self.backend_for(model) else {
+            tracing::error!(%request, "kein Backend fuer dieses Modell");
+            self.finish(request, RequestState::Failed);
+            return;
+        };
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            let result = backend.infer(*oip).await;
+            let result = if decoupled {
+                backend.infer_decoupled(*oip).await
+            } else {
+                backend.infer(*oip).await
+            };
             let _ = tx
                 .send(Msg::BackendDone {
                     request,
@@ -304,12 +357,82 @@ impl Actor {
         });
     }
 
-    /// Beantwortet einen wartenden Client.
+    /// Reiht das naechste Quantum eines Auftrags als neue Ankunft ein.
+    ///
+    /// Bewusst als **vollwertige Ankunft**: das Quantum muss die Zulassung
+    /// erneut durchlaufen. Waere es privilegiert, koennte ein einmal
+    /// gestarteter generativer Auftrag geschuetzte Arbeit dauerhaft
+    /// verdraengen — genau das, was die Zerlegung verhindern soll.
+    ///
+    /// Die Generation Time bleibt die des urspruenglichen Auftrags. Ein
+    /// Auftrag, der insgesamt zu lange braucht, altert damit korrekt und wird
+    /// verworfen, statt unbegrenzt weiterzulaufen.
+    fn continue_job(&mut self, request: RequestId, job: GenerativeJob) {
+        let Some(descriptor) = self.descriptors.remove(&request) else {
+            return;
+        };
+        let Some(reply) = self.waiting.remove(&request) else {
+            return;
+        };
+        let Some(oip) = self.inbox.remove(&request) else {
+            return;
+        };
+        self.responses.remove(&request);
+
+        self.next_id = self.next_id.saturating_add(1);
+        let continuation = RequestId(self.next_id);
+        let mut next = descriptor;
+        next.id = continuation;
+
+        self.jobs.insert(continuation, job);
+        self.descriptors.insert(continuation, next);
+        self.waiting.insert(continuation, reply);
+        self.inbox.insert(continuation, oip);
+
+        let now = self.clock.now();
+        let mut actions = Vec::new();
+        self.scheduler
+            .on_event(now, Event::Arrival(next), &mut |action: Action| {
+                actions.push(action);
+            });
+        for action in actions {
+            self.apply(now, action);
+        }
+    }
+
+    /// Der Client fuer das Backend eines Modells.
+    fn backend_for(&self, model: onetimer_core::ModelIdx) -> Option<Arc<TritonClient>> {
+        self.backends
+            .get(self.config.endpoint_of(model))
+            .map(Arc::clone)
+    }
+
+    /// Beantwortet einen wartenden Client — oder setzt einen zerlegten
+    /// Auftrag fort.
     fn finish(&mut self, request: RequestId, state: RequestState) {
+        // Ein Quantum, das erfolgreich war und den Auftrag noch nicht beendet
+        // hat, ist keine Antwort an den Client, sondern der Anlass fuer das
+        // naechste Quantum.
+        if state == RequestState::CompletedValid
+            && let Some(mut job) = self.jobs.remove(&request)
+            && let Some(Ok(response)) = self.responses.get(&request)
+        {
+            let finished = job.absorb(response);
+            if !finished && self.waiting.contains_key(&request) {
+                self.continue_job(request, job);
+                return;
+            }
+            // Fertig: die gesammelte Antwort an den Client.
+            if let Some(Ok(response)) = self.responses.get_mut(&request) {
+                *response = job.build_response(response);
+            }
+        }
+
         let Some(reply) = self.waiting.remove(&request) else {
             return;
         };
         self.inbox.remove(&request);
+        self.descriptors.remove(&request);
 
         let payload = self.responses.remove(&request);
         let outcome = match (state, payload) {

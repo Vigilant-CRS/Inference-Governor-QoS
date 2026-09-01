@@ -216,6 +216,65 @@ impl TritonClient {
         Ok(response.into_inner())
     }
 
+    /// Fuehrt eine Inferenz gegen ein **decoupled** Modell aus.
+    ///
+    /// Generative Backends — vLLM, TensorRT-LLM — sind in Triton
+    /// grundsaetzlich decoupled und antworten ausschliesslich ueber
+    /// `ModelStreamInfer`. Ein unaerer Aufruf scheitert dort mit
+    /// „doesn't support models with decoupled transaction policy".
+    ///
+    /// Das widerspricht **nicht** der Entscheidung, dass OneTimer nach aussen
+    /// kein Streaming anbietet (Spec 16.1). Diese Einschraenkung schuetzt die
+    /// Frischelogik vor Clients, die sie umgehen wuerden. Welchen Aufruf der
+    /// Adapter zum Backend hin benutzt, ist davon unberuehrt — nach aussen
+    /// bleibt der Request unaer.
+    ///
+    /// Es wird genau eine Antwort erwartet und der Stream danach geschlossen.
+    ///
+    /// # Errors
+    ///
+    /// Siehe [`BackendError`]. Meldet das Backend im Stream einen Fehler, wird
+    /// er als [`BackendError::Rejected`] durchgereicht; bleibt der Stream ohne
+    /// Antwort, als [`BackendError::Malformed`].
+    pub async fn infer_decoupled(
+        &self,
+        request: ModelInferRequest,
+    ) -> Result<ModelInferResponse, BackendError> {
+        use tokio_stream::StreamExt as _;
+
+        let channel = self.channel().await?;
+        let mut client = self.client(channel);
+        let model = request.model_name.clone();
+        let outbound = tokio_stream::once(request);
+
+        let mut inbound = match client.model_stream_infer(outbound).await {
+            Ok(response) => response.into_inner(),
+            Err(status) => {
+                let error = BackendError::from(status);
+                if error.is_transport_failure() {
+                    self.invalidate().await;
+                }
+                return Err(error);
+            }
+        };
+
+        while let Some(message) = inbound.next().await {
+            let message = message.map_err(BackendError::from)?;
+            if !message.error_message.is_empty() {
+                return Err(BackendError::Rejected {
+                    code: tonic::Code::Internal,
+                    message: message.error_message,
+                });
+            }
+            if let Some(response) = message.infer_response {
+                return Ok(response);
+            }
+        }
+        Err(BackendError::Malformed {
+            detail: format!("{model}: der Stream endete ohne Antwort"),
+        })
+    }
+
     /// Fuehrt eine Inferenz aus.
     ///
     /// Der Aufrufer hat `model_name` bereits auf die gewaehlte physische

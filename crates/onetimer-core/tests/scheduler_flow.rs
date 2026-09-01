@@ -61,6 +61,7 @@ fn contract(
         min_quality: None,
         variant_dwell: Duration::ZERO,
         variants,
+        cooperative: None,
     }
 }
 

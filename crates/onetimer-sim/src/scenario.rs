@@ -137,6 +137,7 @@ impl StreamSpec {
             min_quality: None,
             variant_dwell: Duration::from_nanos_unbounded(100_000_000),
             variants,
+            cooperative: None,
         }
     }
 }

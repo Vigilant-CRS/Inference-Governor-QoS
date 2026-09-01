@@ -224,8 +224,7 @@ async fn start_gateway(
 
     let clock = MonotonicClock::start();
     let triton = Arc::new(onetimer_backend_triton::TritonClient::new(backend_endpoint));
-    let handle =
-        actor::spawn(Arc::clone(&resolved), Arc::clone(&triton), clock).expect("Scheduler");
+    let handle = actor::spawn(Arc::clone(&resolved), &triton, clock).expect("Scheduler");
     let service = GatewayService::new(resolved, triton, handle.clone(), clock);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
