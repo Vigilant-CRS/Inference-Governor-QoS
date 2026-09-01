@@ -43,9 +43,17 @@ fuer Phase 1.
 
 ## Build auf langsamen Dateisystemen
 
-Liegt das Repository auf einem FUSE-/NTFS-Mount, sollte das Build-Verzeichnis
-auf ein natives Dateisystem zeigen:
+Hier stand einmal die Empfehlung, `CARGO_TARGET_DIR` auf `~/.cache` zu legen,
+wenn das Repository auf einem FUSE-/NTFS-Mount liegt. Der Rat kostet mehr, als
+er bringt, und wird hier ausdruecklich zurueckgenommen.
 
-```bash
-export CARGO_TARGET_DIR="$HOME/.cache/onetimer-target"
-```
+**Gemessen:** ein vollstaendiger Release-Build des Workspace auf einem
+ntfs-3g-Mount dauert 1 min 17 s. Das ist kein Grund, irgendetwas zu verlegen.
+
+**Was der Override kostet:** 6,6 GB Build-Artefakte wandern still auf die
+Systemplatte. Auf einer Maschine, deren Systemlaufwerk bei 96 % steht, ist das
+kein Detail — und es faellt erst auf, wenn nichts mehr geht.
+
+Der Cargo-Standard ist `<workspace>/target` und damit von sich aus auf
+demselben Laufwerk wie das Projekt. Ihn zu setzen ist nur dann richtig, wenn
+man vorher nachgesehen hat, wieviel Platz das Ziellaufwerk hat.

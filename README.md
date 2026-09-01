@@ -245,8 +245,10 @@ cargo deny check licenses bans advisories sources
 ```
 
 Alle vier muessen gruen sein — das ist die Definition of Done fuer jeden Task.
-Liegt das Repository auf einem langsamen Dateisystem, hilft
-`export CARGO_TARGET_DIR="$HOME/.cache/onetimer-target"`.
+Gebaut wird in den Cargo-Standard `<workspace>/target`, also auf dasselbe
+Laufwerk wie das Projekt; `CARGO_TARGET_DIR` woandershin zu setzen verlegt
+6,6 GB still auf die Systemplatte
+(siehe [`CONTRIBUTING.md`](CONTRIBUTING.md)).
 
 ## Wo die Entscheidungen stehen
 

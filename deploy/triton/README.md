@@ -110,3 +110,39 @@ Batcher die Baseline nicht schneller, sondern nur träger.
 Beide Seiten werden zudem mit mehreren Client-Puffertiefen gefahren; je Strom
 zählt das jeweils bessere Ergebnis. Nur eine Seite ihre beste Tiefe wählen zu
 lassen wäre ein verstecktes Handicap (Spec 19.1).
+
+## Laufzeitdaten liegen nicht im Repository
+
+Modelle und Container-Images gehören nicht in die Versionsverwaltung —
+Gewichte sind gitignored (Spec §20.3), NVIDIA-Images dürfen nicht
+weiterverteilt werden (§6.4). Auf der Entwicklungsmaschine liegen sie neben
+dem Repository:
+
+```text
+InferenceQoS-runtime/
+  onetimer-vision/     Triton-Modellrepository (RF-DETR, Pose, Tiefe, VLM)
+  onetimer-llm/        Qwen3-0.6B für WP26
+  images/              docker save der beiden Triton-Images
+```
+
+Der Pfad ist bewusst **nicht** unter `~/.cache`. Auf der Entwicklungsmaschine
+liegt das Systemlaufwerk bei 96 % Belegung, und ein Modellrepository plus
+zwei NVIDIA-Images sind 60 GB — die gehören auf dasselbe Laufwerk wie das
+Projekt, nicht auf die Systemplatte.
+
+### Image aus dem Archiv wiederherstellen
+
+```bash
+docker load -i .../InferenceQoS-runtime/images/triton-vision-26.06.tar
+docker load -i .../InferenceQoS-runtime/images/triton-vllm-26.06.tar
+```
+
+Das spart den Download von 35 GB. Läuft ein Benchmark nicht mehr, weil das
+Image fehlt, ist das der erste Griff.
+
+### Warum das Build-Verzeichnis dazugehört
+
+`CARGO_TARGET_DIR` gehört nicht auf ein anderes Laufwerk gesetzt. Der
+Cargo-Standard ist `<workspace>/target` und damit von sich aus dort, wo das
+Projekt liegt; ein Override auf `~/.cache` verlegt 6,6 GB Build-Artefakte
+still auf die Systemplatte.
