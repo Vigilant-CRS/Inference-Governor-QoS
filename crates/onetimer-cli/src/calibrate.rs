@@ -24,7 +24,7 @@
 //! Der Kalibrator fasst deshalb Vertraege nicht an. Er fuellt Profile,
 //! schlaegt eine Slotzahl vor und nennt Modellpaare, die sich nicht vertragen.
 
-use crate::profile::{WARMUP, build_request};
+use crate::profile::WARMUP;
 use onetimer_backend_triton::TritonClient;
 use onetimer_config::schema::{Config, ProfileConfig};
 use onetimer_protocol_oip::inference::{
@@ -200,7 +200,7 @@ pub(crate) async fn run(
         for backend_model in backend_models {
             eprintln!("  {logical} -> {backend_model}");
             let metadata: ModelMetadataResponse = client.model_metadata(backend_model).await?;
-            let request = build_request(backend_model, &metadata)?;
+            let request = onetimer_backend_triton::zero_request(backend_model, &metadata)?;
             let fingerprint = onetimer_backend_triton::fingerprint(&server, &metadata);
 
             for _ in 0..WARMUP {

@@ -231,6 +231,23 @@ Ausführungseinheiten**. Details:
 > Produkthypothese ist unbewiesen, bis Gate M3 sie gegen eine **getunte**
 > Triton-Baseline bestaetigt oder widerlegt.
 
+### Nicht nur Triton
+
+OneTimer spricht das Open Inference Protocol, einen offenen Standard. Das stand
+lange als Behauptung im README; seit dieser Messung ist es belegt:
+
+| | Triton 2.70.0 (GPU) | OpenVINO Model Server 2026.3 (CPU) |
+|---|---|---|
+| Shared Memory | ja — Referenzpfad | nein — Kopierpfad |
+| Geliefert / gesendet | 737 / 758 | **150 / 150** |
+
+Derselbe Governor, dieselben ONNX-Modelle, **keine Codeänderung** — nur der
+Konfigurationsschlüssel `backend.type` akzeptiert jetzt auch `oip` und
+`kserve`. Was ein Server kann, wird aus seinen Metadaten gelesen statt
+angenommen: OVMS meldet keine Erweiterungen, und `doctor` sagt daraufhin
+konkret, was das kostet. Details:
+[`docs/benchmark/portability.md`](docs/benchmark/portability.md).
+
 ## Einrichten: messen statt raten
 
 Eine Konfiguration enthält zwei grundverschiedene Sorten Zahlen, und nur eine

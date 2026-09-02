@@ -14,6 +14,7 @@ beschrieben und **nicht** als allgemeingültige Produktleistung zu lesen.
 | [`load-ramp.md`](load-ramp.md) | Ab welcher Auslastung lohnt es sich? | Knick zwischen 100 % und 110 % |
 | [`diy-baseline.md`](diy-baseline.md) | Reicht Supersession im Client? | 47x gegen den Eigenbau |
 | [`soak.md`](soak.md) | Haelt es acht Stunden durch? | keine Drift, kein Leck |
+| [`portability.md`](portability.md) | Laeuft es auch vor anderen OIP-Servern? | OVMS: 150/150 ohne Codeaenderung |
 
 ## Regeln, die für jede Zahl hier gelten
 

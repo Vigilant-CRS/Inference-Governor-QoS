@@ -37,7 +37,12 @@ pub struct InputSpec {
     /// Vollstaendige Form einschliesslich Batchdimension.
     pub shape: Vec<i64>,
     /// Die beim Backend registrierte Region.
-    pub region: String,
+    ///
+    /// `None`, wenn der Server kein Shared Memory kann. Dann reist die
+    /// Nutzlast im Request — langsamer, aber ueberall verfuegbar. Welcher
+    /// Weg moeglich ist, sagt der Server selbst
+    /// (`onetimer_backend_triton::Capabilities`).
+    pub region: Option<String>,
     /// Groesse des Tensors in Bytes.
     pub byte_size: u64,
 }
@@ -366,12 +371,24 @@ fn build_request(
             },
         );
     }
+    let mut raw_contents = Vec::new();
     let inputs = input.map_or_else(Vec::new, |spec| {
+        let Some(region) = spec.region.clone() else {
+            // Kopierpfad: die Nullbytes reisen im Request mit.
+            raw_contents.push(vec![0_u8; usize::try_from(spec.byte_size).unwrap_or(0)]);
+            return vec![InferInputTensor {
+                name: spec.name.clone(),
+                datatype: spec.datatype.clone(),
+                shape: spec.shape.clone(),
+                parameters: HashMap::new(),
+                contents: None,
+            }];
+        };
         let mut tensor_params = HashMap::new();
         tensor_params.insert(
             "shared_memory_region".to_owned(),
             InferParameter {
-                parameter_choice: Some(ParameterChoice::StringParam(spec.region.clone())),
+                parameter_choice: Some(ParameterChoice::StringParam(region)),
             },
         );
         tensor_params.insert(
@@ -404,8 +421,8 @@ fn build_request(
         parameters,
         inputs,
         outputs: Vec::new(),
-        // Leer: die Nutzlast reist als Referenz, nicht im Request.
-        raw_input_contents: Vec::new(),
+        // Leer, wenn die Nutzlast als Referenz reist; sonst die Rohbytes.
+        raw_input_contents: raw_contents,
     }
 }
 

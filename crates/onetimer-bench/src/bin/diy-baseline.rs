@@ -278,7 +278,7 @@ async fn run() {
                 name: input.name.clone(),
                 datatype: input.datatype.clone(),
                 shape,
-                region: region.name.clone(),
+                region: Some(region.name.clone()),
                 byte_size,
             },
         );

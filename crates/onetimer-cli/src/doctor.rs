@@ -82,6 +82,7 @@ pub(crate) async fn run(
     verdict = verdict.max(check_utilization(&resolved));
     verdict = verdict.max(check_best_effort_feasibility(&resolved));
     verdict = verdict.max(check_backend(&resolved, offline).await);
+    verdict = verdict.max(check_capabilities(&resolved, offline).await);
     verdict = verdict.max(check_profiles(&resolved, offline).await);
 
     println!("\nRESULT {}", verdict.label());
@@ -228,6 +229,63 @@ fn check_utilization(resolved: &Resolved) -> Verdict {
         ok(&format!("geschuetzte serialisierte Auslastung {percent} %"));
         Verdict::Ready
     }
+}
+
+/// Was kann das Backend, und was folgt daraus?
+///
+/// OneTimer spricht einen offenen Standard und laeuft nicht nur gegen Triton.
+/// Was ein konkreter Server beherrscht, steht in seinen Metadaten — das ist
+/// eine Abfrage und keine Annahme. Der Betreiber soll hier erfahren, welchen
+/// Datenpfad er auf *seiner* Maschine bekommt, und nicht erst im Betrieb.
+async fn check_capabilities(resolved: &Resolved, offline: bool) -> Verdict {
+    if offline {
+        return Verdict::ReadyWithWarnings;
+    }
+    let mut verdict = Verdict::Ready;
+    for endpoint in resolved.endpoints() {
+        let client = TritonClient::new(&endpoint);
+        let Ok(mut raw) = client.raw().await else {
+            continue;
+        };
+        let Ok(response) = raw
+            .server_metadata(onetimer_protocol_oip::inference::ServerMetadataRequest {})
+            .await
+        else {
+            warn(&format!("{endpoint}: Servermetadaten nicht abfragbar"));
+            verdict = verdict.max(Verdict::ReadyWithWarnings);
+            continue;
+        };
+        let meta = response.into_inner();
+        let caps = onetimer_backend_triton::Capabilities::from_metadata(&meta);
+
+        ok(&format!("{endpoint}: {} {}", meta.name, meta.version));
+        if caps.can_pass_references() {
+            ok(&format!(
+                "{endpoint}: Shared Memory verfuegbar — Tensoren werden als \
+                 Referenz durchgereicht"
+            ));
+        } else {
+            // Gemessen: ein 6,2-MB-Bild kostet auf dem Kopierpfad +11,7 ms
+            // statt +160 us. Wer das erst im Betrieb merkt, hat die falsche
+            // Hardware gekauft.
+            warn(&format!(
+                "{endpoint}: kein Shared Memory. Grosse Tensoren laufen ueber den \
+                 Kopierpfad;\n     gemessen kostet ein 6,2-MB-Bild dort +11,7 ms \
+                 statt +160 us (Faktor 73)."
+            ));
+            verdict = verdict.max(Verdict::ReadyWithWarnings);
+        }
+        if !caps.has(onetimer_backend_triton::Extension::Sequence)
+            && resolved.contracts.iter().any(|c| c.stateful)
+        {
+            fail(&format!(
+                "{endpoint}: Konfiguration enthaelt `stateful: true`, aber der \
+                 Server meldet keine\n     Sequence-Unterstuetzung."
+            ));
+            verdict = Verdict::NotReady;
+        }
+    }
+    verdict
 }
 
 /// Gehoeren die hinterlegten Profile noch zur laufenden Umgebung? (G-010)

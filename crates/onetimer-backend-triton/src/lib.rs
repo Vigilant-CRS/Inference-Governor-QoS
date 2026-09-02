@@ -18,11 +18,15 @@
 //! entscheidet der Scheduler anhand der Frische, nicht der Adapter
 //! (Spec 30.4).
 
+pub mod capabilities;
 pub mod client;
 pub mod error;
 pub mod fingerprint;
+pub mod request;
 
+pub use capabilities::{Capabilities, Extension};
 pub use fingerprint::fingerprint;
+pub use request::zero_request;
 
 pub use client::{
     CONNECTION_WINDOW_BYTES, DEFAULT_MAX_MESSAGE_BYTES, STREAM_WINDOW_BYTES, TritonClient,

@@ -601,11 +601,19 @@ impl Config {
                 .at("version"),
             );
         }
-        if self.backend.kind != "triton" {
+        // OneTimer spricht das Open Inference Protocol, und das ist ein
+        // offener Standard. `triton` bleibt als Name erhalten, weil er in
+        // bestehenden Konfigurationen steht; `oip` ist der ehrlichere.
+        //
+        // Unbekannte Werte bleiben ein Fehler: ein vertippter Backendname
+        // wuerde sonst stillschweigend angenommen (Spec L-020). Welche
+        // Erweiterungen ein Server tatsaechlich beherrscht, entscheidet
+        // ohnehin nicht dieser Name, sondern die Abfrage beim Start.
+        if !matches!(self.backend.kind.as_str(), "triton" | "oip" | "kserve") {
             findings.push(
                 ConfigError::UnknownValue {
                     found: self.backend.kind.clone(),
-                    allowed: "triton",
+                    allowed: "triton, oip, kserve",
                 }
                 .at("backend.type"),
             );

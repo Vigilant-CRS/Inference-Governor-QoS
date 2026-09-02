@@ -39,6 +39,32 @@ pub(crate) async fn run(
 
     let clock = MonotonicClock::start();
     let backend = Arc::new(TritonClient::new(&resolved.backend_endpoint));
+    // Was der Server kann, wird abgefragt und nicht angenommen. Insbesondere
+    // der Datenpfad haengt daran: ohne Shared Memory kostet ein grosses Bild
+    // ein Vielfaches (`docs/benchmark/data-plane.md`).
+    if let Ok(mut raw) = backend.raw().await
+        && let Ok(response) = raw
+            .server_metadata(onetimer_protocol_oip::inference::ServerMetadataRequest {})
+            .await
+    {
+        let meta = response.into_inner();
+        let caps = onetimer_backend_triton::Capabilities::from_metadata(&meta);
+        tracing::info!(
+            server = %meta.name,
+            version = %meta.version,
+            shared_memory = caps.can_pass_references(),
+            sequence = caps.has(onetimer_backend_triton::Extension::Sequence),
+            "Backend erkannt"
+        );
+        if !caps.can_pass_references() {
+            tracing::warn!(
+                "Der Server meldet kein Shared Memory. Grosse Tensoren laufen ueber \
+                 den Kopierpfad; gemessen kostet ein 6,2-MB-Bild dort +11,7 ms statt \
+                 +160 us."
+            );
+        }
+    }
+
     // G-010: bevor irgendetwas geplant wird, pruefen, ob die hinterlegten
     // Profile ueberhaupt noch zur laufenden Umgebung gehoeren.
     let checked = crate::verify::check(&resolved).await;
