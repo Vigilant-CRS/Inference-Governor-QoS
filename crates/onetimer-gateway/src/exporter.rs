@@ -168,7 +168,12 @@ fn render_derived(out: &mut String, metrics: &Metrics) {
         ratio(u64::from(metrics.stale_compute_permille()))
     );
 
-    for (index, percent) in metrics.margin_percent.iter().enumerate() {
+    for (index, percent) in metrics
+        .margin_percent
+        .iter()
+        .take(metrics.models)
+        .enumerate()
+    {
         if index == 0 {
             let _ = writeln!(
                 out,

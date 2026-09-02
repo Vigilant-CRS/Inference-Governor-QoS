@@ -51,7 +51,7 @@ Clientcode steht in
 | 2b | Shared-Memory-Referenz-Passthrough | **fertig** |
 | 3 | Online Runtime Estimator, Profiler, Prometheus-Export | **fertig** |
 | 4 | Benchmark-Harness, getunte Triton-Baseline — **Gate M3** | **bestanden** |
-| 5 | Betrieb im Feld: Paketierung, Langzeitlauf, weitere Hardware | offen |
+| 5 | Betrieb im Feld: Paketierung, Langzeitlauf, weitere Hardware | **Dauerlauf bestanden**, Rest offen |
 
 ### Gate S — simulierte Falsifikation
 
@@ -165,6 +165,20 @@ Detektor bei 97,6 % hält.
 Der Preis steht daneben: bei 150 % werden die `high`-Ströme praktisch nicht
 mehr bedient. OneTimer entscheidet nicht, *ob* etwas verloren geht, sondern
 *was*. Details: [`docs/benchmark/load-ramp.md`](docs/benchmark/load-ramp.md).
+
+### Acht Stunden am Stück
+
+3 190 798 Requests, 0 Backendfehler, 19 verpasste Deadlines (0,0006 %).
+Der geschützte Strom liefert in der achten Stunde so zuverlässig wie in der
+ersten — 7 ‰ unabgedeckt, AoI p95 25 ms, unverändert. Speicherzuwachs nach der
+Aufwärmphase 109 kB/h. Die Sicherheitsmarge schlug viermal aus, bis 124 %, und
+kam jedes Mal auf 110 % zurück.
+
+Der Befund aus dem Lauf: **unangekündigte Lastspitzen sind teurer als
+Dauerüberlast.** Gegen einen für die Grundlast konfigurierten Governor liegt
+der Detektor während der Spitzen bei 327 ‰ statt der 24 ‰ aus der stationären
+Rampe — ohne verpasste Deadlines, das System verzichtet statt zu versagen.
+Details: [`docs/benchmark/soak.md`](docs/benchmark/soak.md).
 
 ### Reicht nicht einfach Clientcode?
 

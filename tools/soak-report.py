@@ -67,6 +67,7 @@ def margins(path):
     """Die Margen aus dem Metrikprotokoll, erste gegen letzte Ablesung."""
     pat = re.compile(r'onetimer_margin_percent\{model="(\d+)"\} (\d+)')
     first, last = {}, {}
+    seen = defaultdict(list)
     try:
         with open(path) as f:
             for line in f:
@@ -75,19 +76,30 @@ def margins(path):
                     model, value = m.group(1), int(m.group(2))
                     first.setdefault(model, value)
                     last[model] = value
+                    seen[model].append(value)
     except FileNotFoundError:
         return
-    changed = {k: (first[k], last[k]) for k in last if first.get(k) != last[k]}
-    print("\n  Sicherheitsmargen (Modell: Start -> Ende)")
-    if not changed:
-        print("  unveraendert — der Estimator musste nicht nachregeln.")
-    else:
-        for model, (a, b) in sorted(changed.items()):
-            arrow = "gestiegen" if b > a else "gesunken"
-            print(f"  Modell {model}: {a} % -> {b} % ({arrow})")
-            if b > a:
-                print("  BEFUND Eine ueber den Lauf gestiegene Marge heisst, dass sich "
-                      "die\n         Prognose wiederholt verschaetzt hat (ADR-0013).")
+    print("\n  Sicherheitsmargen (Modell: Start -> Ende, Hoechstwert, Ausschlaege)")
+    for model in sorted(last, key=int):
+        if len(set(seen[model])) == 1 and int(model) > 2:
+            continue  # unbenutzter Slot eines aelteren Laufs
+        a, b = first[model], last[model]
+        series = seen[model]
+        peak = max(series)
+        # Nur Start und Ende zu vergleichen verschweigt genau das Interessante:
+        # der Regler zieht nach einer Unterprognose schnell hoch und faellt
+        # langsam zurueck. Wer nur die Endpunkte liest, sieht eine Excursion
+        # nicht, die dazwischen lag.
+        excursions = sum(1 for v in series if v > a)
+        print(f"  Modell {model}: {a} % -> {b} %, Hoechstwert {peak} %, "
+              f"{excursions} von {len(series)} Ablesungen erhoeht")
+        if b > a:
+            print("  BEFUND Die Marge endet ueber ihrem Startwert. Der Regler ist "
+                  "nicht\n         zurueckgekommen — die Prognose verschaetzt sich "
+                  "wiederholt (ADR-0013).")
+        elif peak > a:
+            print("         Der Regler hat angezogen und ist zurueckgekommen. "
+                  "Genau so\n         ist er gedacht (ADR-0013).")
 
 
 def main():

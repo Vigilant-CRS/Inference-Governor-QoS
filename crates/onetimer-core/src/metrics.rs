@@ -41,6 +41,13 @@ pub struct Metrics {
     pub total_compute_nanos: u64,
     /// Wie oft welche Variante gewaehlt wurde.
     pub variant_selected: [u64; MAX_VARIANTS],
+    /// Wie viele der Modellslots tatsaechlich belegt sind.
+    ///
+    /// Ohne diese Zahl exportiert der Endpunkt alle `MAX_MODELS` Slots, also
+    /// ueberwiegend Nullen. Eine Zeitreihe je unbenutztem Slot ist kein
+    /// harmloser Ballast: sie kostet in Prometheus dauerhaft Speicher und
+    /// macht jede Abfrage unleserlich.
+    pub models: usize,
     /// Die aktuell wirksame Sicherheitsmarge je Modell, in Prozent.
     ///
     /// Kein Zaehler, sondern ein Zustand: der Estimator zieht sie nach oben,

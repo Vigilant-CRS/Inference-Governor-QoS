@@ -271,6 +271,7 @@ impl Actor {
                 // Reglern. Sie gehoeren trotzdem in den Snapshot: ueber Stunden
                 // gelesen zeigen sie, ob das System zur Ruhe kommt.
                 let mut metrics = *self.scheduler.metrics();
+                metrics.models = self.config.model_names.len();
                 for (index, slot) in metrics.margin_percent.iter_mut().enumerate() {
                     if let Ok(model) = u16::try_from(index) {
                         *slot = self
