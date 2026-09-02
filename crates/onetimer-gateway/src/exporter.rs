@@ -118,6 +118,18 @@ pub fn render(metrics: &Metrics) -> String {
 }
 
 /// Zeitsummen und abgeleitete Verhaeltnisse.
+/// Rendert eine Kennzahl je Modell als Gauge.
+///
+/// Nur die belegten Slots: eine Zeitreihe je unbenutztem Modellslot kostet in
+/// Prometheus dauerhaft Speicher und macht jede Abfrage unleserlich.
+fn render_per_model(out: &mut String, name: &str, help: &str, values: &[u32], count: usize) {
+    let _ = writeln!(out, "# HELP {name} {help}");
+    let _ = writeln!(out, "# TYPE {name} gauge");
+    for (index, value) in values.iter().take(count).enumerate() {
+        let _ = writeln!(out, "{name}{{model=\"{index}\"}} {value}");
+    }
+}
+
 fn render_derived(out: &mut String, metrics: &Metrics) {
     let _ = writeln!(
         out,
@@ -168,24 +180,27 @@ fn render_derived(out: &mut String, metrics: &Metrics) {
         ratio(u64::from(metrics.stale_compute_permille()))
     );
 
-    for (index, percent) in metrics
-        .margin_percent
-        .iter()
-        .take(metrics.models)
-        .enumerate()
-    {
-        if index == 0 {
-            let _ = writeln!(
-                out,
-                "# HELP onetimer_margin_percent Aktuell wirksame Sicherheitsmarge je Modell."
-            );
-            let _ = writeln!(out, "# TYPE onetimer_margin_percent gauge");
-        }
-        let _ = writeln!(
-            out,
-            "onetimer_margin_percent{{model=\"{index}\"}} {percent}"
-        );
-    }
+    render_per_model(
+        out,
+        "onetimer_arrival_period_us",
+        "Beobachteter Ankunftsabstand je Modell.",
+        &metrics.arrival_period_us,
+        metrics.models,
+    );
+    render_per_model(
+        out,
+        "onetimer_contract_period_us",
+        "Konfigurierte Periode je Modell.",
+        &metrics.contract_period_us,
+        metrics.models,
+    );
+    render_per_model(
+        out,
+        "onetimer_margin_percent",
+        "Aktuell wirksame Sicherheitsmarge je Modell.",
+        &metrics.margin_percent,
+        metrics.models,
+    );
 
     for (index, count) in metrics.variant_selected.iter().enumerate() {
         if index == 0 {

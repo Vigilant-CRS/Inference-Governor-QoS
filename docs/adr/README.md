@@ -25,6 +25,7 @@ Spec-Stelle explizit.
 | [0014](0014-cooperative-quanta.md) | Das Quantum ist so gross, wie der Slack es zulaesst | §15.3, WP26 | Akzeptiert |
 | [0015](0015-quantum-sizing-must-not-spend-the-deadline-reserve.md) | Ein Quantum darf die Deadline-Reserve nicht aufzehren | ADR-0014 | Akzeptiert |
 | [0016](0016-unverified-profiles-widen-the-margin.md) | Ein unbestaetigtes Profil weitet die Marge, es verweigert nicht den Start | G-010, L-014 | Akzeptiert |
+| [0017](0017-load-that-breaks-the-contract-is-a-finding.md) | Eine Last, die den Vertrag sprengt, ist ein Befund | soak.md, L-017 | Akzeptiert |
 
 ## Format
 

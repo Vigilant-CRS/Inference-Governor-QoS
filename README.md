@@ -180,6 +180,13 @@ der Detektor während der Spitzen bei 327 ‰ statt der 24 ‰ aus der stationä
 Rampe — ohne verpasste Deadlines, das System verzichtet statt zu versagen.
 Details: [`docs/benchmark/soak.md`](docs/benchmark/soak.md).
 
+Der Befund ist inzwischen behoben, nicht durch eine Automatik, sondern durch
+Sichtbarkeit: der Governor führt den beobachteten Ankunftsabstand je Modell
+mit, stellt ihn neben die vertragliche Periode und warnt, wenn die Last
+dauerhaft mehr als 20 % darüber liegt. Er ändert nichts daran — welche der
+beiden Zahlen falsch ist, weiß nur der Betreiber
+([ADR-0017](docs/adr/0017-load-that-breaks-the-contract-is-a-finding.md)).
+
 ### Reicht nicht einfach Clientcode?
 
 Der härteste Einwand: *"Ich verwerfe veraltete Frames einfach im Client."* Zur

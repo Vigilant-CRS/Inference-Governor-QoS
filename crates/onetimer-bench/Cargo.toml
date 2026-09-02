@@ -9,6 +9,7 @@ repository.workspace = true
 description = "Wire-level benchmark: does the governor actually help?"
 
 [dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 onetimer-core = { path = "../onetimer-core", version = "0.1.0" }
 onetimer-sim = { path = "../onetimer-sim", version = "0.1.0" }
 onetimer-config = { path = "../onetimer-config", version = "0.1.0" }

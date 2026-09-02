@@ -220,6 +220,8 @@ pub struct Scheduler {
     margins: [MarginController; MAX_MODELS],
     /// Beobachtete Backendlaufzeiten je Modell, Variante und Belegungsgrad.
     estimator: RuntimeEstimator,
+    /// Beobachtete Ankunftsabstaende je Modell.
+    arrivals: [crate::arrival::ArrivalTracker; MAX_MODELS],
     horizon: Duration,
     inflight: ArrayVec<Dispatched, MAX_INFLIGHT>,
     metrics: Metrics,
@@ -254,11 +256,25 @@ impl Scheduler {
                     requested: contracts.len(),
                 })?;
         }
+        // Die konfigurierten Perioden gehoeren in den Metrikabzug, damit sich
+        // das Verhaeltnis zur beobachteten Rate ohne Kenntnis der
+        // Konfigurationsdatei bilden laesst.
+        let mut metrics = Metrics::default();
+        for (i, contract) in contracts.iter().enumerate() {
+            if let Some(period) = contract.period
+                && let Some(cell) = metrics.contract_period_us.get_mut(i)
+            {
+                *cell = u32::try_from(period.as_nanos().checked_div(1_000).unwrap_or(0))
+                    .unwrap_or(u32::MAX);
+            }
+        }
+
         Ok(Self {
             contracts,
             queues,
             variant_states: [VariantState::default(); MAX_MODELS],
             next_expected: [None; MAX_MODELS],
+            arrivals: [crate::arrival::ArrivalTracker::default(); MAX_MODELS],
             slots,
             overload,
             margin,
@@ -266,7 +282,7 @@ impl Scheduler {
             estimator: RuntimeEstimator::new(),
             horizon: DEFAULT_HORIZON,
             inflight: ArrayVec::new(),
-            metrics: Metrics::default(),
+            metrics,
         })
     }
 
@@ -279,6 +295,18 @@ impl Scheduler {
     #[must_use]
     pub const fn estimator(&self) -> &RuntimeEstimator {
         &self.estimator
+    }
+
+    /// Liefert dieses Modell dauerhaft schneller, als sein Vertrag erlaubt?
+    ///
+    /// `None`, solange zu wenig gemessen wurde. Ein Vertrag, den die Last
+    /// sprengt, ist ein Befund und kein Betriebszustand: der Governor kann
+    /// ihn einhalten oder die Last bedienen, aber nicht beides.
+    #[must_use]
+    pub fn arrival_exceeds_contract(&self, model: ModelIdx) -> Option<bool> {
+        let tracker = self.arrivals.get(model.get())?;
+        let period = self.contracts.get(model.get()).and_then(|c| c.period);
+        tracker.exceeds(period)
     }
 
     /// Behandelt das Profil dieses Modells als nicht verifiziert (G-010).
@@ -339,6 +367,18 @@ impl Scheduler {
     ) {
         self.metrics.received = self.metrics.received.saturating_add(1);
         let model = descriptor.logical_model;
+
+        // Wie schnell dieser Strom tatsaechlich liefert. Billig genug fuer den
+        // heissen Pfad: ein Vergleich, eine Schiebeoperation, zwei Speicher.
+        if let Some(tracker) = self.arrivals.get_mut(model.get()) {
+            tracker.record(now);
+            if let Some(observed) = tracker.observed()
+                && let Some(cell) = self.metrics.arrival_period_us.get_mut(model.get())
+            {
+                *cell = u32::try_from(observed.as_nanos().checked_div(1_000).unwrap_or(0))
+                    .unwrap_or(u32::MAX);
+            }
+        }
 
         // Die naechste Ankunft dieses Modells fortschreiben (Spec 10.8).
         if let Some(contract) = self.contracts.get(model.get())

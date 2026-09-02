@@ -48,6 +48,19 @@ pub struct Metrics {
     /// harmloser Ballast: sie kostet in Prometheus dauerhaft Speicher und
     /// macht jede Abfrage unleserlich.
     pub models: usize,
+    /// Der beobachtete Ankunftsabstand je Modell, in Mikrosekunden.
+    ///
+    /// Null, solange zu wenig gemessen wurde. Zusammen mit
+    /// [`Self::contract_period_us`] beantwortet diese Reihe die Frage, ob die
+    /// Konfiguration noch zur Wirklichkeit passt — eine Kamera, die dauerhaft
+    /// schneller liefert als vereinbart, laesst die Abdeckung fallen, ohne
+    /// dass sonst irgendetwas davon berichtet.
+    pub arrival_period_us: [u32; MAX_MODELS],
+    /// Die konfigurierte Periode je Modell, in Mikrosekunden.
+    ///
+    /// Steht daneben, damit das Verhaeltnis in Prometheus ohne Kenntnis der
+    /// Konfigurationsdatei berechenbar ist.
+    pub contract_period_us: [u32; MAX_MODELS],
     /// Die aktuell wirksame Sicherheitsmarge je Modell, in Prozent.
     ///
     /// Kein Zaehler, sondern ein Zustand: der Estimator zieht sie nach oben,

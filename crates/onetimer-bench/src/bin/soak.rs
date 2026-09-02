@@ -224,6 +224,15 @@ fn main() {
 }
 
 async fn run() {
+    // Ein Dauerlauf ohne Protokoll verschweigt genau die Befunde, wegen derer
+    // er laeuft — etwa die Warnung vor einer Last, die den Vertrag sprengt.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .init();
+
     let triton_endpoint = "127.0.0.1:8001";
     let hours: u64 = std::env::var("SOAK_HOURS")
         .ok()

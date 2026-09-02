@@ -423,3 +423,75 @@ fn observations_land_in_the_cell_that_planning_reads() {
     );
     assert_eq!(beside_one, 0, "es lief nie etwas parallel");
 }
+
+/// Eine Last, die den Vertrag dauerhaft sprengt, muss sichtbar werden.
+///
+/// Der Dauerlauf hat gezeigt, dass der Governor in diesem Fall still
+/// degradiert: er verwirft mehr Frames, die Abdeckung faellt, und nichts sagt
+/// warum (`docs/benchmark/soak.md`). Dieser Test haelt fest, dass der Befund
+/// jetzt bis in den Metrikabzug durchkommt.
+#[test]
+fn a_load_that_breaks_the_contract_becomes_visible() {
+    let detector = contract(
+        Criticality::Protected,
+        QueuePolicy::Latest,
+        Some(33),
+        150,
+        100,
+        &[10],
+    );
+    let mut scheduler = build(vec![detector.clone()], 1);
+    let mut backend = Backend::default();
+
+    // Der Vertrag nennt 33 ms; die Quelle liefert alle 12 ms.
+    let mut next_id = 0_u64;
+    run(&mut scheduler, &mut backend, 4_000, |t| {
+        if t % 12 == 0 {
+            next_id = next_id.saturating_add(1);
+            vec![frame(next_id, 0, t, &detector)]
+        } else {
+            Vec::new()
+        }
+    });
+
+    assert_eq!(
+        scheduler.arrival_exceeds_contract(ModelIdx(0)),
+        Some(true),
+        "eine fast dreimal so schnelle Quelle muss als Befund erscheinen"
+    );
+
+    let m = scheduler.metrics();
+    assert_eq!(m.contract_period_us[0], 33_000);
+    let observed = m.arrival_period_us[0];
+    assert!(
+        (11_000..=13_000).contains(&observed),
+        "beobachteter Abstand {observed} us liegt nicht bei den gesendeten 12 ms"
+    );
+}
+
+/// Die Gegenprobe: wer seinen Vertrag einhaelt, loest nichts aus.
+#[test]
+fn a_load_within_the_contract_stays_silent() {
+    let detector = contract(
+        Criticality::Protected,
+        QueuePolicy::Latest,
+        Some(33),
+        150,
+        100,
+        &[10],
+    );
+    let mut scheduler = build(vec![detector.clone()], 1);
+    let mut backend = Backend::default();
+
+    let mut next_id = 0_u64;
+    run(&mut scheduler, &mut backend, 4_000, |t| {
+        if t % 33 == 0 {
+            next_id = next_id.saturating_add(1);
+            vec![frame(next_id, 0, t, &detector)]
+        } else {
+            Vec::new()
+        }
+    });
+
+    assert_eq!(scheduler.arrival_exceeds_contract(ModelIdx(0)), Some(false));
+}

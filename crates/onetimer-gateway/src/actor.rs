@@ -33,6 +33,10 @@ use tonic::Status;
 ///
 /// Grosszuegig genug, um Ankunftsspitzen aufzunehmen, klein genug, damit
 /// Ueberlast als Backpressure beim Aufrufer ankommt statt als Speicherwachstum.
+/// Sperrfrist zwischen zwei Warnungen desselben Modells.
+const WARN_COOLDOWN: onetimer_core::time::Duration =
+    onetimer_core::time::Duration::from_nanos_unbounded(60_000_000_000);
+
 const CHANNEL_CAPACITY: usize = 1_024;
 
 /// Das Ergebnis, das ein wartender Client bekommt.
@@ -144,6 +148,12 @@ struct Actor {
     next_id: u64,
     /// Naechster geplanter Weckruf.
     next_wake: Option<Instant>,
+    /// Wann zuletzt vor einer vertragswidrigen Last gewarnt wurde.
+    ///
+    /// Ohne Sperrfrist stuende die Warnung bei jedem Tick im Protokoll und
+    /// waere nach einer Minute unlesbar — eine Meldung, die zu oft kommt,
+    /// wird weggefiltert und schuetzt dann nichts mehr.
+    warned_arrival: [Option<Instant>; onetimer_core::ids::MAX_MODELS],
 }
 
 /// Startet den Actor und gibt seinen Griff zurueck.
@@ -200,6 +210,7 @@ pub fn spawn(
         // sie sich nicht mit denen des Gateways ueberschneiden.
         next_id: u64::MAX.wrapping_div(2),
         next_wake: None,
+        warned_arrival: [None; onetimer_core::ids::MAX_MODELS],
     };
     tokio::spawn(actor.run(rx));
     Ok(Handle { tx })
@@ -265,7 +276,10 @@ impl Actor {
                 self.scheduler
                     .on_event(now, Event::Completion { request, slot }, &mut sink);
             }
-            Msg::Tick => self.scheduler.on_event(now, Event::Tick, &mut sink),
+            Msg::Tick => {
+                self.scheduler.on_event(now, Event::Tick, &mut sink);
+                self.report_contract_mismatch(now);
+            }
             Msg::Snapshot(tx) => {
                 // Die Margen liegen nicht im Zaehlerblock, sondern in den
                 // Reglern. Sie gehoeren trotzdem in den Snapshot: ueber Stunden
@@ -287,6 +301,49 @@ impl Actor {
 
         for action in actions {
             self.apply(now, action);
+        }
+    }
+
+    /// Meldet Stroeme, die dauerhaft schneller liefern als vereinbart.
+    ///
+    /// Der Dauerlauf hat gezeigt, dass der Governor in diesem Fall still
+    /// degradiert: er verwirft mehr Frames, die Abdeckung faellt, und nichts
+    /// sagt warum. Eine Last, die den Vertrag sprengt, ist ein Befund — der
+    /// Governor kann den Vertrag einhalten oder die Last bedienen, nicht
+    /// beides (siehe `docs/benchmark/soak.md`).
+    fn report_contract_mismatch(&mut self, now: Instant) {
+        for index in 0..self.config.model_names.len() {
+            let Ok(raw) = u16::try_from(index) else {
+                continue;
+            };
+            let model = onetimer_core::ModelIdx(raw);
+            if self.scheduler.arrival_exceeds_contract(model) != Some(true) {
+                continue;
+            }
+            let due = self
+                .warned_arrival
+                .get(index)
+                .copied()
+                .flatten()
+                .is_none_or(|last| now.saturating_since(last) >= WARN_COOLDOWN);
+            if !due {
+                continue;
+            }
+            if let Some(slot) = self.warned_arrival.get_mut(index) {
+                *slot = Some(now);
+            }
+            let metrics = self.scheduler.metrics();
+            let observed = metrics.arrival_period_us.get(index).copied().unwrap_or(0);
+            let contracted = metrics.contract_period_us.get(index).copied().unwrap_or(0);
+            tracing::warn!(
+                model = %self.config.model_names.get(index).map_or("?", String::as_str),
+                observed_period_us = observed,
+                contract_period_us = contracted,
+                "Die Last liegt dauerhaft ueber der vereinbarten Periode. Der \
+                 Governor haelt den Vertrag und verwirft den Ueberschuss; die \
+                 Abdeckung faellt entsprechend. Entweder die Periode anpassen \
+                 oder die Quelle drosseln."
+            );
         }
     }
 

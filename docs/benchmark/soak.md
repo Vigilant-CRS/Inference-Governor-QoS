@@ -133,10 +133,12 @@ konfigurierten Governor 67 %.**
 
 ## Was offen bleibt
 
-- **Der Vertrag kennt die Last nicht.** Das System hat kein Mittel, zu
-  bemerken, dass die Ankunftsrate dauerhaft nicht mehr zur konfigurierten
-  Periode passt. Ein Befund im Sinne von ADR-0012 wäre hier angebracht — es
-  gibt ihn noch nicht.
+- ~~**Der Vertrag kennt die Last nicht.**~~ **Geschlossen.** Der Governor führt
+  jetzt den beobachteten Ankunftsabstand je Modell mit, stellt ihn neben der
+  vertraglichen Periode in `/metrics` und warnt, wenn die Rate dauerhaft mehr
+  als 20 % darüber liegt ([ADR-0017](../adr/0017-load-that-breaks-the-contract-is-a-finding.md)).
+  Er ändert dabei nichts: welche der beiden Zahlen falsch ist, weiß nur der
+  Betreiber.
 - **Eine Nacht, eine Maschine.** Acht Stunden sind kein Wochenlauf, und 109 kB
   je Stunde könnten über sieben Tage ein anderes Bild ergeben.
 - **Kein Backendausfall im Lauf.** Die Wiederanlauffähigkeit ist implementiert
