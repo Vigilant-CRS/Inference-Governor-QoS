@@ -42,7 +42,7 @@ use std::time::Instant;
 /// Die ersten Inferenzen eines Modells sind nicht repraesentativ: Gewichte
 /// wandern in den Speicher, Kernel werden ausgewaehlt, Caches fuellen sich.
 /// Sie mitzumessen wuerde das Profil systematisch verschlechtern.
-const WARMUP: usize = 20;
+pub(crate) const WARMUP: usize = 20;
 
 /// Messlaeufe je Variante.
 ///
@@ -208,7 +208,7 @@ async fn profile_variant(
 /// Nullen und keine Zufallsdaten: die Laufzeit eines Inferenzkernels haengt bei
 /// den hier betrachteten Modellen nicht vom Inhalt ab, und reproduzierbare
 /// Eingaben machen zwei Profilierungslaeufe vergleichbar.
-fn build_request(
+pub(crate) fn build_request(
     model: &str,
     metadata: &ModelMetadataResponse,
 ) -> Result<ModelInferRequest, BackendError> {

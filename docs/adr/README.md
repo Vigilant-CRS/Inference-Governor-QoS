@@ -26,6 +26,7 @@ Spec-Stelle explizit.
 | [0015](0015-quantum-sizing-must-not-spend-the-deadline-reserve.md) | Ein Quantum darf die Deadline-Reserve nicht aufzehren | ADR-0014 | Akzeptiert |
 | [0016](0016-unverified-profiles-widen-the-margin.md) | Ein unbestaetigtes Profil weitet die Marge, es verweigert nicht den Start | G-010, L-014 | Akzeptiert |
 | [0017](0017-load-that-breaks-the-contract-is-a-finding.md) | Eine Last, die den Vertrag sprengt, ist ein Befund | soak.md, L-017 | Akzeptiert |
+| [0018](0018-calibrate-hardware-not-requirements.md) | Der Kalibrator misst Hardware, keine Anforderungen | WP12, ADR-0006 | Akzeptiert |
 
 ## Format
 

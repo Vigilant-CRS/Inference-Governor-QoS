@@ -231,6 +231,39 @@ Ausführungseinheiten**. Details:
 > Produkthypothese ist unbewiesen, bis Gate M3 sie gegen eine **getunte**
 > Triton-Baseline bestaetigt oder widerlegt.
 
+## Einrichten: messen statt raten
+
+Eine Konfiguration enthält zwei grundverschiedene Sorten Zahlen, und nur eine
+davon muss von Hand kommen.
+
+```bash
+onetimer calibrate --config vorlage.yaml --out geraet.yaml
+onetimer doctor    --config geraet.yaml
+onetimer serve     --config geraet.yaml
+```
+
+`calibrate` misst je Variante die Laufzeit allein und unter Nebenlast, prüft
+paarweise, wie stark die Modelle einander bremsen, und schreibt eine fertige
+Konfiguration samt Umgebungs-Fingerabdrücken. Auf einer RTX 3070 fand es
+Verlangsamungen von über 5x (Detektor und Pose jeweils neben dem VLM) bis
+1,19x (Detektor neben Pose) und trug die schädlichen Paare selbst als
+`no_corun` ein — darunter zwei, die in der Spezifikation niemand vermutet
+hatte.
+
+**Verträge fasst es nicht an.** Wie frisch ein Ergebnis sein muss und welcher
+Strom wichtiger ist, sind Aussagen darüber, was der Roboter braucht — die
+stehen in keinem Messgerät. Ein System, das sich seine Deadlines selbst
+ausdenkt, kann an ihnen nicht mehr gemessen werden
+([ADR-0018](docs/adr/0018-calibrate-hardware-not-requirements.md)).
+
+Zur Laufzeit läuft die Kalibrierung weiter: der Online Estimator korrigiert die
+Laufzeitprognosen, die Marge zieht bei Fehlprognosen an und fällt zurück
+([ADR-0013](docs/adr/0013-margin-corrects-forecasts-not-contracts.md)), ein
+Profil aus fremder Umgebung wird erkannt
+([ADR-0016](docs/adr/0016-unverified-profiles-widen-the-margin.md)), und eine
+Last, die den Vertrag sprengt, wird gemeldet
+([ADR-0017](docs/adr/0017-load-that-breaks-the-contract-is-a-finding.md)).
+
 ## Was OneTimer nicht ist
 
 - Keine Hard-Realtime-Runtime und kein Safety-zertifiziertes System.

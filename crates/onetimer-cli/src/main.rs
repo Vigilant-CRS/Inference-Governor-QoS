@@ -12,6 +12,7 @@
 // heimlich druckt.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+mod calibrate;
 mod doctor;
 mod profile;
 mod serve;
@@ -48,6 +49,26 @@ enum Command {
         /// Anzahl der Messlaeufe je Variante.
         #[arg(long, default_value_t = profile::DEFAULT_SAMPLES)]
         samples: usize,
+    },
+    /// Misst Laufzeit **und** gegenseitige Behinderung und schreibt eine
+    /// fertige Konfiguration (WP12).
+    ///
+    /// Anders als `profile` misst dieses Kommando auch unter Nebenlast und
+    /// erkennt Modellpaare, die sich zu stark bremsen. Vertraege fasst es
+    /// nicht an: was frisch sein muss, ist eine Anforderung und kein Messwert.
+    Calibrate {
+        /// Pfad zur Konfigurationsdatei.
+        #[arg(short, long, value_name = "DATEI")]
+        config: PathBuf,
+        /// Anzahl der Messlaeufe je Stufe.
+        #[arg(long, default_value_t = profile::DEFAULT_SAMPLES)]
+        samples: usize,
+        /// Zieldatei. Ohne Angabe geht das Ergebnis nach stdout.
+        ///
+        /// Bewusst nie die Vorlage: YAML wird ueber `serde` geschrieben, und
+        /// dabei gehen Kommentare verloren.
+        #[arg(short, long, value_name = "DATEI")]
+        out: Option<PathBuf>,
     },
     /// Startet den Governor.
     Serve {
@@ -101,6 +122,11 @@ async fn run() -> ExitCode {
     let result = match cli.command {
         Command::Doctor { config, offline } => Box::pin(doctor::run(&config, offline)).await,
         Command::Profile { config, samples } => Box::pin(profile::run(&config, samples)).await,
+        Command::Calibrate {
+            config,
+            samples,
+            out,
+        } => Box::pin(calibrate::run(&config, samples, out.as_deref())).await,
         Command::Serve {
             config,
             listen,

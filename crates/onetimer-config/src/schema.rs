@@ -9,14 +9,14 @@ use onetimer_core::profile::{RuntimeProfile, SafetyMargin, VariantProfile};
 use onetimer_core::queue::QueueConfig;
 use onetimer_core::request::{Criticality, OverflowPolicy, QueuePolicy};
 use onetimer_core::slots::SlotSet;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Die einzige unterstuetzte Schemaversion.
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// Die vollstaendige Konfiguration.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// Schemaversion.
@@ -33,7 +33,7 @@ pub struct Config {
 }
 
 /// Das Ausfuehrungsbackend.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BackendConfig {
     /// Backendtyp; derzeit nur `triton`.
@@ -51,7 +51,7 @@ pub struct BackendConfig {
     #[serde(default = "default_pipelining")]
     pub pipelining_depth: usize,
     /// Modellpaare, die nicht gleichzeitig laufen duerfen (ADR-0006).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub no_corun: Vec<[String; 2]>,
     /// Sicherheitsmarge auf die Laufzeitprognose, in Prozent (Spec 13.2).
     #[serde(default = "default_margin_percent")]
@@ -67,7 +67,7 @@ const fn default_margin_percent() -> u32 {
 }
 
 /// Ein logisches Modell.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelConfig {
     /// Wichtigkeitsklasse: `protected`, `high`, `normal`, `best_effort`.
@@ -86,7 +86,7 @@ pub struct ModelConfig {
     /// Nur fuer Modelle, deren Arbeit fachlich zerlegbar ist — also
     /// generative. Ein Detektor gehoert nicht dazu; sein Vorwaertslauf ist
     /// unteilbar.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cooperative: Option<CooperativeConfig>,
     /// Wahr, wenn das Backendmodell nur ueber den Stream-Endpunkt antwortet.
     ///
@@ -105,12 +105,12 @@ pub struct ModelConfig {
     /// Kapazitaetsrechnung — die Slots modellieren die **GPU**, nicht den
     /// Prozess, und zwei Server auf einer GPU teilen sich weiterhin eine
     /// Ausfuehrungseinheit.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_endpoint: Option<String>,
 }
 
 /// Die Angaben eines zerlegbaren Modells.
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CooperativeConfig {
     /// Gemessene Erzeugungsrate in Token je Sekunde.
@@ -127,7 +127,7 @@ const fn default_min_tokens() -> u32 {
 }
 
 /// Das Queue-Verhalten eines Modells.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct QueueConfigYaml {
     /// `latest`, `latest_per_key`, `fifo` oder `never_drop`.
@@ -145,11 +145,11 @@ fn default_overflow() -> String {
 }
 
 /// Der Zeitvertrag eines Modells.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContractConfig {
     /// Erwartete Periode; ohne sie gibt es keinen Look-ahead (Spec 10.8).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub period_ms: Option<u64>,
     /// Relative Deadline ab Generation Time. Pflichtangabe.
     pub deadline_ms: u64,
@@ -157,10 +157,10 @@ pub struct ContractConfig {
     ///
     /// Ohne diesen Wert kann OneTimer keine Arbeit als wertlos erkennen und
     /// verliert sein staerkstes Werkzeug (ADR-0010).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_age_ms: Option<u64>,
     /// Niedrigste akzeptable Variantenqualitaet, 0.0 bis 1.0.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_quality: Option<f64>,
     /// Mindestverweildauer vor einer Variantenaufwertung (Spec 12.4).
     #[serde(default = "default_dwell_ms")]
@@ -172,7 +172,7 @@ const fn default_dwell_ms() -> u64 {
 }
 
 /// Eine physische Variante.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct VariantConfig {
     /// Kurzname der Variante.
@@ -186,12 +186,22 @@ pub struct VariantConfig {
     /// Im Regelfall von `onetimer profile` erzeugt. Fehlt es, kann der
     /// Scheduler nicht planen — dann wird der Start verweigert, statt mit
     /// geratenen Laufzeiten zu arbeiten.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<ProfileConfig>,
+    /// Laufzeitprofile unter Nebenlast, aufsteigend nach Belegungsgrad.
+    ///
+    /// Index 0 beschreibt „ein weiterer Slot ist belegt", Index 1 „zwei
+    /// weitere" und so fort; [`Self::profile`] bleibt der Alleinbetrieb.
+    ///
+    /// Von `onetimer calibrate` erzeugt (WP12). Fehlt die Liste, plant der
+    /// Governor unter Nebenlast mit dem Alleinprofil — sichtbar optimistisch,
+    /// weshalb der Online Estimator es als Erstes korrigiert (ADR-0006).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub under_load: Vec<ProfileConfig>,
 }
 
 /// Der Qualitaetswert einer Variante samt Herkunft.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct QualityConfig {
     /// Relativer Wert zwischen 0.0 und 1.0.
@@ -205,12 +215,42 @@ pub struct QualityConfig {
     #[serde(default = "default_quality_source")]
     pub source: String,
     /// Datensatz, auf dem gemessen wurde.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measured_on: Option<String>,
 }
 
 fn default_quality_source() -> String {
     "unknown".to_owned()
+}
+
+/// Baut aus Allein- und Nebenlastprofilen ein Stufenprofil (ADR-0004, WP12).
+///
+/// Ohne Nebenlastmessungen bleibt es beim Alleinprofil. Das ist der ehrlichere
+/// Ausgangspunkt als eine geratene Verlangsamung: es ist erkennbar optimistisch
+/// und wird vom Online Estimator zuerst korrigiert.
+fn build_variant_profile(
+    solo: RuntimeProfile,
+    under_load: &[ProfileConfig],
+) -> Result<VariantProfile, onetimer_core::profile::ProfileError> {
+    if under_load.is_empty() {
+        return Ok(VariantProfile::solo(solo));
+    }
+    let mut levels = onetimer_core::arrayvec::ArrayVec::new();
+    let _ = levels.push(solo);
+    for p in under_load {
+        let level = RuntimeProfile::new(
+            Duration::from_nanos_unbounded(p.p50_us.saturating_mul(1_000)),
+            Duration::from_nanos_unbounded(p.p95_us.saturating_mul(1_000)),
+            Duration::from_nanos_unbounded(p.p99_us.saturating_mul(1_000)),
+            p.samples,
+        )?;
+        if levels.push(level).is_err() {
+            // Mehr Stufen als Slots ist keine feinere Messung, sondern ein
+            // Konfigurationsfehler.
+            break;
+        }
+    }
+    VariantProfile::from_levels(levels)
 }
 
 /// Die Profil-Fingerabdruecke eines Modells, in Variantenreihenfolge (G-010).
@@ -226,7 +266,7 @@ fn fingerprints_of(model: &ModelConfig) -> Vec<Option<String>> {
 }
 
 /// Ein Laufzeitprofil je Belegungsgrad.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProfileConfig {
     /// Median in Mikrosekunden.
@@ -243,7 +283,7 @@ pub struct ProfileConfig {
     /// was das Backend meldet, gilt das Profil als nicht verifiziert und wird
     /// vorsichtiger geplant (ADR-0016). Fehlt er, kann nichts verglichen
     /// werden — `doctor` sagt das dann auch.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
 }
 
@@ -435,6 +475,26 @@ fn duration_ms(value: u64, what: &'static str) -> Result<Duration, ConfigError> 
 }
 
 impl Config {
+    /// Serialisiert die Konfiguration zurueck nach YAML.
+    ///
+    /// Kommentare gehen dabei verloren — YAML wird ueber `serde` gelesen und
+    /// geschrieben, nicht als Text bearbeitet. Deshalb schreibt `calibrate` in
+    /// eine **neue** Datei und ueberschreibt nie die Vorlage: eine von Hand
+    /// gepflegte Konfiguration enthaelt Begruendungen, und die sind mehr wert
+    /// als die Bequemlichkeit einer Ersetzung an Ort und Stelle.
+    ///
+    /// # Errors
+    ///
+    /// Wenn die Struktur nicht als YAML darstellbar ist.
+    pub fn to_yaml(&self) -> Result<String, Located> {
+        serde_norway::to_string(self).map_err(|e| {
+            ConfigError::Syntax {
+                message: e.to_string(),
+            }
+            .at("<ausgabe>")
+        })
+    }
+
     /// Liest eine Konfiguration aus YAML.
     ///
     /// # Errors
@@ -711,12 +771,24 @@ impl ModelConfig {
                     return None;
                 }
             };
+            let variant_profile = match build_variant_profile(profile, &v.under_load) {
+                Ok(vp) => vp,
+                Err(e) => {
+                    findings.push(
+                        ConfigError::OutOfRange {
+                            expected: "gueltige Profile je Belegungsgrad, aufsteigend",
+                        }
+                        .at(format!("{sub}.under_load ({e})")),
+                    );
+                    return None;
+                }
+            };
             let _ = variants.push(Variant {
                 quality: QualityValue {
                     value: quality,
                     source,
                 },
-                profile: VariantProfile::solo(profile),
+                profile: variant_profile,
             });
             physical.push(v.backend_model.clone());
         }

@@ -170,3 +170,77 @@ models:
     // vor G-010 darf nicht stillschweigend die Marge erhoehen (ADR-0016).
     assert_eq!(resolved.profile_fingerprints[other.get()][0], None);
 }
+
+/// WP12: Nebenlastprofile muessen bis in das Stufenprofil des Kerns kommen.
+///
+/// `VariantProfile::from_levels` existierte seit ADR-0004 und war unbenutzt,
+/// weil die Konfiguration nur Alleinbetrieb ausdruecken konnte. Dieser Test
+/// haelt fest, dass der Weg jetzt offen ist.
+#[test]
+fn profiles_under_load_reach_the_planner() {
+    let yaml = r"
+version: 1
+backend:
+  type: triton
+  grpc_endpoint: 127.0.0.1:8001
+  slots: 2
+  pipelining_depth: 0
+  safety_margin_percent: 100
+models:
+  detector:
+    class: protected
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 100, deadline_ms: 100, max_age_ms: 200 }
+    variants:
+      - id: main
+        backend_model: rfdetr
+        quality: { value: 1.0, source: measured }
+        profile: { p50_us: 10000, p95_us: 11000, p99_us: 12000, samples: 120 }
+        under_load:
+          - { p50_us: 20000, p95_us: 21000, p99_us: 22000, samples: 120 }
+";
+    let resolved = Config::from_yaml(yaml).unwrap().resolve().unwrap();
+    let detector = resolved.model_index("detector").unwrap();
+    let contract = resolved.contracts.get(detector.get()).unwrap();
+    let profile = &contract.variants.get(0).unwrap().profile;
+
+    // Belegungsgrad 0 ist der Alleinbetrieb, 1 die gemessene Nebenlast.
+    let solo = profile.at_occupancy(0).unwrap();
+    let busy = profile.at_occupancy(1).unwrap();
+    assert_eq!(solo.p99.as_nanos(), 12_000_000);
+    assert_eq!(
+        busy.p99.as_nanos(),
+        22_000_000,
+        "unter Nebenlast muss das gemessene Profil gelten, nicht das Alleinprofil"
+    );
+}
+
+/// Ohne Nebenlastmessungen bleibt es beim Alleinprofil — das bisherige
+/// Verhalten darf sich nicht stillschweigend aendern.
+#[test]
+fn without_load_profiles_the_solo_profile_still_applies() {
+    let yaml = r"
+version: 1
+backend:
+  type: triton
+  grpc_endpoint: 127.0.0.1:8001
+  slots: 2
+  pipelining_depth: 0
+  safety_margin_percent: 100
+models:
+  detector:
+    class: protected
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 100, deadline_ms: 100, max_age_ms: 200 }
+    variants:
+      - id: main
+        backend_model: rfdetr
+        quality: { value: 1.0, source: measured }
+        profile: { p50_us: 10000, p95_us: 11000, p99_us: 12000, samples: 120 }
+";
+    let resolved = Config::from_yaml(yaml).unwrap().resolve().unwrap();
+    let detector = resolved.model_index("detector").unwrap();
+    let contract = resolved.contracts.get(detector.get()).unwrap();
+    let profile = &contract.variants.get(0).unwrap().profile;
+    assert_eq!(profile.at_occupancy(0).unwrap().p99.as_nanos(), 12_000_000);
+}
