@@ -117,15 +117,51 @@ impl ByteBudget {
 
 /// Die Nutzlastgroesse eines Requests.
 ///
-/// Nur die Rohdaten: bei Shared Memory reist der Tensor als Referenz, und der
-/// Request selbst ist wenige hundert Bytes gross. Genau dann soll das Budget
-/// auch nichts nennenswertes verbrauchen.
+/// Bei Shared Memory reist der Tensor als Referenz, und der Request selbst ist
+/// wenige hundert Bytes gross. Genau dann soll das Budget auch nichts
+/// nennenswertes verbrauchen.
+///
+/// Gezaehlt werden **beide** zulaessigen Darstellungen. OIP erlaubt Rohdaten in
+/// `raw_input_contents` und typisierte Werte in `inputs[].contents`; nur die
+/// erste zu zaehlen hiess, dass ein Client das Budget umgeht, ohne etwas
+/// Unerlaubtes zu tun — er benutzt schlicht die andere Form.
 fn payload_bytes(request: &ModelInferRequest) -> u64 {
-    request
+    let raw = request
         .raw_input_contents
         .iter()
         .map(|c| c.len() as u64)
-        .fold(0_u64, u64::saturating_add)
+        .fold(0_u64, u64::saturating_add);
+
+    let typed = request
+        .inputs
+        .iter()
+        .filter_map(|i| i.contents.as_ref())
+        .map(tensor_content_bytes)
+        .fold(0_u64, u64::saturating_add);
+
+    raw.saturating_add(typed)
+}
+
+/// Die Groesse eines typisierten Tensorinhalts in Bytes.
+///
+/// Nicht die Zahl der Elemente, sondern ihr Speicher: ein `fp64`-Wert kostet
+/// achtmal so viel wie ein `bool`. Wer Elemente zaehlt, deckelt einen
+/// Doublevektor bei einem Achtel seines tatsaechlichen Bedarfs.
+fn tensor_content_bytes(c: &InferTensorContents) -> u64 {
+    let of = |count: usize, width: usize| (count as u64).saturating_mul(width as u64);
+    of(c.bool_contents.len(), size_of::<bool>())
+        .saturating_add(of(c.int_contents.len(), size_of::<i32>()))
+        .saturating_add(of(c.int64_contents.len(), size_of::<i64>()))
+        .saturating_add(of(c.uint_contents.len(), size_of::<u32>()))
+        .saturating_add(of(c.uint64_contents.len(), size_of::<u64>()))
+        .saturating_add(of(c.fp32_contents.len(), size_of::<f32>()))
+        .saturating_add(of(c.fp64_contents.len(), size_of::<f64>()))
+        .saturating_add(
+            c.bytes_contents
+                .iter()
+                .map(|b| b.len() as u64)
+                .fold(0_u64, u64::saturating_add),
+        )
 }
 
 impl GatewayService {
@@ -160,6 +196,15 @@ impl GatewayService {
     pub fn with_tokens(mut self, tokens: crate::auth::Tokens) -> Self {
         self.tokens = Some(tokens);
         self
+    }
+
+    /// Der Griff auf den Scheduler-Actor.
+    ///
+    /// Fuer Tests und Betriebswerkzeuge, die den Zustand abfragen wollen, ohne
+    /// den Griff getrennt durchreichen zu muessen.
+    #[must_use]
+    pub fn scheduler_handle(&self) -> Handle {
+        self.scheduler.clone()
     }
 
     /// Prueft die Zugangsberechtigung einer Anfrage.

@@ -240,6 +240,12 @@ struct Actor {
     quarantined: std::collections::HashSet<RequestId>,
     /// Wie oft ein Backendaufruf das Timeout ueberschritten hat.
     backend_timeouts: u64,
+    /// Transportfehler seit dem letzten erfolgreichen Backendaufruf.
+    consecutive_transport_failures: u64,
+    /// Requests, die wegen vollstaendiger Quarantaene abgewiesen wurden.
+    metrics_rejected_quarantined: u64,
+    /// Backendaufrufe, die noch offen sind.
+    outstanding: u64,
     /// Gesetzt, sobald ein geordnetes Ende angefordert wurde.
     shutdown: Option<oneshot::Sender<()>>,
     /// Die aktuelle Kennung eines zerlegten Auftrags, unter seiner
@@ -317,6 +323,9 @@ pub fn spawn(
         continuation_of: HashMap::new(),
         quarantined: std::collections::HashSet::new(),
         backend_timeouts: 0,
+        consecutive_transport_failures: 0,
+        metrics_rejected_quarantined: 0,
+        outstanding: 0,
         shutdown: None,
         // Fortsetzungen bekommen Kennungen aus einem eigenen Bereich, damit
         // sie sich nicht mit denen des Gateways ueberschneiden.
@@ -355,7 +364,16 @@ impl Actor {
             // Nach jeder Nachricht pruefen, ob das angeforderte Ende jetzt
             // erreichbar ist: kein wartender Client mehr, kein Backendaufruf
             // mehr offen.
-            if self.shutdown.is_some() && self.waiting.is_empty() && self.responses.is_empty() {
+            // Auch `outstanding`: nach einem Timeout ist der Client
+            // beantwortet, die Recheneinheit aber womoeglich weiterhin belegt.
+            // Wer nur die Clients zaehlt, meldet ein sauberes Ende, waehrend
+            // die GPU noch rechnet — und der naechste Prozess startet in eine
+            // Belegung, von der er nichts weiss.
+            if self.shutdown.is_some()
+                && self.waiting.is_empty()
+                && self.responses.is_empty()
+                && self.outstanding == 0
+            {
                 if let Some(done) = self.shutdown.take() {
                     let _ = done.send(());
                 }
@@ -383,6 +401,58 @@ impl Actor {
         tokio::time::sleep(delay)
     }
 
+    /// Nimmt einen Request an — oder weist ihn sofort ab.
+    ///
+    /// Gibt `false` zurueck, wenn die Bearbeitung hier endet.
+    fn accept<S: FnMut(Action)>(
+        &mut self,
+        now: Instant,
+        descriptor: RequestDescriptor,
+        request: Box<ModelInferRequest>,
+        reply: oneshot::Sender<Reply>,
+        sink: &mut S,
+    ) -> bool {
+        let id = descriptor.id;
+
+        // Steht jeder Slotkredit in Quarantaene, kann nichts starten — und
+        // zwar nicht "gerade nicht", sondern bis das Backend antwortet. Diesen
+        // Request einzureihen hiesse, den Client bis in sein eigenes Timeout
+        // warten zu lassen und dabei Speicher fuer Arbeit zu halten, die nie
+        // beginnt. Ehrlicher ist eine sofortige Absage.
+        let slots = self.config.slots.len() as u64;
+        if slots > 0 && self.quarantined.len() as u64 >= slots {
+            self.metrics_rejected_quarantined = self.metrics_rejected_quarantined.saturating_add(1);
+            let _ = reply.send(Err(Status::unavailable(format!(
+                "alle {slots} Slotkredite stehen wegen eines Backendtimeouts in \
+                 Quarantaene; es kann derzeit nichts gestartet werden"
+            ))));
+            return false;
+        }
+
+        // Ein zerlegbarer Auftrag bekommt seinen Zustand **hier**, bei der
+        // ersten Ankunft. Wird er erst in der Fortsetzung angelegt, gibt es nie
+        // eine erste Fortsetzung: `forward()` faende keinen Job und reichte den
+        // vollstaendigen Request weiter — die Zerlegung waere dann eine
+        // Konfigurationsoption ohne Wirkung.
+        if let Some(cooperative) = self
+            .config
+            .contracts
+            .get(descriptor.logical_model.get())
+            .and_then(|c| c.cooperative)
+            && let Some(job) = GenerativeJob::from_request(&request, cooperative.max_total_tokens)
+        {
+            self.jobs.insert(id, job);
+            self.descriptors.insert(id, descriptor);
+            self.continuation_of.insert(id, id);
+        }
+
+        self.waiting.insert(id, reply);
+        self.inbox.insert(id, request);
+        self.scheduler
+            .on_event(now, Event::Arrival(descriptor), sink);
+        true
+    }
+
     fn handle(&mut self, msg: Msg) {
         let now = self.clock.now();
         let mut actions = Vec::new();
@@ -394,28 +464,9 @@ impl Actor {
                 request,
                 reply,
             } => {
-                let id = descriptor.id;
-                // Ein zerlegbarer Auftrag bekommt seinen Zustand **hier**, bei
-                // der ersten Ankunft. Wird er erst in der Fortsetzung angelegt,
-                // gibt es nie eine erste Fortsetzung: `forward()` faende keinen
-                // Job und reichte den vollstaendigen Request weiter — die
-                // Zerlegung waere dann eine Konfigurationsoption ohne Wirkung.
-                if let Some(cooperative) = self
-                    .config
-                    .contracts
-                    .get(descriptor.logical_model.get())
-                    .and_then(|c| c.cooperative)
-                    && let Some(job) =
-                        GenerativeJob::from_request(&request, cooperative.max_total_tokens)
-                {
-                    self.jobs.insert(id, job);
-                    self.descriptors.insert(id, *descriptor);
-                    self.continuation_of.insert(id, id);
+                if !self.accept(now, *descriptor, request, reply, &mut sink) {
+                    return;
                 }
-                self.waiting.insert(id, reply);
-                self.inbox.insert(id, request);
-                self.scheduler
-                    .on_event(now, Event::Arrival(*descriptor), &mut sink);
             }
             Msg::BackendDone {
                 request,
@@ -435,6 +486,16 @@ impl Actor {
                 // fuettern, die nichts ueber die Prognose aussagt. Der Slot
                 // wird hier aber sehr wohl frei — jetzt ist belegt, dass das
                 // Backend fertig ist.
+                self.outstanding = self.outstanding.saturating_sub(1);
+                // Nur Transportfehler sagen etwas ueber die Erreichbarkeit.
+                // Ein Modellfehler betrifft diesen Request, nicht das Backend.
+                match result.as_ref() {
+                    Err(e) if e.is_transport_failure() => {
+                        self.consecutive_transport_failures =
+                            self.consecutive_transport_failures.saturating_add(1);
+                    }
+                    _ => self.consecutive_transport_failures = 0,
+                }
                 let timed_out = self.quarantined.remove(&request);
                 let failed = timed_out || result.is_err();
                 self.responses.insert(request, *result);
@@ -493,6 +554,9 @@ impl Actor {
                 metrics.slots = self.config.slots.len() as u64;
                 metrics.backend_timeouts = self.backend_timeouts;
                 metrics.quarantined = self.quarantined.len() as u64;
+                metrics.consecutive_transport_failures = self.consecutive_transport_failures;
+                metrics.rejected_quarantined = self.metrics_rejected_quarantined;
+                metrics.outstanding_backend_calls = self.outstanding;
                 for (index, slot) in metrics.margin_percent.iter_mut().enumerate() {
                     if let Ok(model) = u16::try_from(index) {
                         *slot = self
@@ -634,6 +698,7 @@ impl Actor {
         };
         let tx = self.tx.clone();
         let timeout = std::time::Duration::from_nanos(self.config.inference_timeout.as_nanos());
+        self.outstanding = self.outstanding.saturating_add(1);
         tokio::spawn(async move {
             let call = async move {
                 if decoupled {

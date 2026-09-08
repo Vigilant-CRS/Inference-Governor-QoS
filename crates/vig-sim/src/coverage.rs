@@ -119,6 +119,14 @@ impl CoverageTracker {
     /// dem **Auslieferungszeitpunkt** indiziert: gefragt ist, ob in diesem
     /// Regelzyklus etwas Frisches vorlag.
     pub fn record_delivery(&mut self, completion: Instant, generation: Instant) {
+        // Ausserhalb des Messfensters gibt es nichts zu messen. Eine Lieferung
+        // nach Fensterende in Alter und Peak-AoI aufzunehmen erfindet einen
+        // Spitzenwert aus einer Zeit, ueber die die Messung nichts aussagt —
+        // und ein Nachzuegler nach dem Ende eines Lastfensters ist der
+        // Normalfall, nicht die Ausnahme.
+        if completion < self.start || completion > self.end {
+            return;
+        }
         let age = completion.saturating_since(generation);
         self.ages_ns.push(age.as_nanos());
         self.deliveries
@@ -248,6 +256,22 @@ mod tests {
     /// sieht ueber die Auslieferungen gemessen tadellos aus. Beim Konsumenten
     /// altert die Information in dieser Zeit trotzdem weiter — genau das
     /// misst die Peak-AoI.
+    /// Eine Lieferung nach Fensterende gehoert nicht in die Messung.
+    ///
+    /// Sonst meldet ein 100-ms-Fenster eine Spitze von 1000 ms, die aus einer
+    /// Zeit stammt, ueber die es nichts aussagt.
+    #[test]
+    fn a_delivery_outside_the_window_is_not_measured() {
+        let mut t = CoverageTracker::new(ms(10), ms(1_000), Instant::ZERO, ms(100));
+        t.record_delivery(at(1_000), at(0));
+        let c = t.finish();
+        assert_eq!(c.delivered, 0, "sie zaehlt nicht als Lieferung");
+        assert_eq!(
+            c.peak_aoi_ns, 100_000_000,
+            "und die Spitze bleibt die Fensterlaenge"
+        );
+    }
+
     #[test]
     fn peak_aoi_counts_the_time_without_deliveries() {
         let mut t = CoverageTracker::new(ms(10), ms(1_000), Instant::ZERO, ms(1_000));
@@ -302,7 +326,10 @@ mod tests {
 
     #[test]
     fn aoi_percentiles_are_reported() {
-        let mut t = CoverageTracker::new(ms(33), ms(200), Instant::ZERO, ms(3_300));
+        // Fenster gross genug fuer alle 100 Lieferungen: die letzte liegt bei
+        // 99*33+99 = 3366 ms. Vorher endete das Fenster bei 3300 ms, und der
+        // Test mass unbemerkt eine Lieferung ausserhalb mit.
+        let mut t = CoverageTracker::new(ms(33), ms(200), Instant::ZERO, ms(3_400));
         for n in 0..100_u64 {
             t.record_delivery(at(n * 33 + n), at(n * 33));
         }

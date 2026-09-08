@@ -44,6 +44,19 @@ pub struct GenerativeJob {
     pub tokens: u32,
     /// Obergrenze der insgesamt erzeugten Token.
     pub max_total_tokens: u32,
+    /// Die Samplingparameter, die der Client mitgegeben hat.
+    ///
+    /// Sie reisen unveraendert mit — bis auf `max_tokens`, das je Quantum
+    /// gesetzt wird. Ein Client, der `temperature` oder `stop` vorgibt,
+    /// bekaeme sonst eine Antwort aus einer anderen Konfiguration als der
+    /// bestellten, ohne dass es jemand merkt.
+    pub declared_sampling: Option<String>,
+    /// Alle uebrigen Eingaben des urspruenglichen Requests.
+    ///
+    /// Bild, Maske, Region — bei einem VLM steht der eigentliche Inhalt genau
+    /// hier. Sie beim Zuschneiden zu entfernen machte aus einer Bildfrage eine
+    /// Textfrage.
+    pub extra_inputs: Vec<(InferInputTensor, Vec<u8>)>,
     /// Wie viele Quanten dieser Auftrag bereits gebraucht hat.
     pub quanta: u32,
 }
@@ -56,11 +69,20 @@ impl GenerativeJob {
     #[must_use]
     pub fn from_request(request: &ModelInferRequest, max_total_tokens: u32) -> Option<Self> {
         let prompt = read_text_input(request)?;
+        // Die Obergrenze des Clients gilt, wenn er eine nennt. Die
+        // Konfiguration begrenzt, was der Betreiber zulaesst — sie darf
+        // nicht anheben, was der Aufrufer bestellt hat. Wer 4 Token
+        // anfordert und 32 bekommt, zahlt fuer Arbeit, die er nicht wollte,
+        // und bekommt eine Antwort, die er nicht erwartet.
+        let declared = read_max_tokens(request);
+        let effective = declared.map_or(max_total_tokens, |d| d.min(max_total_tokens));
         Some(Self {
             prompt,
             generated: String::new(),
             tokens: 0,
-            max_total_tokens,
+            max_total_tokens: effective,
+            declared_sampling: read_sampling_parameters(request),
+            extra_inputs: extra_inputs(request),
             quanta: 0,
         })
     }
@@ -84,21 +106,49 @@ impl GenerativeJob {
         let mut request = template.clone();
         let tokens = quantum_tokens.min(self.remaining_tokens()).max(1);
         let continuation = format!("{}{}", self.prompt, self.generated);
+        let sampling = self.sampling_for(tokens);
 
-        request.inputs = vec![
-            text_tensor(TEXT_INPUT, &continuation),
-            text_tensor(
-                SAMPLING_PARAMETERS,
-                &format!("{{\"max_tokens\": {tokens}, \"temperature\": 0.0}}"),
-            ),
-        ];
-        request.raw_input_contents = vec![
-            length_prefixed(&continuation),
-            length_prefixed(&format!(
-                "{{\"max_tokens\": {tokens}, \"temperature\": 0.0}}"
-            )),
-        ];
+        // Text und Samplingparameter werden ersetzt, **alles andere bleibt**.
+        // Bei einem VLM steht der eigentliche Inhalt in den uebrigen Eingaben.
+        let mut inputs = vec![text_tensor(TEXT_INPUT, &continuation)];
+        let mut raw = vec![length_prefixed(&continuation)];
+        inputs.push(text_tensor(SAMPLING_PARAMETERS, &sampling));
+        raw.push(length_prefixed(&sampling));
+        for (tensor, bytes) in &self.extra_inputs {
+            inputs.push(tensor.clone());
+            raw.push(bytes.clone());
+        }
+
+        request.inputs = inputs;
+        request.raw_input_contents = raw;
         request
+    }
+
+    /// Die Samplingparameter dieses Quantums.
+    ///
+    /// Die Vorgabe des Clients bleibt erhalten; nur `max_tokens` wird auf die
+    /// Quantengroesse gesetzt. Ohne Vorgabe entsteht ein minimales Objekt —
+    /// und ausdruecklich kein erfundenes `temperature`, denn das waere eine
+    /// Entscheidung ueber das Ergebnis, die dem Client gehoert.
+    fn sampling_for(&self, tokens: u32) -> String {
+        let Some(declared) = &self.declared_sampling else {
+            return format!("{{\"max_tokens\": {tokens}}}");
+        };
+        // Bewusst textuell und ohne JSON-Abhaengigkeit: der Wert wird
+        // unveraendert weitergereicht, nur das eine Feld ersetzt. Ein
+        // Umschreiben ueber einen Parser wuerde unbekannte Felder nach
+        // seinen eigenen Regeln neu formatieren.
+        let without = strip_max_tokens(declared);
+        let inner = without
+            .trim()
+            .trim_start_matches('{')
+            .trim_end_matches('}')
+            .trim();
+        if inner.is_empty() {
+            format!("{{\"max_tokens\": {tokens}}}")
+        } else {
+            format!("{{\"max_tokens\": {tokens}, {inner}}}")
+        }
     }
 
     /// Nimmt das Ergebnis eines Quantums auf.
@@ -179,6 +229,69 @@ pub fn read_text_input(request: &ModelInferRequest) -> Option<String> {
     read_length_prefixed(raw)
 }
 
+/// Liest die Samplingparameter eines Requests, falls vorhanden.
+#[must_use]
+pub fn read_sampling_parameters(request: &ModelInferRequest) -> Option<String> {
+    let index = request
+        .inputs
+        .iter()
+        .position(|i| i.name == SAMPLING_PARAMETERS)?;
+    let raw = request.raw_input_contents.get(index)?;
+    read_length_prefixed(raw)
+}
+
+/// Liest die vom Client angeforderte Tokenobergrenze.
+///
+/// Bewusst ohne JSON-Parser: der einzige Wert, der hier gebraucht wird, ist
+/// eine Zahl hinter einem festen Schluessel. Eine Abhaengigkeit dafuer waere
+/// mehr Angriffsflaeche als Nutzen.
+#[must_use]
+pub fn read_max_tokens(request: &ModelInferRequest) -> Option<u32> {
+    let sampling = read_sampling_parameters(request)?;
+    let after = sampling.split("\"max_tokens\"").nth(1)?;
+    let digits: String = after
+        .trim_start()
+        .trim_start_matches(':')
+        .trim_start()
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
+}
+
+/// Entfernt ein vorhandenes `max_tokens` aus den Samplingparametern.
+fn strip_max_tokens(sampling: &str) -> String {
+    let Some(start) = sampling.find("\"max_tokens\"") else {
+        return sampling.to_owned();
+    };
+    let rest = &sampling[start..];
+    let end = rest.find(',').map_or(rest.len(), |c| c.saturating_add(1));
+    let mut out = String::with_capacity(sampling.len());
+    out.push_str(&sampling[..start]);
+    out.push_str(&rest[end..]);
+    // Ein hinterbliebenes Komma vor der schliessenden Klammer.
+    out.replace(", }", " }").replace(",}", "}")
+}
+
+/// Alle Eingaben ausser Text und Samplingparametern, mit ihren Rohdaten.
+#[must_use]
+fn extra_inputs(request: &ModelInferRequest) -> Vec<(InferInputTensor, Vec<u8>)> {
+    request
+        .inputs
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| i.name != TEXT_INPUT && i.name != SAMPLING_PARAMETERS)
+        .map(|(index, i)| {
+            let bytes = request
+                .raw_input_contents
+                .get(index)
+                .cloned()
+                .unwrap_or_default();
+            (i.clone(), bytes)
+        })
+        .collect()
+}
+
 /// Liest die Textausgabe einer Antwort.
 #[must_use]
 pub fn read_text_output(response: &ModelInferResponse) -> Option<String> {
@@ -193,7 +306,7 @@ pub fn read_text_output(response: &ModelInferResponse) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::panic)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
     use vig_protocol_oip::inference::model_infer_response::InferOutputTensor;
@@ -225,6 +338,61 @@ mod tests {
             }],
             raw_output_contents: vec![length_prefixed(text)],
         }
+    }
+
+    /// Die Zerlegung darf nicht mehr Tokens bestellen als der Client.
+    ///
+    /// Der Client verlangte hoechstens vier; das erste Quantum verlangte 32.
+    /// Er zahlt dann fuer Arbeit, die er nicht wollte, und bekommt eine
+    /// Antwort, die er nicht erwartet — bei einem generativen Modell ist
+    /// beides teuer.
+    #[test]
+    fn a_quantum_never_asks_for_more_tokens_than_the_client_did() {
+        let mut request = request_with("Beschreibe: ");
+        request.inputs.push(text_tensor(SAMPLING_PARAMETERS, ""));
+        request
+            .raw_input_contents
+            .push(length_prefixed("{\"max_tokens\": 4, \"temperature\": 0.7}"));
+
+        // Die Konfiguration erlaubt 64 — die Bestellung des Clients gilt.
+        let job = GenerativeJob::from_request(&request, 64).unwrap();
+        assert_eq!(job.max_total_tokens, 4);
+
+        let quantum = job.build_quantum(&request, 32);
+        let sampling = read_sampling_parameters(&quantum).unwrap();
+        assert_eq!(read_max_tokens(&quantum), Some(4));
+        assert!(
+            sampling.contains("\"temperature\": 0.7"),
+            "und seine uebrigen Vorgaben reisen unveraendert mit: {sampling}"
+        );
+    }
+
+    /// Zusaetzliche Eingaben ueberleben die Zerlegung.
+    ///
+    /// Bei einem VLM steht der eigentliche Inhalt genau dort. Sie zu entfernen
+    /// machte aus einer Bildfrage eine Textfrage — und die Antwort saehe
+    /// plausibel aus.
+    #[test]
+    fn a_quantum_keeps_the_other_inputs() {
+        let mut request = request_with("Was ist auf dem Bild?");
+        request.inputs.push(InferInputTensor {
+            name: "image".to_owned(),
+            datatype: "FP32".to_owned(),
+            shape: vec![1, 3, 224, 224],
+            parameters: std::collections::HashMap::new(),
+            contents: None,
+        });
+        request.raw_input_contents.push(vec![7_u8; 32]);
+
+        let job = GenerativeJob::from_request(&request, 16).unwrap();
+        let quantum = job.build_quantum(&request, 8);
+
+        let image = quantum
+            .inputs
+            .iter()
+            .position(|i| i.name == "image")
+            .expect("das Bild ist noch da");
+        assert_eq!(quantum.raw_input_contents.get(image), Some(&vec![7_u8; 32]));
     }
 
     #[test]

@@ -166,15 +166,7 @@ fn render_derived(out: &mut String, metrics: &Metrics) {
     // Abgeleitete Groessen aus Spec 18.1 und 18.2. Sie sind aus den Zaehlern
     // berechenbar, werden aber mit ausgegeben: sie sind die Werte, die ein
     // Betreiber tatsaechlich betrachtet, und eine falsch zusammengesetzte
-    // Ein Messwert, kein Zaehler: er faellt wieder, wenn das Backend doch noch
-    // antwortet. Erreicht er die Slotzahl, kann nichts mehr starten.
-    let _ = writeln!(
-        out,
-        "# HELP vig_quarantined_slots Slotkredite, die wegen eines \
-         Backendtimeouts gehalten werden."
-    );
-    let _ = writeln!(out, "# TYPE vig_quarantined_slots gauge");
-    let _ = writeln!(out, "vig_quarantined_slots {}", metrics.quarantined);
+    render_health(out, metrics);
 
     // Formel im Dashboard waere ein vermeidbarer Fehler.
     let _ = writeln!(
@@ -322,6 +314,25 @@ pub fn readiness(metrics: &Metrics) -> Result<(), String> {
             metrics.quarantined, metrics.slots
         ));
     }
+
+    // Ein abgelehnter Verbindungsaufbau erzeugt **keine** Quarantaene: der
+    // Aufruf kehrt sofort mit einem Fehler zurueck, und der Slotkredit wird
+    // regulaer frei. Auf die Quarantaene allein zu schauen hiess deshalb, den
+    // haeufigsten Backendausfall zu uebersehen — das Backend ist weg, und die
+    // Bereitschaftspruefung meldet gruen.
+    //
+    // Gezaehlt werden nur **Transport**fehler. Ein Modellfehler sagt etwas
+    // ueber einen Request, nicht ueber die Erreichbarkeit; er darf den
+    // Governor nicht aus der Rotation nehmen. Ein einziger Transportfehler
+    // genuegt dagegen: er wird beim naechsten Erfolg zurueckgesetzt, und
+    // solange keiner gelingt, ist hier nichts auszurichten.
+    if metrics.consecutive_transport_failures > 0 {
+        return Err(format!(
+            "backend: {} Transportfehler seit dem letzten Erfolg; das Backend ist \
+             nicht erreichbar",
+            metrics.consecutive_transport_failures
+        ));
+    }
     Ok(())
 }
 
@@ -342,6 +353,69 @@ pub async fn serve(
     let listener = tokio::net::TcpListener::bind(address).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Der Betriebszustand: Quarantaene, Transportfehler, offene Aufrufe.
+///
+/// Eigene Funktion, weil sie eine andere Frage beantwortet als die
+/// Requestzaehler darueber: nicht "was ist passiert", sondern "kann dieses
+/// System gerade etwas ausrichten".
+fn render_health(out: &mut String, metrics: &Metrics) {
+    // Ein Messwert, kein Zaehler: er faellt wieder, wenn das Backend doch noch
+    // antwortet. Erreicht er die Slotzahl, kann nichts mehr starten.
+    let _ = writeln!(
+        out,
+        "# HELP vig_quarantined_slots Slotkredite, die wegen eines \
+         Backendtimeouts gehalten werden."
+    );
+    let _ = writeln!(out, "# TYPE vig_quarantined_slots gauge");
+    let _ = writeln!(out, "vig_quarantined_slots {}", metrics.quarantined);
+
+    let _ = writeln!(
+        out,
+        "# HELP vig_consecutive_transport_failures Backendaufrufe, die seit dem \
+         letzten Erfolg am Transport scheiterten."
+    );
+    let _ = writeln!(out, "# TYPE vig_consecutive_transport_failures gauge");
+    let _ = writeln!(
+        out,
+        "vig_consecutive_transport_failures {}",
+        metrics.consecutive_transport_failures
+    );
+
+    let _ = writeln!(
+        out,
+        "# HELP vig_degraded_profiles Modelle, deren hinterlegtes Laufzeitprofil \
+         nicht mehr zu den Beobachtungen passt (Spec 30.3)."
+    );
+    let _ = writeln!(out, "# TYPE vig_degraded_profiles gauge");
+    let _ = writeln!(out, "vig_degraded_profiles {}", metrics.degraded_profiles);
+
+    let _ = writeln!(
+        out,
+        "# HELP vig_requests_rejected_quarantined_total Requests, die wegen \
+         vollstaendiger Quarantaene sofort abgewiesen wurden."
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE vig_requests_rejected_quarantined_total counter"
+    );
+    let _ = writeln!(
+        out,
+        "vig_requests_rejected_quarantined_total {}",
+        metrics.rejected_quarantined
+    );
+
+    let _ = writeln!(
+        out,
+        "# HELP vig_outstanding_backend_calls Backendaufrufe, die noch offen sind."
+    );
+    let _ = writeln!(out, "# TYPE vig_outstanding_backend_calls gauge");
+    let _ = writeln!(
+        out,
+        "vig_outstanding_backend_calls {}",
+        metrics.outstanding_backend_calls
+    );
 }
 
 #[cfg(test)]
@@ -421,6 +495,24 @@ mod tests {
             ..Metrics::default()
         };
         assert!(readiness(&healthy).is_ok(), "ein freier Slot genuegt");
+
+        // Ein bestaetigter Transportfehler nimmt ihn ebenfalls aus der
+        // Rotation — ein abgelehnter Verbindungsaufbau erzeugt keine
+        // Quarantaene, das Backend ist aber genauso weg.
+        let refused = Metrics {
+            slots: 2,
+            consecutive_transport_failures: 1,
+            ..Metrics::default()
+        };
+        assert!(readiness(&refused).is_err());
+
+        // Ein Modellfehler dagegen nicht: der betrifft einen Request.
+        let model_error = Metrics {
+            slots: 2,
+            backend_failures: 5,
+            ..Metrics::default()
+        };
+        assert!(readiness(&model_error).is_ok());
 
         let stuck = Metrics {
             slots: 2,

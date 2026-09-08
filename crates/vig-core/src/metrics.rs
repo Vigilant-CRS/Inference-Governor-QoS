@@ -33,6 +33,33 @@ pub struct Metrics {
     /// Jeder davon hat einen Client freigegeben und einen Slotkredit
     /// zurueckgehalten. Steigt der Zaehler, antwortet das Backend nicht mehr.
     pub backend_timeouts: u64,
+    /// Backendaufrufe, die seit dem letzten Erfolg am **Transport** scheiterten.
+    ///
+    /// Ein Modellfehler zaehlt hier nicht: der sagt etwas ueber diesen einen
+    /// Request, nicht ueber die Erreichbarkeit des Backends. Ein
+    /// Verbindungsabbruch dagegen heisst, dass **nichts** mehr laufen wird —
+    /// und genau das muss die Bereitschaftspruefung sehen, auch bevor ein
+    /// Timeout ueberhaupt ablaufen konnte.
+    pub consecutive_transport_failures: u64,
+    /// Requests, die wegen vollstaendiger Quarantaene sofort abgewiesen wurden.
+    ///
+    /// Sie einzureihen waere die schlechtere Antwort: der Client wartete bis in
+    /// sein eigenes Timeout, und der Governor hielte Speicher fuer Arbeit, die
+    /// nie beginnt.
+    pub rejected_quarantined: u64,
+    /// Wie oft der Look-ahead ein Profil als nicht mehr zustaendig vorfand.
+    ///
+    /// Spec 30.3: liegt die Beobachtung weit ueber dem hinterlegten Profil,
+    /// ist das Profil nicht falsch, sondern unzustaendig. Steigt dieser
+    /// Zaehler, gehoert `vig calibrate` erneut gefahren.
+    pub degraded_profiles: u64,
+    /// Backendaufrufe, die noch offen sind.
+    ///
+    /// Zaehlt die tatsaechlich laufenden Aufrufe, nicht die wartenden Clients.
+    /// Nach einem Timeout ist der Client beantwortet und die Recheneinheit
+    /// womoeglich weiterhin belegt — wer nur die Clients zaehlt, haelt das
+    /// System dann faelschlich fuer leer.
+    pub outstanding_backend_calls: u64,
     /// Slotkredite, die derzeit wegen eines Timeouts gehalten werden.
     ///
     /// Ein Messwert, kein Zaehler: er faellt wieder, wenn das Backend doch

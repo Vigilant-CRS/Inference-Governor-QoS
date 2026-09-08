@@ -557,9 +557,39 @@ impl Scheduler {
         });
     }
 
+    /// Zaehlt Profile, die nicht mehr zu den Beobachtungen passen.
+    ///
+    /// Spec 30.3, der Circuit Breaker: liegt die gemessene Laufzeit weit ueber
+    /// dem hinterlegten Profil, ist das Profil nicht falsch, sondern
+    /// unzustaendig. `health()` sagte das bisher nur seinen eigenen Tests —
+    /// ein Versprechen, das niemand einloest, ist schlechter als keines,
+    /// weil der Betreiber sich darauf verlaesst.
+    ///
+    /// Einmal je Durchlauf und nicht je Kandidat: sonst zaehlte der Wert
+    /// Planungsversuche und hiesse Profile.
+    fn observe_profile_health(&mut self) {
+        let occupancy = self.slots.occupancy();
+        let mut degraded = 0_u64;
+        for (i, contract) in self.contracts.iter().enumerate() {
+            let Ok(raw) = u16::try_from(i) else { continue };
+            let Some(best) = contract.variants.get(0) else {
+                continue;
+            };
+            if self
+                .estimator
+                .health(ModelIdx(raw), VariantIdx(0), occupancy, &best.profile)
+                == crate::estimator::ProfileHealth::Degraded
+            {
+                degraded = degraded.saturating_add(1);
+            }
+        }
+        self.metrics.degraded_profiles = degraded;
+    }
+
     /// Der Hauptdurchlauf: Stale sammeln, Ueberlast bewerten, dispatchen.
     fn schedule<S: ActionSink>(&mut self, now: Instant, sink: &mut S) {
         self.overload.evaluate(now);
+        self.observe_profile_health();
         self.collect_stale(now, sink);
 
         // Bounded: jeder Durchlauf reicht hoechstens einen Request weiter, und

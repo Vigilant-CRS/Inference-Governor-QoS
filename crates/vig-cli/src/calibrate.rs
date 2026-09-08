@@ -163,6 +163,11 @@ struct VariantMeasurement {
     request: ModelInferRequest,
 }
 
+// Die Funktion beschreibt einen zusammenhaengenden Messablauf: Metadaten,
+// Solo, Nebenlast, Paare, Textmodelle, schreiben. Sie aufzuteilen verteilte den
+// Ablauf auf Funktionen, die einzeln nichts bedeuten — und der Betreiber liest
+// hier nach, was in welcher Reihenfolge gemessen wird.
+#[expect(clippy::too_many_lines, reason = "ein zusammenhaengender Messablauf")]
 pub(crate) async fn run(
     path: &Path,
     samples: usize,
@@ -199,8 +204,28 @@ pub(crate) async fn run(
     for (logical, backend_models) in &models {
         for backend_model in backend_models {
             eprintln!("  {logical} -> {backend_model}");
-            let metadata: ModelMetadataResponse = client.model_metadata(backend_model).await?;
-            let request = vig_backend_triton::zero_request(backend_model, &metadata)?;
+            // Ein Modell, das sich nicht mit Nulltensoren vermessen laesst —
+            // Texteingaben, ein anderes Backend, ein Stream-Endpunkt — darf
+            // den ganzen Lauf nicht beenden. Sonst erreicht die
+            // Textkalibrierung weiter unten nie ihr Modell, und der
+            // Betreiber traegt Sockel und Rate wieder von Hand ein.
+            let metadata: ModelMetadataResponse = match client.model_metadata(backend_model).await {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("    uebersprungen: Metadaten nicht abrufbar ({e})");
+                    continue;
+                }
+            };
+            let request = match vig_backend_triton::zero_request(backend_model, &metadata) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!(
+                        "    uebersprungen: kein Nulltensor-Request baubar ({e}). \
+                         Generative Modelle werden weiter unten textuell vermessen."
+                    );
+                    continue;
+                }
+            };
             let fingerprint = vig_backend_triton::fingerprint(&server, &metadata);
 
             for _ in 0..WARMUP {

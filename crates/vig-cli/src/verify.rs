@@ -221,6 +221,29 @@ pub(crate) async fn signature_conflicts(resolved: &Resolved) -> Vec<SignatureCon
         let mut reference: Option<(String, Signature)> = None;
         for physical in names {
             let Ok(meta) = client.model_metadata(physical).await else {
+                // Nicht abrufbar ist **nicht** "gleich". Eine Variante ohne
+                // geprueftbare Signatur darf nicht automatisch gewaehlt
+                // werden: "keine nachgewiesene Abweichung" ist keine
+                // Freigabe, und eine spaeter ladende Variante koennte jede
+                // Schnittstelle haben.
+                conflicts.push(SignatureConflict {
+                    model,
+                    logical: logical.clone(),
+                    reference: (
+                        "?".to_owned(),
+                        Signature {
+                            inputs: Vec::new(),
+                            outputs: Vec::new(),
+                        },
+                    ),
+                    divergent: (
+                        (*physical).clone(),
+                        Signature {
+                            inputs: vec!["<Metadaten nicht abrufbar>".to_owned()],
+                            outputs: Vec::new(),
+                        },
+                    ),
+                });
                 continue;
             };
             let signature = Signature::of(&meta);
@@ -286,6 +309,18 @@ pub(crate) async fn contract_violations(resolved: &Resolved) -> Vec<ContractViol
 
         for physical in names {
             let Ok(meta) = client.model_metadata(physical).await else {
+                // Eine zugesagte Signatur, die nicht geprueft werden kann, ist
+                // nicht erfuellt. Sonst genuegte ein voruebergehend nicht
+                // erreichbares Modell, um die Zusage auszuhebeln.
+                out.push(ContractViolation {
+                    logical: logical.clone(),
+                    physical: (*physical).clone(),
+                    declared: declared.clone(),
+                    actual: Signature {
+                        inputs: vec!["<Metadaten nicht abrufbar>".to_owned()],
+                        outputs: Vec::new(),
+                    },
+                });
                 continue;
             };
             let actual = Signature::of(&meta);

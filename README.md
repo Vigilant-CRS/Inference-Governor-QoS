@@ -266,11 +266,17 @@ leak.
 | Output semantics across variants | You can declare a canonical `io_signature` per model, and any variant that does not meet it prevents startup. But identical shapes can still carry different meanings, and no tool can check that — only your declaration can. |
 | Field operation | Signed releases and an update path now exist. A hardware qualification programme and long-term support commitments do not. |
 
+| Contact and licence terms | `info@vigilant.example` is a placeholder. Before any distribution, the licensor identity, a real contact and the scope of the Additional Use Grant need a lawyer's eye. |
+| A soak run after these repairs | The eight-hour run predates them. It has to be repeated before anyone leaves this unattended. |
+
 Since the last review round these moved from open to done: an inference
-timeout that releases the client but **not** the slot credit, SIGTERM with a
-drain deadline, readiness separate from liveness, a strict trust mode with byte
-budgets, TLS/mTLS and bearer-token authentication, and signed reproducible
-releases with an SBOM.
+timeout that releases the client but **not** the slot credit, a drain that
+waits for outstanding backend calls rather than just for clients, readiness
+that also reacts to transport failures, immediate refusal instead of silent
+waiting when every slot is quarantined, a byte budget that counts both
+payload representations, cooperative quanta that keep the client's token limit
+and extra inputs, TLS/mTLS and bearer-token authentication, and signed
+reproducible releases with an SBOM.
 
 We would rather you read that list before the benchmark table.
 

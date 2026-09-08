@@ -20,6 +20,11 @@ use vig_protocol_oip::inference::grpc_inference_service_server::GrpcInferenceSer
 /// Wenn die Konfiguration ungueltig ist oder die Adresse nicht gebunden werden
 /// kann. Eine ungueltige Konfiguration startet den Prozess **nicht** mit
 /// Defaults (Spec L-020).
+// Der Startablauf ist eine Kette von Bedingungen, die alle erfuellt sein
+// muessen, bevor der erste Request angenommen wird: Konfiguration, Backend,
+// Profile, Signaturen, Zugang, Transport. Sie aufzuteilen versteckte genau
+// die Reihenfolge, auf die es ankommt.
+#[expect(clippy::too_many_lines, reason = "eine zusammenhaengende Startkette")]
 pub(crate) async fn run(
     path: &Path,
     listen: &str,
@@ -115,6 +120,16 @@ pub(crate) async fn run(
     if let Some(tls) = tls {
         builder = builder.tls_config(tls)?;
     }
+    // Die Frist laeuft ab dem Signal, nicht ab dem Ende des Servers. Sonst
+    // stuende vor der 20-Sekunden-Frist ein unbegrenztes Warten darauf, dass
+    // tonic alle Verbindungen schliesst — und die zugesagte Gesamtfrist waere
+    // keine.
+    let (signalled_tx, signalled_rx) = tokio::sync::oneshot::channel();
+    let shutdown = async move {
+        shutdown_signal().await;
+        let _ = signalled_tx.send(std::time::Instant::now());
+    };
+
     builder
         .initial_stream_window_size(STREAM_WINDOW_BYTES)
         .initial_connection_window_size(CONNECTION_WINDOW_BYTES)
@@ -123,18 +138,23 @@ pub(crate) async fn run(
                 .max_decoding_message_size(DEFAULT_MAX_MESSAGE_BYTES)
                 .max_encoding_message_size(DEFAULT_MAX_MESSAGE_BYTES),
         )
-        .serve_with_shutdown(address, shutdown_signal())
+        .serve_with_shutdown(address, shutdown)
         .await?;
+
+    // Ab hier gilt, was von der Frist noch uebrig ist.
+    let remaining = signalled_rx.await.ok().map_or(DRAIN_DEADLINE, |at| {
+        DRAIN_DEADLINE.saturating_sub(at.elapsed())
+    });
 
     // Der Server nimmt nichts Neues mehr an. Jetzt die angenommene Arbeit zu
     // Ende bringen: wartende Requests beantworten, laufende Backendaufrufe
     // auslaufen lassen. Ein Abbruch mitten in einer Inferenz liesse den
     // Client ohne Antwort und die GPU trotzdem rechnen.
     tracing::info!(
-        drain_seconds = DRAIN_DEADLINE.as_secs(),
+        remaining_ms = remaining.as_millis(),
         "kein neuer Verkehr; laufende Arbeit wird abgeschlossen"
     );
-    match handle.drain(DRAIN_DEADLINE).await {
+    match handle.drain(remaining).await {
         Ok(true) => {
             tracing::info!("alle Requests beantwortet, Governor beendet");
             Ok(ExitCode::SUCCESS)
@@ -155,7 +175,7 @@ pub(crate) async fn run(
     }
 }
 
-/// Wie lange nach dem Signal noch auf laufende Arbeit gewartet wird.
+/// Wie lange **ab dem Signal** insgesamt heruntergefahren werden darf.
 ///
 /// Kubernetes gibt einem Container per Voreinstellung 30 s zwischen SIGTERM
 /// und SIGKILL. Die Frist liegt bewusst darunter, damit der Governor sein

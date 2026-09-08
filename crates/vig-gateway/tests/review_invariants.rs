@@ -767,3 +767,137 @@ async fn without_a_valid_token_nothing_gets_through() {
         .expect("mit gueltigem Token laeuft alles wie vorher");
     assert_eq!(backend_impl.served.load(Ordering::Relaxed), 1);
 }
+
+// ---------------------------------------------------------------------------
+// Produktionsreife-Review vom 08.09.2026
+// ---------------------------------------------------------------------------
+
+/// Ein Drain darf keinen sauberen Abschluss melden, während die GPU noch rechnet.
+///
+/// Der Actor prüfte, ob noch Clients warten. Nach einem Timeout ist der Client
+/// beantwortet und die Recheneinheit möglicherweise weiterhin belegt — der
+/// Prozess endete also mit „alles erledigt", und der nächste startete in eine
+/// Belegung, von der er nichts wusste.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_drain_does_not_report_success_while_the_backend_still_runs() {
+    let backend_impl = Arc::new(mock_backend::MockBackend::hanging());
+    let endpoint = mock_backend::start(backend_impl).await.to_string();
+    let service = service_with(&endpoint, "  inference_timeout_ms: 150\n");
+    let handle = service.scheduler_handle();
+
+    let status = service
+        .model_infer(tonic::Request::new(request()))
+        .await
+        .expect_err("das Backend antwortet nie");
+    assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
+
+    let metrics = handle.metrics().await.unwrap();
+    assert_eq!(metrics.quarantined, 1);
+    assert_eq!(metrics.outstanding_backend_calls, 1);
+
+    assert!(
+        !handle
+            .drain(std::time::Duration::from_millis(400))
+            .await
+            .unwrap(),
+        "solange ein Backendaufruf offen ist, ist der Drain nicht fertig"
+    );
+}
+
+/// Bei vollständiger Quarantäne wird neue Arbeit abgewiesen, nicht eingereiht.
+///
+/// Sie einzureihen hieße: der Client wartet bis in sein eigenes Timeout, und
+/// der Governor hält Speicher für Arbeit, die nie beginnt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full_quarantine_refuses_new_work_instead_of_letting_it_wait() {
+    let backend_impl = Arc::new(mock_backend::MockBackend::hanging());
+    let endpoint = mock_backend::start(backend_impl).await.to_string();
+    let service = service_with(&endpoint, "  inference_timeout_ms: 150\n");
+    let handle = service.scheduler_handle();
+
+    // Der einzige Slot geht in Quarantäne.
+    let _ = service.model_infer(tonic::Request::new(request())).await;
+    assert_eq!(handle.metrics().await.unwrap().quarantined, 1);
+
+    let started = std::time::Instant::now();
+    let status = service
+        .model_infer(tonic::Request::new(request()))
+        .await
+        .expect_err("es kann nichts starten");
+    assert_eq!(status.code(), tonic::Code::Unavailable);
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(200),
+        "und zwar sofort, nicht nach einem weiteren Timeout ({:?})",
+        started.elapsed()
+    );
+    assert_eq!(handle.metrics().await.unwrap().rejected_quarantined, 1);
+}
+
+/// Ein abgelehnter Verbindungsaufbau nimmt den Governor aus der Rotation.
+///
+/// Er erzeugt **keine** Quarantäne — der Aufruf kehrt sofort zurück, der
+/// Slotkredit wird regulär frei. Wer nur auf Quarantäne schaut, übersieht damit
+/// den häufigsten Backendausfall und meldet grün.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readiness_fails_after_a_confirmed_transport_failure() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = listener.local_addr().unwrap().to_string();
+    drop(listener);
+
+    let service = service_with(&endpoint, "");
+    let handle = service.scheduler_handle();
+
+    assert!(
+        service
+            .model_infer(tonic::Request::new(request()))
+            .await
+            .is_err()
+    );
+    let metrics = handle.metrics().await.unwrap();
+    assert_eq!(
+        metrics.quarantined, 0,
+        "ein Verbindungsfehler quarantaeniert nicht"
+    );
+    assert!(metrics.consecutive_transport_failures >= 1);
+    assert!(
+        vig_gateway::exporter::readiness(&metrics).is_err(),
+        "aber bereit ist der Governor damit nicht"
+    );
+}
+
+/// Das Bytebudget zählt beide zulässigen Payloadformen.
+///
+/// OIP erlaubt Rohdaten in `raw_input_contents` **und** typisierte Werte in
+/// `inputs[].contents`. Nur die erste zu zählen hieß, dass ein Client das
+/// Budget umgeht, ohne etwas Unerlaubtes zu tun — er benutzt die andere Form.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_payload_budget_also_counts_typed_tensor_contents() {
+    use vig_protocol_oip::inference::InferTensorContents;
+    use vig_protocol_oip::inference::model_infer_request::InferInputTensor;
+
+    let backend_impl = Arc::new(mock_backend::MockBackend::new(
+        std::time::Duration::from_millis(200),
+    ));
+    let endpoint = mock_backend::start(backend_impl).await.to_string();
+    let service = service_with(&endpoint, "  max_inflight_mib: 1\n");
+
+    // 2 MiB als fp32, ausschliesslich in `contents`.
+    let mut typed = request();
+    typed.model_name = "detector".into();
+    typed.inputs = vec![InferInputTensor {
+        name: "images".into(),
+        datatype: "FP32".into(),
+        shape: vec![1, 524_288],
+        parameters: std::collections::HashMap::new(),
+        contents: Some(InferTensorContents {
+            fp32_contents: vec![0.0_f32; 524_288],
+            ..Default::default()
+        }),
+    }];
+
+    let status = service
+        .model_infer(tonic::Request::new(typed))
+        .await
+        .expect_err("2 MiB passen nicht in 1 MiB, egal in welcher Darstellung");
+    assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+}
