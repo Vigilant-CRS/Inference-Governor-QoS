@@ -8,9 +8,9 @@ aktualisiert werden (Spec Anhang C, Release-Checkliste).
 
 ## Stand
 
-Phase 2. Der Scheduling-Kern `onetimer-core` und der Simulator `onetimer-sim`
+Phase 2. Der Scheduling-Kern `vig-core` und der Simulator `vig-sim`
 haben weiterhin **keine externen Dependencies** — bewusst, siehe
-`crates/onetimer-core/Cargo.toml`. Alles Folgende betrifft die Protokoll-,
+`crates/vig-core/Cargo.toml`. Alles Folgende betrifft die Protokoll-,
 Gateway- und Backend-Schichten.
 
 ### Mitgelieferte Quelldateien Dritter

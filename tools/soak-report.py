@@ -18,19 +18,35 @@ def read_streams(path):
         return [r for r in csv.DictReader(f)]
 
 
+def response_age_ms(row):
+    """Das p95-Antwortalter einer CSV-Zeile.
+
+    Die Spalte hiess frueher ``aoi_p95_ms``. Sie misst das Alter der
+    ausgelieferten Antworten, nicht das Informationsalter ueber die Zeit, und
+    heisst deshalb jetzt ``response_age_p95_ms``. Beide Namen werden gelesen:
+    die vorhandenen Achtstundenmessungen tragen noch den alten Kopf, und ein
+    Auswertungswerkzeug, das alte Messreihen nicht mehr oeffnet, entwertet
+    genau die Daten, wegen derer es existiert.
+    """
+    for key in ("response_age_p95_ms", "aoi_p95_ms"):
+        if key in row:
+            return row[key]
+    raise KeyError("weder response_age_p95_ms noch aoi_p95_ms in der Zeile")
+
+
 def summarise(rows, label):
     by_stream = defaultdict(list)
     for r in rows:
         by_stream[r["stream"]].append(r)
     print(f"\n  {label}")
-    print("  Strom     | unabgedeckt ‰ | AoI p95 ms | geliefert | abgewiesen")
-    print("  ----------|---------------|------------|-----------|-----------")
+    print("  Strom     | unabgedeckt ‰ | Antwortalter p95 ms | geliefert | abgewiesen")
+    print("  ----------|---------------|---------------------|-----------|-----------")
     for name, rs in sorted(by_stream.items()):
         unc = sorted(int(r["uncovered_permille"]) for r in rs)
-        aoi = sorted(int(r["aoi_p95_ms"]) for r in rs)
+        aoi = sorted(int(response_age_ms(r)) for r in rs)
         med = lambda v: v[len(v) // 2] if v else 0
         print(
-            f"  {name:<9} | {med(unc):>13} | {med(aoi):>10} | "
+            f"  {name:<9} | {med(unc):>13} | {med(aoi):>19} | "
             f"{sum(int(r['delivered']) for r in rs):>9} | "
             f"{sum(int(r['rejected']) for r in rs):>10}"
         )
@@ -65,7 +81,7 @@ def memory(rows):
 
 def margins(path):
     """Die Margen aus dem Metrikprotokoll, erste gegen letzte Ablesung."""
-    pat = re.compile(r'onetimer_margin_percent\{model="(\d+)"\} (\d+)')
+    pat = re.compile(r'vig_margin_percent\{model="(\d+)"\} (\d+)')
     first, last = {}, {}
     seen = defaultdict(list)
     try:

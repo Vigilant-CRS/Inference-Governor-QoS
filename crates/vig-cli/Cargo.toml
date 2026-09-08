@@ -1,0 +1,28 @@
+[package]
+name = "vig-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Command line interface: doctor, profile, calibrate, serve"
+
+[[bin]]
+name = "vig"
+path = "src/main.rs"
+
+[dependencies]
+vig-core = { path = "../vig-core", version = "0.1.0" }
+vig-config = { path = "../vig-config", version = "0.1.0" }
+vig-protocol-oip = { path = "../vig-protocol-oip", version = "0.1.0" }
+vig-backend-triton = { path = "../vig-backend-triton", version = "0.1.0" }
+vig-gateway = { path = "../vig-gateway", version = "0.1.0" }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tonic = { version = "0.14.6", features = ["tls-ring"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[lints]
+workspace = true

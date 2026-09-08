@@ -22,13 +22,13 @@ Keine CUDA-/Native-Executor-Arbeit vor bestandenem Gate M3.
 
 ## Regeln fuer den Scheduling-Kern
 
-`onetimer-core` ist ein reiner, deterministischer Zustandsautomat:
+`vig-core` ist ein reiner, deterministischer Zustandsautomat:
 
 - kein I/O, keine Uhr, kein Netzwerk, kein Triton
 - keine Dependencies
 - keine Allokation im Entscheidungspfad, soweit praktisch erreichbar
 - `now` wird uebergeben, nie abgerufen
-- jede Zeitarithmetik geht ueber `onetimer_core::time` (dort und nur dort sind
+- jede Zeitarithmetik geht ueber `vig_core::time` (dort und nur dort sind
   die Arithmetiklints lokal ausgesetzt, mit Begruendung im Modulkopf)
 
 Wer eine dieser Regeln brechen will, schreibt zuerst ein ADR.
