@@ -16,7 +16,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
 license = "BUSL-1.1"
-authors = ["Vigilant e.K. <info@vigilant.example>"]
+authors = ["Vigilant e.K. <info@v-verlag.de>"]
 repository = "https://github.com/Vigilant-CRS/Inference-QoS"
 description = "Inference QoS for edge robotics: a freshness- and deadline-aware governor in front of NVIDIA Triton"
 

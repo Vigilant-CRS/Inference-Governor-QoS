@@ -266,8 +266,8 @@ leak.
 | Output semantics across variants | You can declare a canonical `io_signature` per model, and any variant that does not meet it prevents startup. But identical shapes can still carry different meanings, and no tool can check that — only your declaration can. |
 | Field operation | Signed releases and an update path now exist. A hardware qualification programme and long-term support commitments do not. |
 
-| Contact and licence terms | `info@vigilant.example` is a placeholder. Before any distribution, the licensor identity, a real contact and the scope of the Additional Use Grant need a lawyer's eye. |
 | A soak run after these repairs | The eight-hour run predates them. It has to be repeated before anyone leaves this unattended. |
+| Scope of the licence grant | The provider and contact are now stated in [IMPRINT.md](IMPRINT.md). The exact boundary of "Production Purpose" in the Additional Use Grant still deserves a lawyer's eye before the first paid deployment. |
 
 Since the last review round these moved from open to done: an inference
 timeout that releases the client but **not** the slot credit, a drain that
@@ -312,4 +312,19 @@ See [LICENSE](LICENSE), [NOTICE](NOTICE) and
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). NVIDIA Triton and the NVIDIA
 container images are **not** redistributed here.
 
-Commercial licensing and pilot enquiries: info@vigilant.example
+If you are unsure whether your intended use counts as production, ask before
+you deploy. We would rather answer that than argue about it afterwards.
+
+## Who we are
+
+**Vigilant e.K.**, owner Damir Dulovic  
+Königstraße 22, 70173 Stuttgart, Germany  
+Commercial register HRA 726240, Amtsgericht Stuttgart · VAT ID DE 239010954
+
+| Subject | Contact |
+|---|---|
+| Commercial licence, pilots, evaluations | **info@v-verlag.de** · +49 711 540 464 08 |
+| Security reports — please not as a public issue | **info@v-verlag.de**, subject `SECURITY` ([policy](SECURITY.md)) |
+| Bugs and questions about the software | GitHub issues |
+
+Full legal details: [IMPRINT.md](IMPRINT.md).

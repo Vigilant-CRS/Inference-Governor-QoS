@@ -3,7 +3,8 @@
 ## Meldung von Schwachstellen
 
 Sicherheitsrelevante Funde bitte **nicht** als oeffentliches Issue melden,
-sondern an security@vigilant.example. Wir bestaetigen den Eingang innerhalb von
+sondern an info@v-verlag.de mit dem Betreff `SECURITY`.
+Anbieterangaben stehen in IMPRINT.md. Wir bestaetigen den Eingang innerhalb von
 drei Werktagen.
 
 ## Bedrohungsmodell
@@ -12,7 +13,7 @@ Das Bedrohungsmodell des MVP ist in Spec Kapitel 22 beschrieben. Kurzfassung der
 Angriffsflaechen:
 
 - OIP-gRPC-Endpunkt (fremd kontrollierte Requestgroessen, Tensor-Metadaten,
-  OneTimer-Parameter)
+  vig-Parameter)
 - Konfigurationsdateien
 - Runtime- und Interferenzprofile
 - Backend-Verbindung zu Triton
