@@ -52,6 +52,6 @@ von der Tensorgröße.
 - Phase 2 wird umfangreicher als das reine „transparente Forwarding" aus WP7.
 - Der Compatibility Mode muss beide Pfade beherrschen und pro Request
   entscheiden, welcher gilt. Das ist Gateway-Logik, keine Scheduler-Logik:
-  `onetimer-core` bleibt payloadfrei und kennt nur `PayloadRef` (§9.3).
+  `vig-core` bleibt payloadfrei und kennt nur `PayloadRef` (§9.3).
 - CUDA-Shm (x86/dGPU) und Jetson bleiben wie in §17.3 gestuft. **Nur System-Shm
   wird vorgezogen.**

@@ -119,7 +119,7 @@ unter Dauerlast zu erkennen.
 ## Reproduzieren
 
 ```bash
-cargo build --release -p onetimer-bench
+cargo build --release -p vig-bench
 taskset -c 8-15 target/release/wire-bench          # alle Szenarien
 taskset -c 8-15 target/release/wire-bench C        # nur ein Szenario
 ```

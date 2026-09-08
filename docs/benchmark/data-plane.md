@@ -79,5 +79,5 @@ zu schlagen waere wertlos.
 ## Reproduzieren
 
 ```bash
-cargo test --release -p onetimer-gateway --test end_to_end report_data_plane -- --nocapture
+cargo test --release -p vig-gateway --test end_to_end report_data_plane -- --nocapture
 ```

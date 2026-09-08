@@ -69,6 +69,14 @@ anbietet (Spec 3.1).
 Governor: 3720 angenommen, 3640 weitergereicht, 78 wegen Überalterung
 verworfen, 3506 Veto-Ereignisse, 78 Best-Effort-Requests nie ausgeführt.
 
+> **Nachtrag 2026-09-08:** Zusätzlich mit
+> `rate_limiter { resources [ { name: "gpu" count: 1 global: true } ] }`
+> gemessen — echter wechselseitiger Ausschluss statt nur Priorität. Der
+> Detektor steigt damit auf 89–91 %, die Pose fällt auf 78–79 %. Der stärkste
+> Triton-Aufbau verteilt den Verlust um, statt ihn zu beseitigen; keine
+> Konfiguration bringt alle drei geschützten Ströme gleichzeitig nahe 99 %.
+> Zahlen: [`../reviews/2026-09-07/gpu/ERGEBNIS.md`](../reviews/2026-09-07/gpu/ERGEBNIS.md).
+
 **Der Rate Limiter hilft der Baseline kaum** — 83 % auf 84 % beim Detektor.
 Das war zu erwarten und bestätigt die Analyse aus Spec 3.1: der Rate Limiter
 ordnet *wartende* Arbeit, kann aber eine bereits laufende 95-ms-Inferenz nicht
@@ -117,6 +125,9 @@ ist, dass OneTimer entscheidet, *welche* Seite verliert, und es sagt.
 - **Keine Variantenwahl im Spiel.** Für den Detektor liegt nur eine Variante
   vor; die Qualitäts-Deadline-Frontier aus Spec 19.7 ist unbelegt.
 - **Der Best-Effort-Fall ist ungelöst**, nicht nur ungemessen (ADR-0012).
+  *Nachtrag 2026-09-08:* für ein **zerlegbares** Modell ist er inzwischen
+  gelöst — siehe den Nachtrag in `wp26.md`. Für einen nicht unterbrechbaren
+  Block wie das VLM hier gilt die Aussage unverändert.
 
 ## Reproduzieren
 

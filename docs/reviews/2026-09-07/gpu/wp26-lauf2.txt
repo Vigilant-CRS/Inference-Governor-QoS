@@ -1,0 +1,25 @@
+wp26: loest die Zerlegung in Quanten die Aushungerung aus ADR-0012?
+Detektor RF-DETR bei 33 ms, Sprachmodell Qwen3-0.6B, ein Slot, 30 s je Betriebsart
+
+
+  Kosten eines Generierungsauftrags nach Laenge:
+
+  Token je Auftrag | Dauer  | davon Sockel
+  -----------------|--------|-------------
+                 1 |   12 ms |         12 ms
+                 2 |   14 ms |         12 ms
+                 4 |   23 ms |         12 ms
+                 8 |   38 ms |         12 ms
+                16 |   71 ms |         12 ms
+                32 |  134 ms |         12 ms
+                64 |  267 ms |         12 ms
+
+
+  Betriebsart                  | Detektor-Abdeckung | Antwortalter p95 | Generierungen | Zeichen
+  -----------------------------|--------------------|---------|---------------|--------
+  direkt zu Triton             |               37 % |  188 ms |            67 |   20301
+  Governor ohne Zerlegung      |               98 % |   33 ms |             2 |     606
+  Governor mit Zerlegung       |               91 % |   65 ms |            41 |    9532
+
+  Mit Zerlegung: angenommen 1633 weitergereicht 1625 unmachbar-abgelehnt 0 kapazitaet-abgelehnt 0 stale 0 verspaetet 0 zurueckgestellt 115 ausgehungert 0
+  Protected-Deadline-Misses 0
