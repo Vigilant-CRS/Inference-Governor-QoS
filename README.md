@@ -308,12 +308,21 @@ benchmarking, teaching and CI. Production use requires a commercial license
 from Vigilant e.K. Four years after publication, each version becomes
 Apache-2.0 automatically.
 
-See [LICENSE](LICENSE), [NOTICE](NOTICE) and
+Concretely:
+
+| | |
+|---|---|
+| Evaluate, develop, test, benchmark, teach, run in CI | free, no time limit, also inside a company |
+| Run it in production on **up to 3 devices** | free — a pilot cell does not need a contract |
+| Production on more than 3 devices, or shipping it in your product | needs a commercial licence |
+
+Details and prices: **[LICENSING.md](LICENSING.md)**. Full terms:
+[LICENSE](LICENSE), [NOTICE](NOTICE),
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). NVIDIA Triton and the NVIDIA
 container images are **not** redistributed here.
 
-If you are unsure whether your intended use counts as production, ask before
-you deploy. We would rather answer that than argue about it afterwards.
+If you are unsure which side of that line you are on, ask before you deploy.
+We would rather answer than argue about it afterwards.
 
 ## Who we are
 

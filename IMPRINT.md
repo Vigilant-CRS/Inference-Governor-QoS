@@ -43,6 +43,9 @@ e.K. Four years after a version is first published, that version becomes
 available under the Apache Licence 2.0. The full terms, including the
 definition of "Production Purpose", are in [LICENSE](LICENSE).
 
+What is free and what is not, in plain language and with prices:
+[LICENSING.md](LICENSING.md).
+
 If you are unsure whether your intended use is a production use, ask us before
 you deploy. We would rather answer that question than argue about it later.
 

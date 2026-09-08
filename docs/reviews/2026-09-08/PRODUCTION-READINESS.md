@@ -32,7 +32,7 @@ Das sind abgestufte Freigaben, keine Forderung, vor dem ersten Kundengespräch e
 
 ```bash
 cargo test --manifest-path docs/reviews/2026-09-08/repros/Cargo.toml \
-  --offline --locked --target-dir /tmp/vig-production-review-target \
+  --offline --locked --target-dir <tmp> \
   -- --test-threads=1
 ```
 
@@ -57,17 +57,17 @@ P1 ist ein Freigabeblocker für den betroffenen Produktionsumfang. P2 ist eine r
 
 ### P01 · P1 · Drain meldet Erfolg trotz Quarantäne
 
-[actor.rs:358](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-gateway/src/actor.rs:358) beendet den Actor bei `waiting.is_empty() && responses.is_empty()`. Nach einem Timeout wurde der Client aus `waiting` entfernt. Ein noch laufender Backendaufruf steht nicht in `responses`; dort liegen bereits eingegangene Antworten. `quarantined` und die tatsächlichen In-Flight-Kredite werden nicht geprüft.
+[actor.rs:358](crates/vig-gateway/src/actor.rs:358) beendet den Actor bei `waiting.is_empty() && responses.is_empty()`. Nach einem Timeout wurde der Client aus `waiting` entfernt. Ein noch laufender Backendaufruf steht nicht in `responses`; dort liegen bereits eingegangene Antworten. `quarantined` und die tatsächlichen In-Flight-Kredite werden nicht geprüft.
 
 **Reproduziert:** Backend antwortet niemals; Timeout setzt Quarantäne auf 1; anschließend liefert `drain()` sofort `true`. Damit kann ein geordneter Shutdown Erfolg melden, obwohl sein eigener Kommentar das Gegenteil verspricht.
 
-Zweiter Codebefund: [serve.rs:126](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-cli/src/serve.rs:126) wartet erst auf `serve_with_shutdown(...).await` und startet danach die 20-Sekunden-Drainfrist. Die lokal eingesetzte tonic-Implementierung wartet dabei selbst auf das Schließen der Verbindungen. Ein hängender RPC kann deshalb bereits vor Beginn der Frist feststecken.
+Zweiter Codebefund: [serve.rs:126](crates/vig-cli/src/serve.rs:126) wartet erst auf `serve_with_shutdown(...).await` und startet danach die 20-Sekunden-Drainfrist. Die lokal eingesetzte tonic-Implementierung wartet dabei selbst auf das Schließen der Verbindungen. Ein hängender RPC kann deshalb bereits vor Beginn der Frist feststecken.
 
 **Freigabebedingung:** eine gesamte Shutdownfrist ab Signal; Aufnahme schließen, Readiness absenken, wartende und laufende Arbeit getrennt behandeln, echte In-Flight-Zustände berücksichtigen. SIGTERM mit hängendem Backend, wartenden Clients und offenem Verwaltungs-RPC testen. Nach Ablauf darf der Prozess begrenzt und mit Fehlerstatus enden; er darf die Ungewissheit nicht als erfolgreiche Leerung melden.
 
 ### P02 · P1 · Quarantäne ist noch kein vollständiger Fehler- und Wiederanlaufvertrag
 
-[actor.rs:438](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-gateway/src/actor.rs:438) entfernt bei jedem `BackendDone` die Quarantäne. Auch `Err` führt zu `Event::BackendFailure`; [scheduler.rs:540](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-core/src/scheduler.rs:540) gibt den Kredit frei.
+[actor.rs:438](crates/vig-gateway/src/actor.rs:438) entfernt bei jedem `BackendDone` die Quarantäne. Auch `Err` führt zu `Event::BackendFailure`; [scheduler.rs:540](crates/vig-core/src/scheduler.rs:540) gibt den Kredit frei.
 
 **Codebefund:** Ein abgebrochener Transport beweist nicht, dass die GPU den Auftrag beendet hat. Die Unterscheidung „bestätigter Backendabschluss“ versus „Ausführungsende unbekannt“ fehlt weiterhin. Das Problem gilt auch für einen Gatewayneustart vor einem unverändert laufenden Backend.
 
@@ -77,7 +77,7 @@ Zweiter Codebefund: [serve.rs:126](/run/media/dd/USB_40281/Projekte/InferenceQoS
 
 ### P03 · P1 · Readiness bleibt bei bestätigtem Backendausfall grün
 
-[exporter.rs:315](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-gateway/src/exporter.rs:315) betrachtet nur, ob die Zahl quarantänierter Requests die Slotzahl erreicht. Backend-/Modellbereitschaft, jüngste Verbindungsfehler und Shutdownstatus fehlen.
+[exporter.rs:315](crates/vig-gateway/src/exporter.rs:315) betrachtet nur, ob die Zahl quarantänierter Requests die Slotzahl erreicht. Backend-/Modellbereitschaft, jüngste Verbindungsfehler und Shutdownstatus fehlen.
 
 **Reproduziert:** Ein Aufruf scheitert mit `Unavailable`, der korrekte Fehlerzähler steht auf 1, die Readinessfunktion liefert trotzdem Erfolg. Ein sofort ablehnendes Backend erzeugt normalerweise keine Quarantäne.
 
@@ -85,7 +85,7 @@ Zweiter Codebefund: [serve.rs:126](/run/media/dd/USB_40281/Projekte/InferenceQoS
 
 ### P04 · P1 für fremd kontrollierte Eingaben · Bytebudget lässt gültige Payloadformen aus
 
-[payload_bytes() in service.rs:123](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-gateway/src/service.rs:123) summiert ausschließlich `raw_input_contents`. OIP erlaubt Nutzlast auch in `inputs[].contents`.
+[payload_bytes() in service.rs:123](crates/vig-gateway/src/service.rs:123) summiert ausschließlich `raw_input_contents`. OIP erlaubt Nutzlast auch in `inputs[].contents`.
 
 **Reproduziert:** Ein einzelner Request mit 2 MiB `bytes_contents` wird bei 1 MiB Budget erfolgreich ausgeführt. Die Kontrolle mit 2 MiB `raw_input_contents` wird korrekt abgewiesen. Das ist eine echte Lücke in der Aufnahmegrenze, keine bloß fehlende Sicherheitsfunktion.
 
@@ -95,9 +95,9 @@ Zusätzlicher Codebefund: Der Byte-Permit hängt an der wartenden Service-Future
 
 ### P05 · P1 für den versprochenen Textkalibrierworkflow · Neuer Pfad wird zu spät erreicht
 
-[calibrate.rs:169](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-cli/src/calibrate.rs:169) holt zuerst alle Modelle über `profiling_targets()` am Defaultendpunkt. Für jede Variante folgen `model_metadata`, `zero_request(...)?` und unäre Inferenzen. Erst nach dieser Schleife wird `measure_all_cooperative()` aufgerufen.
+[calibrate.rs:169](crates/vig-cli/src/calibrate.rs:169) holt zuerst alle Modelle über `profiling_targets()` am Defaultendpunkt. Für jede Variante folgen `model_metadata`, `zero_request(...)?` und unäre Inferenzen. Erst nach dieser Schleife wird `measure_all_cooperative()` aufgerufen.
 
-[request.rs:94](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-backend-triton/src/request.rs:94) unterstützt im Nullrequest absichtlich kein BYTES.
+[request.rs:94](crates/vig-backend-triton/src/request.rs:94) unterstützt im Nullrequest absichtlich kein BYTES.
 
 **Codebefund:** Ein gewöhnliches Textmodell mit BYTES-Eingaben beendet den Ablauf vor der neuen Textmessung. Liegt das Modell nur am modellspezifischen zweiten Backend, kann bereits die Metadatenabfrage scheitern. Die hinzugefügte Messfunktion behebt den End-to-End-Workflow daher noch nicht.
 
@@ -107,7 +107,7 @@ Weitere Einschränkungen: zwei Tokenbudgets mit je fünf Wiederholungen und Mitt
 
 ### P06 · P1 für transparente LLM-/VLM-Nutzung · Zerlegung verändert den Requestvertrag
 
-[cooperative.rs:79](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-gateway/src/cooperative.rs:79) ersetzt Inputs durch Text und fest erzeugte Samplingparameter. Das Clientbudget, weitere Samplingparameter und zusätzliche Eingaben werden nicht erhalten. `GenerativeJob::from_request()` erhält lediglich die konfigurierte Gesamtobergrenze.
+[cooperative.rs:79](crates/vig-gateway/src/cooperative.rs:79) ersetzt Inputs durch Text und fest erzeugte Samplingparameter. Das Clientbudget, weitere Samplingparameter und zusätzliche Eingaben werden nicht erhalten. `GenerativeJob::from_request()` erhält lediglich die konfigurierte Gesamtobergrenze.
 
 **Reproduziert:** Client verlangt maximal 4 Tokens, Modellkonfiguration erlaubt 64, Schedulerquantum beträgt 32. Bereits der erste tatsächliche Quantumrequest verlangt 32 Tokens.
 
@@ -119,7 +119,7 @@ Zusätzlich werden Tokens weiterhin über Bytes/4 geschätzt; das ist keine hart
 
 ### P07 · P1 bei automatischer Variantenwahl · Unbekannte Signatur wird weiter zugelassen
 
-[verify.rs:288](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-cli/src/verify.rs:288) überspringt nicht abrufbare Metadaten auch beim Vergleich mit einer ausdrücklich deklarierten `io_signature`. Der paarweise Vergleich verhält sich ebenso. `unverified_models()` berücksichtigt weiterhin nur Mismatch, nicht Missing/Unavailable.
+[verify.rs:288](crates/vig-cli/src/verify.rs:288) überspringt nicht abrufbare Metadaten auch beim Vergleich mit einer ausdrücklich deklarierten `io_signature`. Der paarweise Vergleich verhält sich ebenso. `unverified_models()` berücksichtigt weiterhin nur Mismatch, nicht Missing/Unavailable.
 
 **Codebefund:** „keine nachgewiesene Abweichung“ wird mit ausreichender Freigabe verwechselt. Eine später ladende Variante kann ohne erfolgreich geprüfte Signatur verfügbar werden. Startupprüfungen besitzen außerdem nicht überall begrenzte RPC-Wartezeiten.
 
@@ -127,7 +127,7 @@ Zusätzlich werden Tokens weiterhin über Bytes/4 geschätzt; das ist keine hart
 
 ### P08 · P1 für Docker-Auslieferung · Umbenennung bricht den vorhandenen Build
 
-[Dockerfile:16](/run/media/dd/USB_40281/Projekte/InferenceQoS/deploy/docker/Dockerfile:16) baut weiterhin `onetimer-cli`, kopiert `target/release/onetimer` und setzt dieses alte Binary als Entrypoint.
+[Dockerfile:16](deploy/docker/Dockerfile:16) baut weiterhin `onetimer-cli`, kopiert `target/release/onetimer` und setzt dieses alte Binary als Entrypoint.
 
 **Reproduziert:** Der Cargo-Bauschritt scheitert, weil es das Paket nicht mehr gibt. Kein Dockerimage wurde dafür heruntergeladen oder gebaut.
 
@@ -137,7 +137,7 @@ Der Compose-Aufbau verwendet zudem weiterhin alte Namen und veröffentlicht die 
 
 ### P09 · P2 · Messdefinitionen und Messfenster sind noch inkonsistent
 
-Die Umbenennung zu `response_age` und das zusätzliche Peak-AoI sind Fortschritte. [coverage.rs:126](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-sim/src/coverage.rs:126) nimmt aber weiterhin Lieferungen außerhalb des Messfensters in Alter und Peak-AoI auf.
+Die Umbenennung zu `response_age` und das zusätzliche Peak-AoI sind Fortschritte. [coverage.rs:126](crates/vig-sim/src/coverage.rs:126) nimmt aber weiterhin Lieferungen außerhalb des Messfensters in Alter und Peak-AoI auf.
 
 **Reproduziert:** Ein 100-ms-Messfenster enthält nur eine bei 1000 ms registrierte Lieferung und meldet 1000 ms Peak-AoI. Der Test setzt keine vorhandene Information vor Fensterbeginn voraus; der künstliche Peak stammt eindeutig aus der Lieferung nach Messende.
 
@@ -159,7 +159,7 @@ Die neuen Transport- und Tokenmechanismen sind vorhanden. Ein gültiger Token be
 
 ### P12 · Vor Weitergabe klären · Lizenzmetadaten sind widersprüchlich
 
-[LICENSE](/run/media/dd/USB_40281/Projekte/InferenceQoS/LICENSE) und Cargo nennen BUSL-1.1. [.reuse/dep5](/run/media/dd/USB_40281/Projekte/InferenceQoS/.reuse/dep5) deklariert für `Files: *` weiterhin Apache-2.0 und alte Projekt-/Repositorynamen. Als Lizenz-/Pilotkontakt ist `info@vigilant.example` eingetragen.
+[LICENSE](LICENSE) und Cargo nennen BUSL-1.1. [.reuse/dep5](.reuse/dep5) deklariert für `Files: *` weiterhin Apache-2.0 und alte Projekt-/Repositorynamen. Als Lizenz-/Pilotkontakt ist `info@vigilant.example` eingetragen.
 
 Das ist zunächst ein konkreter Dokumentations- und Freigabebefund, keine abschließende juristische Auslegung. Für einen Pilot brauchen Anbieteridentität, echter Kontakt, zulässiger Evaluations-/Produktionsumfang, Artefaktversion und Nutzungsrechte eine eindeutige Fassung. Gerade der eigene weit formulierte Begriff „Production Purpose“ sollte mit einem Lizenzjuristen gegen den gewünschten Kundenpilot geprüft werden.
 

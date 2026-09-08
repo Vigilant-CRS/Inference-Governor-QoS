@@ -160,7 +160,7 @@ Die Gegenbeispiele stehen in [repros/tests/invariants.rs](repros/tests/invariant
 
 ```bash
 cargo test --manifest-path docs/reviews/2026-09-07/repros/Cargo.toml \
-  --locked --offline --target-dir /tmp/onetimer-review-target \
+  --locked --offline --target-dir <tmp> \
   -- --test-threads=1
 ```
 
@@ -172,7 +172,7 @@ P1 bezeichnet einen Freigabeblocker für die betroffene Funktion oder einen Fehl
 
 ### F01 · P1 · Bei mehr als 32 gleichzeitig veralteten Requests verschwinden Abschlussmeldungen
 
-In [scheduler.rs:556](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-core/src/scheduler.rs:556) besitzt der Sammelpuffer für Stale-Entfernungen die Kapazität `MAX_INFLIGHT = 8 * 4 = 32`. Warteschlangen können dagegen zusammen `32 * 64 = 2048` Einträge enthalten. `queue.collect_stale()` entfernt alle betroffenen Einträge; Fehler von `drops.push()` werden ignoriert.
+In [scheduler.rs:556](crates/vig-core/src/scheduler.rs:556) besitzt der Sammelpuffer für Stale-Entfernungen die Kapazität `MAX_INFLIGHT = 8 * 4 = 32`. Warteschlangen können dagegen zusammen `32 * 64 = 2048` Einträge enthalten. `queue.collect_stale()` entfernt alle betroffenen Einträge; Fehler von `drops.push()` werden ignoriert.
 
 **Reproduziert:** 64 wartende Requests altern gleichzeitig aus; nur 32 `Terminate`-Aktionen entstehen. Die übrigen Requests sind nicht mehr in der Queue, bleiben aber im Gateway in `waiting` und `inbox`. Clients warten unbegrenzt, Payloads bleiben erhalten. Wiederholungen ermöglichen unbegrenztes Speicherwachstum trotz begrenzter Einzelqueues. Die üblichen Beispiele mit drei `latest`-Queues entdecken das nicht.
 
@@ -180,7 +180,7 @@ In [scheduler.rs:556](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-c
 
 ### F02 · P1 · Backendfehler werden im Scheduler als Erfolg verbucht
 
-[actor.rs:270](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-gateway/src/actor.rs:270) verarbeitet jedes `BackendDone` als `Event::Completion`, auch wenn das Resultat `Err` ist. Der Core besitzt einen separaten `BackendFailure`-Pfad, den das Gateway hier nicht nutzt.
+[actor.rs:270](crates/vig-gateway/src/actor.rs:270) verarbeitet jedes `BackendDone` als `Event::Completion`, auch wenn das Resultat `Err` ist. Der Core besitzt einen separaten `BackendFailure`-Pfad, den das Gateway hier nicht nutzt.
 
 **Reproduziert:** eine fehlgeschlagene Verbindung ergibt `backend_failures = 0` und `completed_valid = 1`; der Client erhält gleichzeitig einen Fehler. Auch Laufzeitbeobachtung und Margenanpassung behandeln den fehlgeschlagenen Aufruf wie eine Inferenz.
 
@@ -190,9 +190,9 @@ In [scheduler.rs:556](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-c
 
 ### F03 · P1 · Kooperative Quanten sind im realen Actor nicht durchgängig implementiert
 
-In [actor.rs:258](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-gateway/src/actor.rs:258) legt eine erste Ankunft keinen `GenerativeJob` und keinen Eintrag in `descriptors` an. `GenerativeJob::from_request()` wird im Produktpfad nirgends aufgerufen. `jobs.insert()` und `descriptors.insert()` existieren nur in der Fortsetzung. Deshalb findet `forward()` beim ersten Quantum keinen Job und leitet den ursprünglichen Request weiter.
+In [actor.rs:258](crates/vig-gateway/src/actor.rs:258) legt eine erste Ankunft keinen `GenerativeJob` und keinen Eintrag in `descriptors` an. `GenerativeJob::from_request()` wird im Produktpfad nirgends aufgerufen. `jobs.insert()` und `descriptors.insert()` existieren nur in der Fortsetzung. Deshalb findet `forward()` beim ersten Quantum keinen Job und leitet den ursprünglichen Request weiter.
 
-Zweiter Fehler in [scheduler.rs:628](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-core/src/scheduler.rs:628): Das Protected-Veto prüft die volle, aus dem Variantenprofil berechnete Joblaufzeit. `size_quantum()` kommt erst danach. **Reproduziert:** Ein 17-ms-Quantum würde vor die nächste geschützte Ankunft passen; der Scheduler blockiert es wegen des 100-ms-Gesamtjobs.
+Zweiter Fehler in [scheduler.rs:628](crates/vig-core/src/scheduler.rs:628): Das Protected-Veto prüft die volle, aus dem Variantenprofil berechnete Joblaufzeit. `size_quantum()` kommt erst danach. **Reproduziert:** Ein 17-ms-Quantum würde vor die nächste geschützte Ankunft passen; der Scheduler blockiert es wegen des 100-ms-Gesamtjobs.
 
 Dritter Codebefund: `forward()` entfernt das Requesttemplate aus `inbox`; `continue_job()` verlangt genau dort später wieder ein Template. Nur das Anlegen des Jobs zu ergänzen würde deshalb die Fortsetzung noch nicht reparieren. Bei manchen Abbruchpfaden fehlt außerdem die symmetrische Bereinigung von `jobs`.
 
@@ -202,7 +202,7 @@ Dritter Codebefund: `forward()` entfernt das Requesttemplate aus `inbox`; `conti
 
 ### F04 · P1 · Akzeptierte Konfiguration kann den Releaseprozess abbrechen
 
-Die Konfigurationsauflösung und `ModelContract::validate()` prüfen die Grenzen von `cooperative` nicht. [scheduler.rs:733](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-core/src/scheduler.rs:733) ruft `clamp(min_tokens, max_total_tokens)` auf.
+Die Konfigurationsauflösung und `ModelContract::validate()` prüfen die Grenzen von `cooperative` nicht. [scheduler.rs:733](crates/vig-core/src/scheduler.rs:733) ruft `clamp(min_tokens, max_total_tokens)` auf.
 
 **Reproduziert:** `min_tokens=8, max_total_tokens=1` wird akzeptiert und erzeugt beim Dispatch eine Panic `min > max`. Im Releaseprofil gilt `panic = "abort"`; daraus folgt ein Prozessabbruch. Die Verbote von `unwrap` und explizitem `panic!` schützen nicht vor Panics in Standardmethoden.
 
@@ -210,15 +210,15 @@ Die Konfigurationsauflösung und `ModelContract::validate()` prüfen die Grenzen
 
 ### F05 · P1 · Zeitbasis und Altersfallback können alte Daten frisch erscheinen lassen
 
-[clock.rs:32](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-gateway/src/clock.rs:32) liefert Nanosekunden seit `MonotonicClock::start()`. Die Protokolldokumentation verspricht dagegen absolute monotone Clientzeitstempel auf demselben Host. Ein Client mit `CLOCK_MONOTONIC` kennt den privaten Prozessnullpunkt nicht; normale absolute Werte werden als unplausibel verworfen. Dieselbe Maschine reicht als Bedingung nicht aus.
+[clock.rs:32](crates/vig-gateway/src/clock.rs:32) liefert Nanosekunden seit `MonotonicClock::start()`. Die Protokolldokumentation verspricht dagegen absolute monotone Clientzeitstempel auf demselben Host. Ein Client mit `CLOCK_MONOTONIC` kennt den privaten Prozessnullpunkt nicht; normale absolute Werte werden als unplausibel verworfen. Dieselbe Maschine reicht als Bedingung nicht aus.
 
-Zusätzlich setzt [params.rs:286](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-protocol-oip/src/params.rs:286) ein explizites Alter oberhalb der Plausibilitätsgrenze auf Ankunftszeit zurück. **Reproduziert:** 2 Sekunden gemeldetes Alter bei einer Grenze von 1 Sekunde werden zu 0 Sekunden. Auch kurz nach Prozessstart kann `arrival.saturating_sub(age)` Alter abschneiden.
+Zusätzlich setzt [params.rs:286](crates/vig-protocol-oip/src/params.rs:286) ein explizites Alter oberhalb der Plausibilitätsgrenze auf Ankunftszeit zurück. **Reproduziert:** 2 Sekunden gemeldetes Alter bei einer Grenze von 1 Sekunde werden zu 0 Sekunden. Auch kurz nach Prozessstart kann `arrival.saturating_sub(age)` Alter abschneiden.
 
 **Korrektur:** eine dokumentierte gemeinsame Epoche oder explizite Umrechnung mit Uhrdomäne. Relative Altersangaben nicht wie fremde absolute Uhren behandeln. Ungültige Zeitangaben ablehnen oder als zeitlich ungewiss ausweisen; bekannte alte Daten dürfen keine neue Frist erhalten. Alter und Transportunsicherheit gegebenenfalls separat darstellen.
 
 ### F06 · P1 · Co-Run-Verbote enden vor der tatsächlichen Fertigstellung
 
-[slots.rs:342](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-core/src/slots.rs:342) berücksichtigt verbotene laufende Modelle nur, solange `expected_finish > now`. `ready_slot()` verwendet diesen Prognosepfad auch für die reale Zulassung.
+[slots.rs:342](crates/vig-core/src/slots.rs:342) berücksichtigt verbotene laufende Modelle nur, solange `expected_finish > now`. `ready_slot()` verwendet diesen Prognosepfad auch für die reale Zulassung.
 
 **Reproduziert:** A ist noch in Ausführung, sollte nach 5 ms fertig sein, hat aber noch keine Fertigstellung gemeldet. Ab 6 ms darf das verbotene B auf einem zweiten freien Slot starten. `corun_allowed(B)` sagt weiterhin „verboten“, `ready_slot(B)` erlaubt es.
 
@@ -226,7 +226,7 @@ Zusätzlich setzt [params.rs:286](/run/media/dd/USB_40281/Projekte/InferenceQoS/
 
 ### F07 · P1 · FIFO ist im Scheduler keine FIFO; Stateful-Schutz ist unvollständig
 
-[scheduler.rs:848](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-core/src/scheduler.rs:848) betrachtet alle Queueelemente nach Kritikalität und Deadline, unabhängig von ihrer Policy. `take_front()` existiert zwar, wird hier aber nicht verwendet.
+[scheduler.rs:848](crates/vig-core/src/scheduler.rs:848) betrachtet alle Queueelemente nach Kritikalität und Deadline, unabhängig von ihrer Policy. `take_front()` existiert zwar, wird hier aber nicht verwendet.
 
 **Reproduziert:** Nach Request 1 wird Request 3 vor Request 2 ausgeführt, wenn 3 eine frühere Clientdeadline hat; auch mit `stateful: true`. Der Golden-Test zur FIFO-Reihenfolge prüft die Queueoperation, nicht diesen Schedulerpfad.
 
@@ -236,7 +236,7 @@ Darüber hinaus erlaubt `stateful + fifo` weiterhin Altersdrops und mehrere offe
 
 ### F08 · P1 · Der Look-ahead reserviert geschützte Arbeit nicht gemeinsam
 
-[feasibility.rs:163](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-core/src/feasibility.rs:163) prüft jede erwartete Ankunft separat gegen denselben hypothetischen Belegungszustand. Die erwarteten Jobs werden darin nicht nacheinander eingeplant.
+[feasibility.rs:163](crates/vig-core/src/feasibility.rs:163) prüft jede erwartete Ankunft separat gegen denselben hypothetischen Belegungszustand. Die erwarteten Jobs werden darin nicht nacheinander eingeplant.
 
 **Reproduziert:** Zwei geschützte Jobs erscheinen bei 10 ms, brauchen je 5 ms und haben Deadline 20 ms. Ohne Kandidaten passen sie in `[10,15]` und `[15,20]`. Ein Best-Effort-Job bis 11 ms verschiebt sie auf `[11,16]` und `[16,21]`. Der Guard meldet trotzdem `Clear`, weil jeder geschützte Job einzeln passt.
 
@@ -244,7 +244,7 @@ Darüber hinaus erlaubt `stateful + fifo` weiterhin Altersdrops und mehrere offe
 
 ### F09 · P1 · Der Look-ahead ignoriert bereits gelernte Laufzeitverschlechterung
 
-[scheduler.rs:907](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-core/src/scheduler.rs:907) verwendet für erwartete Arbeit Offlineprofil und ursprüngliche globale Marge. Die eigentliche Variantenplanung verwendet dagegen Online-Estimator und modellspezifische Marge.
+[scheduler.rs:907](crates/vig-core/src/scheduler.rs:907) verwendet für erwartete Arbeit Offlineprofil und ursprüngliche globale Marge. Die eigentliche Variantenplanung verwendet dagegen Online-Estimator und modellspezifische Marge.
 
 **Reproduziert:** Der Estimator kennt nach 16 Beobachtungen eine geschützte Laufzeit von 10 ms statt des Offlinewertes von 1 ms. Ein Best-Effort-Job wird dennoch zugelassen, obwohl er die nächste geschützte Fertigstellung von 1610 auf mindestens 1612 ms verschiebt.
 
@@ -252,7 +252,7 @@ Darüber hinaus erlaubt `stateful + fifo` weiterhin Altersdrops und mehrere offe
 
 ### F10 · P1 · Clientabbruch und hängendes Backend haben keinen vollständigen Lebenszyklus
 
-`Handle::submit()` wartet auf eine Antwort, aber ein fallengelassener Empfänger erzeugt kein Cancel-Ereignis. [actor.rs:420](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-gateway/src/actor.rs:420) startet Backendtasks ohne überwachten Laufzeitabschluss. [client.rs:291](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-backend-triton/src/client.rs:291) hat keinen Inferenztimeout; der 5-Sekunden-Wert gilt nur für den Verbindungsaufbau, nicht für alle Health-/RPC-Antworten.
+`Handle::submit()` wartet auf eine Antwort, aber ein fallengelassener Empfänger erzeugt kein Cancel-Ereignis. [actor.rs:420](crates/vig-gateway/src/actor.rs:420) startet Backendtasks ohne überwachten Laufzeitabschluss. [client.rs:291](crates/vig-backend-triton/src/client.rs:291) hat keinen Inferenztimeout; der 5-Sekunden-Wert gilt nur für den Verbindungsaufbau, nicht für alle Health-/RPC-Antworten.
 
 **Reproduziert:** Ein Client bricht einen noch wartenden Request ab; das Backend führt ihn anschließend trotzdem aus. Bei Shared Memory kommt ein Datenintegritätsrisiko hinzu, falls der Client die zugehörige Region nach Abbruch wiederverwendet.
 
@@ -262,7 +262,7 @@ Darüber hinaus erlaubt `stateful + fifo` weiterhin Altersdrops und mehrere offe
 
 ### F11 · P1 · Ein beliebiges decoupled Modell wird nach seiner ersten Teilantwort als fertig behandelt
 
-[client.rs:269](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-backend-triton/src/client.rs:269) kehrt beim ersten `infer_response` zurück. Die letzte Antwort beziehungsweise `triton_final_response` wird nicht abgewartet. Decoupled-Modelle dürfen mehrere Antworten liefern; die erste ist keine allgemeine Fertigstellungsbestätigung. [Triton Decoupled Models](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/decoupled_models.html)
+[client.rs:269](crates/vig-backend-triton/src/client.rs:269) kehrt beim ersten `infer_response` zurück. Die letzte Antwort beziehungsweise `triton_final_response` wird nicht abgewartet. Decoupled-Modelle dürfen mehrere Antworten liefern; die erste ist keine allgemeine Fertigstellungsbestätigung. [Triton Decoupled Models](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/decoupled_models.html)
 
 **Folge:** Bei einem tatsächlich streamenden Modell können Teiltext als Endergebnis und ein freigegebener Slot bei noch laufender Backendarbeit entstehen. Das ist ein Codebefund für den unterstützten generischen `decoupled`-Modus, kein Nachweis, dass der konkrete nichtstreamende Qwen-Aufruf im vorhandenen Benchmark mehrere Teilantworten erzeugte.
 
@@ -270,7 +270,7 @@ Darüber hinaus erlaubt `stateful + fifo` weiterhin Altersdrops und mehrere offe
 
 ### F12 · P1 · Zentrale AoI-Metrik misst Antwortalter statt Informationsalter über die Zeit
 
-[coverage.rs:91](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-sim/src/coverage.rs:91) speichert nur `completion - generation` pro Lieferung und bildet darüber Quantile. Nach einer Antwort ohne weitere Lieferungen wächst keine Beobachtung mehr nach. Ein leerer Strom erhält sogar AoI-Quantile von 0.
+[coverage.rs:91](crates/vig-sim/src/coverage.rs:91) speichert nur `completion - generation` pro Lieferung und bildet darüber Quantile. Nach einer Antwort ohne weitere Lieferungen wächst keine Beobachtung mehr nach. Ein leerer Strom erhält sogar AoI-Quantile von 0.
 
 **Reproduziert:** Eine einzige 1-ms-Antwort und danach fast eine Sekunde Funkstille ergeben weiterhin `aoi_p95 = 1 ms`. Am Verbraucher ist die Information am Ende fast eine Sekunde alt. Die Kennzahl ist als bedingtes Antwortalter nützlich, trägt aber nicht die übliche AoI-Bedeutung. Die Fachdefinition verwendet zu jedem Zeitpunkt den Erzeugungszeitpunkt der frischesten bereits empfangenen Information. [Yates et al., AoI Survey](https://www.mit.edu/~modiano/papers/CV_J_122preprint.pdf)
 
@@ -280,7 +280,7 @@ Coverage zählt ausschließlich Fenster mit einer neuen frischen Lieferung. Ein 
 
 ### F13 · P1 · Die mitgelieferte Triton-Baseline konfiguriert keine gemeinsame begrenzte Ressource
 
-Die Runtime-Konfigurationen, etwa [rfdetr/config.pbtxt:12](/run/media/dd/USB_40281/Projekte/InferenceQoS-runtime/onetimer-vision/rfdetr/config.pbtxt:12), enthalten `rate_limiter { priority: ... }`, aber keine `resources`. Der dokumentierte Start setzt `--rate-limit=execution_count`.
+Die Runtime-Konfigurationen, etwa [rfdetr/config.pbtxt:12](.-runtime/onetimer-vision/rfdetr/config.pbtxt:12), enthalten `rate_limiter { priority: ... }`, aber keine `resources`. Der dokumentierte Start setzt `--rate-limit=execution_count`.
 
 Triton reserviert standardmäßig keine Rate-Limiter-Ressourcen für eine Instanz. Die Ressourcen müssen explizit konfiguriert werden; Prioritäten entscheiden bei Ressourcenknappheit. Auch der Quellcode von `r26.06` allokiert bei leerem Ressourcenbedarf ohne solche Konkurrenz. [Triton Rate Limiter](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/rate_limiter.html), [Implementierung r26.06](https://raw.githubusercontent.com/triton-inference-server/core/r26.06/src/rate_limiter.cc)
 
@@ -290,7 +290,7 @@ Triton reserviert standardmäßig keine Rate-Limiter-Ressourcen für eine Instan
 
 ### F14 · P2 · Blockierter Spitzenkandidat hält unabhängige Arbeit auf
 
-In [scheduler.rs:657](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-core/src/scheduler.rs:657) beendet ein nicht sofort startbarer Gewinner den gesamten Dispatchversuch. Nur ein Protected-Veto führt dazu, einen anderen Kandidaten zu versuchen.
+In [scheduler.rs:657](crates/vig-core/src/scheduler.rs:657) beendet ein nicht sofort startbarer Gewinner den gesamten Dispatchversuch. Nur ein Protected-Veto führt dazu, einen anderen Kandidaten zu versuchen.
 
 **Reproduziert:** A läuft; B hat höhere Priorität als C, darf aber nicht mit A koexistieren. Ein zweiter Slot ist frei und C darf neben A laufen. Trotzdem startet C nicht. Das ist vermeidbare Blockierung durch den Queuekopf.
 
@@ -298,7 +298,7 @@ In [scheduler.rs:657](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-c
 
 ### F15 · P2 · Niedrigste Qualität wird fälschlich mit kürzester Laufzeit gleichgesetzt
 
-[variant.rs:171](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-core/src/variant.rs:171) setzt `fastest` auf die zuletzt betrachtete Variante. Validiert wird nur absteigende Qualität, nicht die Laufzeitordnung. Der Doctor trifft dieselbe Annahme.
+[variant.rs:171](crates/vig-core/src/variant.rs:171) setzt `fastest` auf die zuletzt betrachtete Variante. Validiert wird nur absteigende Qualität, nicht die Laufzeitordnung. Der Doctor trifft dieselbe Annahme.
 
 **Reproduziert:** Varianten mit Qualität 1,0/0,9 und Laufzeit 10/20 ms; keine hält die Deadline. Gewählt wird die 20-ms-Variante. Backendwechsel, Quantisierung oder Inputformen können solche Ordnungen erzeugen.
 
@@ -314,7 +314,7 @@ Der Actor verändert nur `model_name`. Die Auswahl prüft Qualität und Laufzeit
 
 ### F17 · P2 · OIP-Transparenz und mehrere Backends sind nur teilweise umgesetzt
 
-[service.rs:181](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-gateway/src/service.rs:181) fragt Readiness und Metadaten über den Default-Client ab, selbst wenn die Inferenz zum modellspezifischen Backend geht. `model_config` und weitere Verwaltungsaufrufe bilden logische Modellnamen nicht entsprechend ab. Shared-Memory-Registrierungen gehen ebenfalls nur zum Defaultbackend; CUDA-Registrierungen werden zudem nicht wie System-Shm in der Registry gebucht.
+[service.rs:181](crates/vig-gateway/src/service.rs:181) fragt Readiness und Metadaten über den Default-Client ab, selbst wenn die Inferenz zum modellspezifischen Backend geht. `model_config` und weitere Verwaltungsaufrufe bilden logische Modellnamen nicht entsprechend ab. Shared-Memory-Registrierungen gehen ebenfalls nur zum Defaultbackend; CUDA-Registrierungen werden zudem nicht wie System-Shm in der Registry gebucht.
 
 **Reproduziert:** Die Inferenzantwort auf `detector` enthält `model_name = detector_large`; die Metadatenantwort verwendet dagegen den logischen Namen. Eine dokumentierte Variantenmetainformation fehlt. Darüber hinaus gehen gRPC-Metadaten durch `request.into_inner()` verloren, etwa Authentifizierung, Tracing und Transportdeadline. Bei Fehlern werden unterschiedliche Backendstatus pauschal zu `Unavailable`.
 
@@ -322,7 +322,7 @@ Der Actor verändert nur `model_name`. Die Auswahl prüft Qualität und Laufzeit
 
 ### F18 · P1 · Einige ungültige Zeitwerte deaktivieren still Regeln
 
-[schema.rs:846](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-config/src/schema.rs:846) verwandelt Umwandlungsfehler bei Periode und Maximalalter mit `.ok()` in `None`. Ungültige Verweildauer wird zu null. Andere Werte werden durch sättigende Multiplikation normalisiert. Das widerspricht dem Anspruch, ungültige Konfigurationen abzulehnen.
+[schema.rs:846](crates/vig-config/src/schema.rs:846) verwandelt Umwandlungsfehler bei Periode und Maximalalter mit `.ok()` in `None`. Ungültige Verweildauer wird zu null. Andere Werte werden durch sättigende Multiplikation normalisiert. Das widerspricht dem Anspruch, ungültige Konfigurationen abzulehnen.
 
 **Reproduziert:** `max_age_ms = u64::MAX` wird akzeptiert und deaktiviert den Altersschutz. Auch eine Nullperiode und zu viele Lastprofilstufen werden nicht ausreichend zurückgewiesen; überzählige Stufen werden abgeschnitten.
 
@@ -330,7 +330,7 @@ Der Actor verändert nur `model_name`. Die Auswahl prüft Qualität und Laufzeit
 
 ### F19 · P2 · Kalibrator misst nicht den allgemein behaupteten Interferenzeffekt
 
-[calibrate.rs:217](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-cli/src/calibrate.rs:217) erzeugt Nebenlast mit derselben Modellvariante. Bei einer einzigen Instanz, wie in den Runtime-Konfigurationen, kann das überwiegend die Queue vor dieser Instanz messen. Das ist nicht gleichbedeutend mit der Laufzeit unter einem anderen gleichzeitig rechnenden Modell.
+[calibrate.rs:217](crates/vig-cli/src/calibrate.rs:217) erzeugt Nebenlast mit derselben Modellvariante. Bei einer einzigen Instanz, wie in den Runtime-Konfigurationen, kann das überwiegend die Queue vor dieser Instanz messen. Das ist nicht gleichbedeutend mit der Laufzeit unter einem anderen gleichzeitig rechnenden Modell.
 
 Paarmessungen laufen nur in einer Richtung: A unter Last von B, nicht zusätzlich B unter Last von A. Die gemessenen Paarwerte unterhalb der Schwelle gehen nicht als spezifische Prognosen ein. Hintergrundlastfehler können unbemerkt den Lastgeber beenden; fehlgeschlagene Messungen werden übersprungen. Der Kalibrator schreibt trotzdem eine Konfiguration und bestätigt Erfolg, ohne das resultierende Profil vollständig zu validieren.
 
@@ -348,7 +348,7 @@ Zusätzlich verwenden `profile` und `calibrate` nur `profiling_targets()` mit ei
 
 ### F21 · P2 · Actorlebensdauer und Timer verursachen unnötige Daueraktivität
 
-[actor.rs:240](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-gateway/src/actor.rs:240) schläft bei abgelaufenem `next_wake` nur 1 ms. Der Wert wird beim Tick oder bei leerem System nicht zurückgesetzt. Nach einem einmaligen geplanten Wake läuft der Actor auch ohne Arbeit ungefähr im Millisekundentakt weiter.
+[actor.rs:240](crates/vig-gateway/src/actor.rs:240) schläft bei abgelaufenem `next_wake` nur 1 ms. Der Wert wird beim Tick oder bei leerem System nicht zurückgesetzt. Nach einem einmaligen geplanten Wake läuft der Actor auch ohne Arbeit ungefähr im Millisekundentakt weiter.
 
 Der Actor hält außerdem selbst einen Sender seines Eingangskanals; das Fallenlassen aller externen Handles schließt diesen deshalb nicht. `spawn()` liefert keinen Join-/Shutdown-Handle. `serve()` reagiert nur auf `ctrl_c()`, nicht ausdrücklich auf das übliche Container-SIGTERM mit definierter Drain-Frist.
 
@@ -356,7 +356,7 @@ Der Actor hält außerdem selbst einen Sender seines Eingangskanals; das Fallenl
 
 ### F22 · P1 für Netzbetrieb · Es fehlt eine geschlossene Aufnahme- und Vertrauensgrenze
 
-[service.rs:171](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-gateway/src/service.rs:171) reicht unkonfigurierte Modelle ohne Kreditkontrolle durch. Ein Aufruf des physischen Namens kann damit den Governor umgehen. Clientparameter dürfen die Klasse frei auf `protected` setzen und Verträge lockern. Das kann für vollständig vertrauenswürdige Clients bewusst erlaubt sein, ist aber keine durchgesetzte Ressourcenisolation.
+[service.rs:171](crates/vig-gateway/src/service.rs:171) reicht unkonfigurierte Modelle ohne Kreditkontrolle durch. Ein Aufruf des physischen Namens kann damit den Governor umgehen. Clientparameter dürfen die Klasse frei auf `protected` setzen und Verträge lockern. Das kann für vollständig vertrauenswürdige Clients bewusst erlaubt sein, ist aber keine durchgesetzte Ressourcenisolation.
 
 Der Standardstart bindet an `0.0.0.0`; Authentifizierung/Autorisierung und TLS sind nicht implementiert. Verwaltungs- und Shm-Endpunkte werden weitergereicht, soweit das Backend sie zulässt. Compose veröffentlicht zusätzlich die direkten Tritonports. Ein begrenzter Ereigniskanal begrenzt außerdem nur Requestanzahl, nicht den gesamten Payloadspeicher: bereits 1.024 mal 64 MiB sind 64 GiB, vor Queues und Transportpuffern.
 
@@ -364,7 +364,7 @@ Der Standardstart bindet an `0.0.0.0`; Authentifizierung/Autorisierung und TLS s
 
 ### F23 · P2 · Benchmarkläufe sind zeitlich nicht sauber abgeschlossen
 
-[workload.rs:233](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-bench/src/workload.rs:233) startet Inferenz-Futures ohne sie am Ende des Arms vollständig einzusammeln. `drive()` wartet auf Erzeugertasks, nicht auf jede letzte Inferenz. Alte Arbeit kann in den nächsten Arm beziehungsweise in ein neues Soak-Fenster hineinlaufen. Der Pumpenarm wartet dagegen innerhalb seines Sendeloops auf die Antwort.
+[workload.rs:233](crates/vig-bench/src/workload.rs:233) startet Inferenz-Futures ohne sie am Ende des Arms vollständig einzusammeln. `drive()` wartet auf Erzeugertasks, nicht auf jede letzte Inferenz. Alte Arbeit kann in den nächsten Arm beziehungsweise in ein neues Soak-Fenster hineinlaufen. Der Pumpenarm wartet dagegen innerhalb seines Sendeloops auf die Antwort.
 
 Coverage speichert Antwortalter auch für Lieferungen außerhalb des betrachteten Zeitfensters, da die Altersliste vor der Fensterprüfung gefüllt wird. Verbindungsaufbau liegt nach Start der Messuhr. Die Lastkurven verändern zugleich Ankunftsrate, Deadline und Maximalalter; sie isolieren daher nicht die Wirkung höherer Last bei festem Produktvertrag.
 
@@ -372,7 +372,7 @@ Coverage speichert Antwortalter auch für Lieferungen außerhalb des betrachtete
 
 ### F24 · P1 für modellweites Latest · Unterschiedliche Clientkeys umgehen die Supersession
 
-[queue.rs:247](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-core/src/queue.rs:247) dokumentiert ausdrücklich: `LATEST` ersetzt modellweit, `LATEST_PER_KEY` nur innerhalb eines Keys. Die Queue normalisiert den Vergleichsscope, ruft aber anschließend `RequestDescriptor::is_superseded_by()` auf. Diese Methode verlangt in [request.rs:237](/run/media/dd/USB_40281/Projekte/InferenceQoS/crates/vig-core/src/request.rs:237) erneut die Gleichheit der ursprünglichen, nicht normalisierten Keys.
+[queue.rs:247](crates/vig-core/src/queue.rs:247) dokumentiert ausdrücklich: `LATEST` ersetzt modellweit, `LATEST_PER_KEY` nur innerhalb eines Keys. Die Queue normalisiert den Vergleichsscope, ruft aber anschließend `RequestDescriptor::is_superseded_by()` auf. Diese Methode verlangt in [request.rs:237](crates/vig-core/src/request.rs:237) erneut die Gleichheit der ursprünglichen, nicht normalisierten Keys.
 
 **Reproduziert:** Zwei zeitlich aufeinanderfolgende Requests desselben Modells mit unterschiedlichen Keys bleiben beide in einer `LATEST`-Queue. Die Kontrollprüfung mit gleichem Key besteht. Auch das Zurückweisen eines verspätet eintreffenden älteren Frames kann so umgangen werden. Bei Queuekapazität 1 mit `RejectNew` droht stattdessen, dass der neuere Frame abgewiesen wird und der alte verbleibt.
 

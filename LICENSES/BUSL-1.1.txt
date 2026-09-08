@@ -15,17 +15,34 @@ Licensor:             Vigilant e.K., owner Damir Dulovic,
 Licensed Work:        Vigilant Inference Governor
                       The Licensed Work is (c) 2026 Vigilant e.K.
 
-Additional Use Grant: You may make use of the Licensed Work, provided that you
-                      do not use the Licensed Work for a Production Purpose.
+Additional Use Grant: You may use the Licensed Work free of charge for
+                      evaluation, development, testing, benchmarking,
+                      research, teaching, and continuous integration. This
+                      applies without time limit, on hardware of any kind
+                      including production-grade hardware, and inside a
+                      commercial organisation.
 
-                      A "Production Purpose" means any use of the Licensed Work
-                      to serve inference requests that control, inform, or are
-                      consumed by a system operated in the course of a business
-                      or delivered to a third party.
+                      In addition, you may use the Licensed Work free of
+                      charge in Production on up to three (3) Devices at any
+                      one time.
 
-                      Evaluation, development, research, benchmarking,
-                      teaching, continuous integration, and any use in a
-                      non-production environment are expressly permitted.
+                      "Production" means operating the Licensed Work to serve
+                      inference requests for a system that is performing the
+                      actual work of an organisation or of its customers, as
+                      opposed to a system that is being evaluated, developed,
+                      or tested.
+
+                      A "Device" means one physical machine, virtual machine,
+                      or container instance on which the Licensed Work runs.
+
+                      A commercial licence from the Licensor is required to
+                      use the Licensed Work in Production on more than three
+                      Devices at any one time, or in or as part of any
+                      product, system, or service that is delivered to, or
+                      operated on behalf of, a third party.
+
+                      If you are unsure whether your intended use requires a
+                      commercial licence, ask the Licensor before you deploy.
 
 Change Date:          Four years from the date each version of the Licensed
                       Work is first published.
