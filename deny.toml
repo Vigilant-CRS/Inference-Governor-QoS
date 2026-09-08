@@ -8,15 +8,23 @@ all-features = true
 [licenses]
 version = 2
 # Spec 20.8, "initial automatisch erlauben".
-# MPL-2.0, LGPL-, EPL-Varianten sind bewusst NICHT gelistet: sie erfordern
-# manuelle Pruefung und muessen einzeln mit Begruendung ergaenzt werden.
-# GPL/AGPL/SSPL/BUSL/RSAL/Commons Clause bleiben blockiert.
+#
+# Diese Liste gilt fuer **fremde** Abhaengigkeiten. MPL-2.0, LGPL-, EPL-
+# Varianten sind bewusst NICHT gelistet: sie erfordern manuelle Pruefung und
+# muessen einzeln mit Begruendung ergaenzt werden. GPL/AGPL/SSPL/RSAL/Commons
+# Clause bleiben blockiert.
+#
+# BUSL-1.1 steht hier ausschliesslich fuer die eigenen Workspace-Crates. Eine
+# fremde Abhaengigkeit unter BUSL wuerde uns dieselbe Produktionsbeschraenkung
+# auferlegen, die wir selbst aussprechen — sie muss deshalb einzeln geprueft
+# und begruendet werden, nicht ueber diese Liste hereinkommen.
 allow = [
     "Apache-2.0",
     "MIT",
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
+    "BUSL-1.1",
 ]
 confidence-threshold = 0.93
 
