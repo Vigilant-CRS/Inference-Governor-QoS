@@ -13,7 +13,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 COPY . .
-RUN cargo build --release -p onetimer-cli
+RUN cargo build --release -p vig-cli
 
 FROM debian:bookworm-slim
 RUN apt-get update \
@@ -22,10 +22,10 @@ RUN apt-get update \
 
 # Kein root: der Governor braucht keine Rechte über das hinaus, was ein
 # Netzwerkdienst braucht (Spec 22.2).
-RUN useradd --system --create-home --uid 10001 onetimer
-USER onetimer
+RUN useradd --system --create-home --uid 10001 vig
+USER vig
 
-COPY --from=build /src/target/release/onetimer /usr/local/bin/onetimer
+COPY --from=build /src/target/release/vig /usr/local/bin/vig
 EXPOSE 9001
-ENTRYPOINT ["onetimer"]
+ENTRYPOINT ["vig"]
 CMD ["--help"]

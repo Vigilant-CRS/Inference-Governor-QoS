@@ -67,7 +67,7 @@ als Widerspruch zum Modellgraphen ab.
 ## Starten
 
 ```bash
-docker run -d --name onetimer-triton --device nvidia.com/gpu=all \
+docker run -d --name vig-triton --device nvidia.com/gpu=all \
   -p 8000:8000 -p 8001:8001 -p 8002:8002 \
   -v "$MODELS:/models:ro" --ipc=host \
   nvcr.io/nvidia/tritonserver:26.06-py3 \
@@ -91,9 +91,9 @@ Bereich des Containers, statt ihn zu teilen.
 ## Ablauf
 
 ```bash
-onetimer doctor  -c examples/gate_m3/onetimer.yaml   # Konfiguration und Backend
-onetimer profile -c examples/gate_m3/onetimer.yaml   # echte Laufzeitprofile
-gate-m3          examples/gate_m3/onetimer.yaml      # der Vergleich
+vig doctor  -c examples/gate_m3/vig.yaml   # Konfiguration und Backend
+vig profile -c examples/gate_m3/vig.yaml   # echte Laufzeitprofile
+gate-m3          examples/gate_m3/vig.yaml      # der Vergleich
 ```
 
 Den Vergleich auf reservierten Kernen fahren (`taskset -c 8-15`) und **nicht**

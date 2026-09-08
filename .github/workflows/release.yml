@@ -1,0 +1,178 @@
+name: Release
+
+# Ein Release ist ein Versprechen: dieses Binary stammt aus diesem Commit, und
+# das laesst sich ohne uns nachpruefen. Deshalb wird hier signiert, eine
+# Stueckliste erzeugt und alles an den Tag geheftet — nicht nur gebaut.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # Release-Artefakte anhaengen
+  id-token: write   # keyless signing ueber OIDC, kein Schluessel im Repo
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Ein Release darf nie an den Pruefungen vorbei. Der Job ist derselbe wie in
+  # der CI; ihn hier zu wiederholen kostet Minuten und verhindert, dass ein
+  # Tag auf einem ungeprueften Stand landet.
+  verify:
+    name: fmt / clippy / test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --all-features
+
+  build:
+    name: ${{ matrix.target }}
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Die Entwicklungs- und Messmaschine.
+          - target: x86_64-unknown-linux-gnu
+            cross: false
+          # Jetson und andere ARM-Edgegeraete. Gebaut und im Emulator
+          # getestet — **nicht** auf echter Hardware gemessen. Siehe
+          # docs/hardware-qualification.md.
+          - target: aarch64-unknown-linux-gnu
+            cross: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Werkzeuge
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user-static
+            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER=qemu-aarch64-static -L /usr/aarch64-linux-gnu" >> "$GITHUB_ENV"
+          fi
+
+      # `cargo auditable` bettet die Abhaengigkeitsliste ins Binary ein. Damit
+      # laesst sich spaeter am ausgelieferten Artefakt selbst pruefen, ob eine
+      # Schwachstelle es betrifft — ohne Zugriff auf dieses Repository.
+      - run: cargo install cargo-auditable --locked
+      - run: cargo auditable build --release --locked -p vig-cli --target ${{ matrix.target }}
+
+      # Der Kern ohne I/O laeuft im Emulator vollstaendig. Das ist keine
+      # Leistungsmessung und ersetzt keine Hardwarequalifikation — es belegt,
+      # dass die Scheduling-Logik auf ARM dasselbe entscheidet.
+      - name: Kerntests auf der Zielarchitektur
+        run: cargo test --release --locked -p vig-core --target ${{ matrix.target }}
+
+      - name: Verpacken
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          D="vig-${V}-${{ matrix.target }}"
+          mkdir -p "dist/$D"
+          cp "target/${{ matrix.target }}/release/vig" "dist/$D/"
+          cp LICENSE NOTICE THIRD_PARTY_NOTICES.md README.md "dist/$D/"
+          tar -C dist -czf "dist/$D.tar.gz" "$D"
+          ( cd dist && sha256sum "$D.tar.gz" > "$D.tar.gz.sha256" )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*.tar.gz*
+
+  sbom:
+    name: sbom
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-cyclonedx --locked
+      - run: cargo cyclonedx --format json --all
+      - name: Sammeln
+        run: |
+          mkdir -p dist
+          find . -name "*.cdx.json" -not -path "./dist/*" -exec cp {} dist/ \;
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: dist/*.json
+
+  publish:
+    name: sign and publish
+    needs: [build, sbom]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - run: mkdir -p dist && find artifacts -type f -exec cp {} dist/ \;
+
+      # Keyless: die Signatur bindet an die GitHub-Identitaet dieses Workflows,
+      # nicht an einen Schluessel, den jemand verwahren muesste. Wer ein
+      # Artefakt prueft, prueft damit die Herkunft und nicht unser Wort.
+      - uses: sigstore/cosign-installer@v3
+      - name: Signieren
+        run: |
+          for f in dist/*.tar.gz dist/*.json; do
+            [ -e "$f" ] || continue
+            cosign sign-blob --yes \
+              --output-signature "$f.sig" \
+              --output-certificate "$f.pem" \
+              "$f"
+          done
+
+      - name: Pruefanleitung beilegen
+        run: |
+          cat > dist/VERIFY.md <<'EOF'
+          # Verifying this release
+
+          Every artifact is signed with [cosign](https://docs.sigstore.dev/)
+          using GitHub's OIDC identity — there is no private key we could lose
+          or you would have to trust us to protect.
+
+          ```bash
+          cosign verify-blob \
+            --certificate      vig-<version>-<target>.tar.gz.pem \
+            --signature        vig-<version>-<target>.tar.gz.sig \
+            --certificate-identity-regexp 'https://github.com/Vigilant-CRS/Inference-QoS/.*' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            vig-<version>-<target>.tar.gz
+          ```
+
+          Then check the checksum:
+
+          ```bash
+          sha256sum -c vig-<version>-<target>.tar.gz.sha256
+          ```
+
+          The `.cdx.json` files are a CycloneDX software bill of materials. The
+          binary itself also carries its dependency list, readable without this
+          repository:
+
+          ```bash
+          cargo audit bin vig
+          ```
+          EOF
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body_path: dist/VERIFY.md
+          fail_on_unmatched_files: true

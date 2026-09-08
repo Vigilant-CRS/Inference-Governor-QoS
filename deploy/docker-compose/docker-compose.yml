@@ -1,4 +1,4 @@
-# OneTimer-Quickstart.
+# Governor-Quickstart.
 #
 # Das NVIDIA-Image wird NICHT mitgeliefert, sondern aus der offiziellen
 # Registry bezogen; die NVIDIA-Bedingungen sind dabei zu akzeptieren
@@ -35,21 +35,21 @@ services:
       retries: 12
       start_period: 60s
 
-  onetimer:
-    image: onetimer:latest
+  vig:
+    image: vig:latest
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
     command:
       - serve
       - "-c"
-      - /etc/onetimer/onetimer.yaml
+      - /etc/vig/vig.yaml
       - "--listen"
       - "0.0.0.0:9001"
       - "--metrics"
       - "0.0.0.0:9090"
     volumes:
-      - ${ONETIMER_CONFIG:?Pfad zur onetimer.yaml setzen}:/etc/onetimer/onetimer.yaml:ro
+      - ${VIG_CONFIG:?Pfad zur vig.yaml setzen}:/etc/vig/vig.yaml:ro
     # Dieselbe IPC-Sicht wie Triton: der Governor reicht Shm-Referenzen durch
     # und muss dieselben Regionen sehen können wie der Client.
     ipc: host

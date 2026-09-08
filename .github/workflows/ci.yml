@@ -23,6 +23,34 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features
 
+  # Der Scheduling-Kern hat kein I/O und keine Uhr — er laeuft im Emulator
+  # vollstaendig. Damit faellt eine Architekturabhaengigkeit hier auf und nicht
+  # erst beim Release oder, schlimmer, auf dem Geraet des Kunden.
+  #
+  # Das ist **keine** Hardwarequalifikation: es belegt gleiche Entscheidungen,
+  # nicht gleiche Laufzeiten. Was auf echter Hardware gemessen werden muss,
+  # steht in docs/hardware-qualification.md.
+  cross-aarch64:
+    name: aarch64 (emulated)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: aarch64
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler gcc-aarch64-linux-gnu qemu-user-static
+      - env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64-static -L /usr/aarch64-linux-gnu
+        run: |
+          cargo test -p vig-core --target aarch64-unknown-linux-gnu
+          cargo build -p vig-cli --target aarch64-unknown-linux-gnu
+
   supply-chain:
     name: licenses / advisories
     runs-on: ubuntu-latest
@@ -42,8 +70,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo run --release -p onetimer-sim --bin gate-s | tee gate-s.log
-      - run: grep -q "Gate S: bestanden" gate-s.log
+      - run: cargo run --release -p vig-sim --bin gate-s | tee gate-s.log
+      # In Anfuehrungszeichen: ein `": "` in einem unquotierten YAML-Skalar
+      # macht die Zeile zu einer Zuordnung und die Datei ungueltig.
+      - run: 'grep -q "Gate S: bestanden" gate-s.log'
       - uses: actions/upload-artifact@v4
         with:
           name: gate-s-report

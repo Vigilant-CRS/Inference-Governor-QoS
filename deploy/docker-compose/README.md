@@ -24,26 +24,26 @@ max_batch_size: 0
 
 ## 3. Konfiguration schreiben
 
-Als Vorlage dient [`../../examples/gate_m3/onetimer.yaml`](../../examples/gate_m3/onetimer.yaml).
+Als Vorlage dient [`../../examples/gate_m3/vig.yaml`](../../examples/gate_m3/vig.yaml).
 Die Laufzeitprofile darin gelten **nur für die dort vermerkte Umgebung**; für
 die eigene Hardware neu messen:
 
 ```bash
-onetimer profile -c onetimer.yaml
+vig profile -c vig.yaml
 ```
 
 ## 4. Starten
 
 ```bash
 export ONETIMER_MODELS=/pfad/zum/modellrepository
-export ONETIMER_CONFIG=$PWD/onetimer.yaml
+export VIG_CONFIG=$PWD/vig.yaml
 docker compose up -d
 ```
 
 ## 5. Prüfen
 
 ```bash
-onetimer doctor -c onetimer.yaml
+vig doctor -c vig.yaml
 ```
 
 `doctor` sagt vor dem ersten Request, was nicht funktionieren wird — und zwar
@@ -60,7 +60,7 @@ Im Client nur den Zielendpoint ändern:
 
 ```diff
 - triton:8001
-+ onetimer:9001
++ vig:9001
 ```
 
 Modelle ohne OneTimer-Konfiguration werden unverändert durchgereicht. Die
