@@ -1,0 +1,19 @@
+[package]
+name = "vig-production-review"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+vig-core = { path = "../../../../crates/vig-core" }
+vig-config = { path = "../../../../crates/vig-config" }
+vig-gateway = { path = "../../../../crates/vig-gateway" }
+vig-backend-triton = { path = "../../../../crates/vig-backend-triton" }
+vig-protocol-oip = { path = "../../../../crates/vig-protocol-oip" }
+vig-sim = { path = "../../../../crates/vig-sim" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+tokio-stream = { version = "0.1.19", features = ["net"] }
+tonic = "0.14.6"
+
+[workspace]
+
+

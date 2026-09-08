@@ -1,338 +1,315 @@
-# Vigilant OneTimer
+# Vigilant Inference Governor
 
-**Adaptive Inference Governor for Edge AI**
+**Inference QoS for edge robotics.** Keep your models. Keep Triton. Tell the
+governor what has to be *fresh* and what merely has to be *fast* — it decides
+what runs now, what waits, what is thrown away because newer data arrived, and
+which model variant still fits the time budget.
 
-> Keep your models. Keep Triton. Tell OneTimer what must be fresh and what must
-> be fast; OneTimer decides what should run now, what should wait, what should
-> be replaced by newer work and which model variant is still feasible.
-
-Auf einem Roboter ist ein Teil der Rechenarbeit **zeitlich verderblich**. Ein
-Kamerabild kann veraltet sein, bevor seine Inferenz ueberhaupt beginnt. Ein
-generischer Inference Server arbeitet die Warteschlange trotzdem ab — effizient,
-aber am Weltzustand vorbei.
-
-OneTimer sitzt als protokollkompatibler Governor vor einer vorhandenen
-NVIDIA-Triton-Installation, entfernt ueberholte Requests **bevor** sie GPU-Zeit
-verbrauchen, laesst Arbeit nur zu, wenn sie noch sinnvoll abschliessbar ist,
-schuetzt zeitkritische Wahrnehmung vor langsamer Hintergrundlast und waehlt die
-beste noch rechtzeitig ausfuehrbare Modellvariante.
+[![Status](https://img.shields.io/badge/status-pre--production-orange)](#status-what-works-and-what-does-not)
+[![Tests](https://img.shields.io/badge/tests-209%20passing-brightgreen)](#build-and-verify)
+[![License](https://img.shields.io/badge/license-BUSL--1.1-blue)](LICENSE)
 
 ---
 
-## Status
+## The problem, in one picture
 
-**Phase 4 von 5.** Kern, Gateway, Triton-Anbindung, Shared-Memory-Passthrough
-und der Benchmark-Harness stehen und sind gegen echte Hardware gemessen. Offen
-ist Phase 5: Betrieb im Feld — Paketierung, Langzeitstabilität, Hardware
-jenseits dieser einen Maschine.
+A robot's camera produces a frame every 33 ms. The detector needs 15 ms. That
+fits — until a language model starts a 95 ms job on the same GPU.
 
-### Wann lohnt sich OneTimer — und wann nicht
+```
+Time  →   0ms      33ms     66ms     99ms     132ms
+          │        │        │        │        │
+camera    ▼        ▼        ▼        ▼        ▼        four frames captured
+          F1       F2       F3       F4       F5
 
-Die Benchmarks beantworten das mit Zahlen, und die Antwort ist nicht überall
-"ja":
+a generic inference server, first-come-first-served:
+          [───────── language model, 95 ms ─────────][F1][F2][F3][F4]
+                                                      ▲
+                                                      └── F1 is now 95 ms old.
+                                                          F2, F3 and F4 are
+                                                          computed anyway —
+                                                          and thrown away by
+                                                          the robot, because
+                                                          F5 already exists.
 
-| Situation | Empfehlung |
+with the governor:
+          [LM quantum][F2][LM][F3][LM][F4][LM][F5]
+                       ▲                       ▲
+                       │                       └── every frame is fresh
+                       └── F1 was dropped before it cost any GPU time:
+                           by the time a slot was free, F2 already existed.
+```
+
+The server was never *wrong*. It was efficient at work that had gone stale —
+it just had no way to know that.
+
+## What it actually does
+
+Four decisions, all made **before** the request reaches the GPU:
+
+| | Decision | Why it matters |
+|---|---|---|
+| 🗑️ | **Drop superseded work.** A newer frame from the same camera replaces an older waiting one. | The old frame's result would be discarded by the robot anyway. Computing it costs GPU time that the new frame needs. |
+| ⏱️ | **Refuse work that would arrive too late.** If the result would be stale when finished, it is not started. | A late answer is not a slow answer — it is a wrong one. Better to say so immediately. |
+| 🛡️ | **Hold back background work.** If a protected stream is expected within the next few milliseconds, a long job does not start. | This is the one place the governor deliberately leaves the GPU idle. It is also the reason the camera stays fresh. |
+| 🎚️ | **Pick the model variant that still fits.** Under pressure a smaller, faster variant is chosen instead of missing the deadline. | A slightly less precise answer on time beats a perfect answer nobody can use. |
+
+It speaks the **Open Inference Protocol**, the same gRPC API Triton speaks. A
+client changes one thing: the address it connects to.
+
+```mermaid
+flowchart LR
+    C1[Camera<br/>30 Hz] --> G
+    C2[Pose<br/>30 Hz] --> G
+    C3[Depth<br/>15 Hz] --> G
+    C4[Language model<br/>occasional] --> G
+    G[Vigilant<br/>Inference Governor]
+    G -->|only what is still<br/>worth computing| T[NVIDIA Triton<br/>unchanged]
+    T --> GPU[(one GPU)]
+    style G fill:#2d6cdf,color:#fff
+    style GPU fill:#333,color:#fff
+```
+
+## Measured, on one real machine
+
+RTX 3070 Laptop (8 GB), Triton 2.70, real models — RF-DETR at 512 px, ResNet
+pose and depth, a 95 ms non-interruptible block. Against a **tuned** Triton,
+not a strawman: same models, same instance groups, same shared-memory data
+path, rate limiter with priorities enabled.
+
+*Coverage = share of control cycles in which a result was available whose age
+was below the configured limit. Higher is better.*
+
+| Stream | Triton (tuned) | Vigilant | Uncovered cycles |
+|---|---:|---:|---:|
+| detector (RF-DETR) | 84 % | **99 %** | **22.6× fewer** |
+| pose | 91 % | **99 %** | **12.0× fewer** |
+| depth | 97 % | **99–100 %** | **5.4× fewer** |
+
+We also tried Triton's strongest available setting — a globally limited shared
+resource, which enforces real mutual exclusion across models. It moves the
+problem rather than solving it: the detector rises to 89–91 %, but pose drops
+to 78 %. Triton's rate limiter can reorder who waits; it cannot know whether
+waiting is still worth it.
+
+**And the honest other half:** in that same run the background language model
+gets **0 % coverage**. A 95 ms block that cannot be interrupted does not fit
+next to a 33 ms period — with or without a governor. The difference is that
+the governor decides *which* side loses, and says so.
+
+For models that *can* be split, that changes:
+
+| Mode | Detector coverage | Language model progress |
+|---|---:|---:|
+| Governor, no decomposition | 98 % | 2 generations |
+| Governor, cooperative quanta | 91 % | **40 generations** |
+
+Twenty times more background progress for seven points of detector coverage —
+a visible, tunable trade instead of total starvation.
+
+<details>
+<summary><b>What these numbers do not show</b> (click)</summary>
+
+- **One GPU, one operating point.** An RTX 3070 Laptop is neither a Jetson nor
+  a datacenter accelerator.
+- **No Holoscan comparison.** Its async-buffer semantics are the closest
+  competitor for the freshness question.
+- **Quality is declared, not verified.** The variant-selection frontier is
+  configured by the operator; we do not measure model accuracy.
+- Full method, raw output and discarded runs: [`docs/benchmark/`](docs/benchmark/).
+
+</details>
+
+## When this helps — and when it does not
+
+The benchmarks answer this with numbers, and the answer is not always "yes":
+
+| Your situation | What we recommend |
 |---|---|
-| unterhalb der Sättigung | **kein Governor.** Triton ist dort fehlerfrei, OneTimer kostet 0,8 % der Regelzyklen |
-| ein einziger Strom, oberhalb der Sättigung | **Supersession im Client.** Rund fünfzig Zeilen, holt bei 150 % Last den größten Teil heraus |
-| mehrere Ströme unterschiedlicher Wichtigkeit, oberhalb der Sättigung | **Governor.** Faktor 47 gegenüber dem Eigenbau, Faktor 20–28 gegenüber getuntem Triton |
+| GPU below saturation | **No governor.** Triton is fine there; we cost 0.8 % of control cycles. |
+| One stream, above saturation | **Fifty lines in your client.** Keep only the newest frame. That gets most of the benefit. |
+| Several streams of different importance, above saturation | **A governor.** 47× better than the client-side do-it-yourself version, 12–28× better than tuned Triton. |
 
-Der Knick liegt zwischen 100 % und 110 % Angebotslast
-([`load-ramp.md`](docs/benchmark/load-ramp.md)); der Vergleich gegen
-Clientcode steht in
-[`diy-baseline.md`](docs/benchmark/diy-baseline.md).
+The break-even is between 100 % and 110 % offered load
+([`load-ramp.md`](docs/benchmark/load-ramp.md)).
 
-| Phase | Inhalt | Stand |
-|---|---|---|
-| 0 | Workspace, CI, Lizenzbasis, Kerntypen, Sim-Clock | **fertig** |
-| 1 | Queue-Policies, Deadline/Slack, Slot-Look-ahead, Varianten, Ueberlast-FSM | **fertig** |
-| 1b | Simulierte Kernvergleiche — **Gate S** | **bestanden** |
-| 2a | OIP-Gateway, Triton-Adapter, Konfiguration, CLI | **fertig** |
-| 2b | Shared-Memory-Referenz-Passthrough | **fertig** |
-| 3 | Online Runtime Estimator, Profiler, Prometheus-Export | **fertig** |
-| 4 | Benchmark-Harness, getunte Triton-Baseline — **Gate M3** | **bestanden** |
-| 5 | Betrieb im Feld: Paketierung, Langzeitlauf, weitere Hardware | **Dauerlauf bestanden**, Rest offen |
+## Documentation
 
-### Gate S — simulierte Falsifikation
+| | |
+|---|---|
+| [**Getting started**](docs/getting-started.md) | configure, calibrate, run, and read the metrics |
+| [**How it works**](docs/how-it-works.md) | the four decision stages, time handling, slots, decomposition, failure behaviour |
+| [**Hardware qualification**](docs/hardware-qualification.md) | what is portable, what is untested, and what to run before trusting a new platform |
+| [**Releases and upgrades**](docs/releases.md) | signed artifacts, how to verify them, versioning and the upgrade path |
+| [Benchmarks](docs/benchmark/) | every measurement, method and raw output — including the runs that were wrong *(German)* |
+| [Architecture decisions](docs/adr/) | where the implementation deviates from the specification, and why *(German)* |
+| [Specification](Vigilant_Inference_Governor_Specification_v1.0.md) | the full product specification v1.0 *(German)* |
 
-Gegen eine FIFO-Baseline mit modellübergreifender Priorität (= Triton mit Rate
-Limiter), identischem Ankunftsprozess und identischen Laufzeitprofilen, bei
-125 % Angebotslast:
-
-| Szenario | unabgedeckte Perioden | stale compute | nützliche Ergebnisse |
-|---|---|---|---|
-| A — Freshness | 2,12x weniger | 4,88x weniger | 616 statt 282 |
-| B — Protected vs. Best Effort | 2,66x weniger | messbar null statt 71 ‰ | 2246 statt 1166 |
-
-Vollständiger Report samt aller Parameter:
-[`docs/benchmark/gate-s-report.md`](docs/benchmark/gate-s-report.md),
-reproduzierbar mit `cargo run --release -p onetimer-sim --bin gate-s`.
-
-Der Simulator ist die Best-Case-Welt für OneTimer — kein Proxy-Overhead, keine
-zweite Backend-Queue, keine Profilfehler. **Gate S kann die Hypothese
-falsifizieren, aber nicht bestätigen.**
-
-### Gemessener Zusatzaufwand des Governors
-
-Gegen ein echtes gRPC-Backend, Release-Build, leere Tensoren:
-
-| Backend-Laufzeit | direkt | über OneTimer | Zusatz |
-|---:|---:|---:|---:|
-| 1 ms | 2227 µs/Req | 2337 µs/Req | +110 µs |
-| 5 ms | 6249 µs/Req | 6329 µs/Req | +80 µs |
-| 20 ms | 21227 µs/Req | 21435 µs/Req | +208 µs |
-
-Rund 0,1 bis 0,2 ms je Request — das ist die Steuerebene.
-
-### Der Datenpfad entscheidet
-
-Mit echten Tensorgrößen, beide Seiten gleich getunt:
-
-| Nutzlast | direkt | über OneTimer | Zusatz |
-|---|---:|---:|---:|
-| 150 KB | 8130 µs | 8368 µs | +238 µs (2 %) |
-| 1,2 MB | 9592 µs | 12151 µs | +2559 µs (26 %) |
-| 6,2 MB | 13126 µs | 24818 µs | +11692 µs (**89 %**) |
-| **6,2 MB als Shm-Referenz** | 6229 µs | 6389 µs | **+160 µs (2 %)** |
-
-Der gRPC-Copy-Pfad ist für Kameraframes unbrauchbar — der Proxy verdoppelt die
-Übertragungszeit. Der Shm-Referenz-Pfad kostet stattdessen 160 µs bei
-demselben Tensor, **unabhängig von seiner Größe**: im Request steht nur, wo die
-Daten liegen, und OneTimer berührt sie nie. Faktor 73.
-
-Details und Methodik: [`docs/benchmark/data-plane.md`](docs/benchmark/data-plane.md).
-
-### Bringt die Steuerung etwas? — auf dem echten Stack gemessen
-
-Derselbe Workload zweimal durch denselben gRPC-Stack, einmal direkt zum Backend
-und einmal über OneTimer. Bei 133 % geschützter Auslastung auf einem Slot:
-
-| Strom | Abdeckung ohne | mit | AoI p95 ohne | mit |
-|---|---:|---:|---:|---:|
-| detector | 45 % | **99 %** | 216 ms | **15 ms** |
-| pose | 46 % | **99 %** | 209 ms | **25 ms** |
-| depth | 52 % | **99 %** | 225 ms | **32 ms** |
-
-Dabei führt das Backend **mehr** aus, nicht weniger: 1112 statt 854 Inferenzen.
-
-Ohne Konkurrenz bringt der Governor dagegen nichts — bei 30 % Auslastung auf
-zwei Slots liefern beide Seiten alles. Und ein Best-Effort-Job, der länger
-dauert als die kürzeste geschützte Periode, startet auf einem Slot nie; das ist
-eine Eigenschaft nicht unterbrechbarer Ausführung und in
-[ADR-0012](docs/adr/0012-best-effort-starvation.md) festgehalten.
-
-Details: [`docs/benchmark/wire-bench.md`](docs/benchmark/wire-bench.md).
-
-### Gate M3 — gegen getunten Triton, auf echter GPU
-
-RTX 3070, Triton 2.70.0, RF-DETR 512 px als Detektor, System Shared Memory auf
-beiden Seiten, Triton mit Rate Limiter und Prioritäten. Geschützte Auslastung
-92 %, mit dem langen Block zusammen rund 116 %:
-
-| Strom | Abdeckung Triton | OneTimer | AoI p95 Triton | OneTimer | Faktor |
-|---|---:|---:|---:|---:|---:|
-| detector (RF-DETR) | 84 % | **99 %** | 77 ms | **33 ms** | **22,4x** |
-| pose | 91 % | **99 %** | 51 ms | **33 ms** | **10,6x** |
-| depth | 97 % | **99 %** | 53 ms | 61 ms | **2,6x** |
-| vlm | 100 % | **0 %** | 84 ms | — | — |
-
-**Ziel A′ ist erreicht** — mindestens 2x weniger unabgedeckte Perioden für
-geschützte Ströme, tatsächlich 2,6x bis 22,4x. Der Preis steht daneben: der
-lange Best-Effort-Block läuft nicht, und `onetimer doctor` sagt das vor dem
-Start.
-
-Details, Grenzen und Reproduktion:
-[`docs/benchmark/gate-m3.md`](docs/benchmark/gate-m3.md).
-
-### Ab welcher Auslastung lohnt es sich?
-
-Unabgedeckte Perioden des geschützten Stroms, Median aus drei Wiederholungen:
-
-| Angebotslast | Triton | OneTimer | Faktor |
-|---:|---:|---:|---:|
-| 50 % | 0 ‰ | 7 ‰ | −7,0x |
-| 90 % | 0 ‰ | 7 ‰ | −7,0x |
-| 100 % | 2 ‰ | 7 ‰ | −3,5x |
-| **110 %** | **299 ‰** | **15 ‰** | **19,9x** |
-| **125 %** | **476 ‰** | **17 ‰** | **28,0x** |
-| **150 %** | **500 ‰** | **24 ‰** | **20,8x** |
-
-**Der Knick liegt zwischen 100 % und 110 %.** Darunter ist Triton perfekt und
-OneTimer kostet 0,7 % der Regelzyklen. Darüber bricht Triton ein — bei 150 %
-fehlt in jedem zweiten Zyklus ein frisches Ergebnis — während OneTimer den
-Detektor bei 97,6 % hält.
-
-Der Preis steht daneben: bei 150 % werden die `high`-Ströme praktisch nicht
-mehr bedient. OneTimer entscheidet nicht, *ob* etwas verloren geht, sondern
-*was*. Details: [`docs/benchmark/load-ramp.md`](docs/benchmark/load-ramp.md).
-
-### Acht Stunden am Stück
-
-3 190 798 Requests, 0 Backendfehler, 19 verpasste Deadlines (0,0006 %).
-Der geschützte Strom liefert in der achten Stunde so zuverlässig wie in der
-ersten — 7 ‰ unabgedeckt, AoI p95 25 ms, unverändert. Speicherzuwachs nach der
-Aufwärmphase 109 kB/h. Die Sicherheitsmarge schlug viermal aus, bis 124 %, und
-kam jedes Mal auf 110 % zurück.
-
-Der Befund aus dem Lauf: **unangekündigte Lastspitzen sind teurer als
-Dauerüberlast.** Gegen einen für die Grundlast konfigurierten Governor liegt
-der Detektor während der Spitzen bei 327 ‰ statt der 24 ‰ aus der stationären
-Rampe — ohne verpasste Deadlines, das System verzichtet statt zu versagen.
-Details: [`docs/benchmark/soak.md`](docs/benchmark/soak.md).
-
-Der Befund ist inzwischen behoben, nicht durch eine Automatik, sondern durch
-Sichtbarkeit: der Governor führt den beobachteten Ankunftsabstand je Modell
-mit, stellt ihn neben die vertragliche Periode und warnt, wenn die Last
-dauerhaft mehr als 20 % darüber liegt. Er ändert nichts daran — welche der
-beiden Zahlen falsch ist, weiß nur der Betreiber
-([ADR-0017](docs/adr/0017-load-that-breaks-the-contract-is-a-finding.md)).
-
-### Reicht nicht einfach Clientcode?
-
-Der härteste Einwand: *"Ich verwerfe veraltete Frames einfach im Client."* Zur
-Hälfte stimmt das. Unabgedeckte Perioden des geschützten Stroms:
-
-| Last | naiver Client | Supersession im Client | OneTimer |
-|---:|---:|---:|---:|
-| 100 % | 0 ‰ | 0 ‰ | 8 ‰ |
-| 125 % | 275 ‰ | 350 ‰ | **13 ‰** |
-| 150 % | 1000 ‰ | 375 ‰ | **8 ‰** |
-
-Supersession im Client rettet bei 150 % sehr viel (1000 → 375 ‰) und ist rund
-fünfzig Zeilen. **Wer einen einzigen Strom hat, sollte genau das bauen.** Bei
-375 ‰ ist aber Schluss, weil drei unabhängige Pumpen nichts voneinander wissen
-und am Server weiter die Ankunftsreihenfolge entscheidet — Faktor 47 bleibt
-für den Governor. Details:
-[`docs/benchmark/diy-baseline.md`](docs/benchmark/diy-baseline.md).
-
-### Detektor neben Sprachmodell — das Szenario aus §1.3
-
-RF-DETR bei 30 Hz und Qwen3-0.6B auf derselben RTX 3070, ein Slot:
-
-| Betriebsart | Detektor-Abdeckung | AoI p95 | Generierungen |
-|---|---:|---:|---:|
-| direkt zu Triton | 77 % | 36 ms | 70 |
-| über OneTimer | **98 %** | **33 ms** | 2 |
-
-Ohne Governor sättigt das Sprachmodell die GPU und die Wahrnehmung bricht ein.
-Mit Governor bleibt sie stabil — zum Preis, dass das Sprachmodell kaum noch
-läuft.
-
-**Die Zerlegung in kooperative Quanten (WP26) behebt das nicht.** Sie ist
-umgesetzt und gemessen: das kleinstmögliche Quantum kostet 17 ms, die
-Leerlauflücke zwischen zwei Detektorläufen beträgt 14 ms. Die Zusage „VLM neben
-Detektor auf einer GPU" gilt deshalb bis auf Weiteres **ab zwei
-Ausführungseinheiten**. Details:
-[`docs/benchmark/wp26.md`](docs/benchmark/wp26.md),
-[ADR-0015](docs/adr/0015-quantum-sizing-must-not-spend-the-deadline-reserve.md).
-
-> **Diese Werte stammen von einer Maschine, einem Lastprofil und einer GPU.** Alle Zahlen in der
-> Spezifikation sind Zielwerte, Rechenbeispiele oder Validierungsschwellen. Die
-> Produkthypothese ist unbewiesen, bis Gate M3 sie gegen eine **getunte**
-> Triton-Baseline bestaetigt oder widerlegt.
-
-### Nicht nur Triton
-
-OneTimer spricht das Open Inference Protocol, einen offenen Standard. Das stand
-lange als Behauptung im README; seit dieser Messung ist es belegt:
-
-| | Triton 2.70.0 (GPU) | OpenVINO Model Server 2026.3 (CPU) |
-|---|---|---|
-| Shared Memory | ja — Referenzpfad | nein — Kopierpfad |
-| Geliefert / gesendet | 737 / 758 | **150 / 150** |
-
-Derselbe Governor, dieselben ONNX-Modelle, **keine Codeänderung** — nur der
-Konfigurationsschlüssel `backend.type` akzeptiert jetzt auch `oip` und
-`kserve`. Was ein Server kann, wird aus seinen Metadaten gelesen statt
-angenommen: OVMS meldet keine Erweiterungen, und `doctor` sagt daraufhin
-konkret, was das kostet. Details:
-[`docs/benchmark/portability.md`](docs/benchmark/portability.md).
-
-## Einrichten: messen statt raten
-
-Eine Konfiguration enthält zwei grundverschiedene Sorten Zahlen, und nur eine
-davon muss von Hand kommen.
+## Quick start
 
 ```bash
-onetimer calibrate --config vorlage.yaml --out geraet.yaml
-onetimer doctor    --config geraet.yaml
-onetimer serve     --config geraet.yaml
+# 1. Point at your existing Triton and check that everything lines up.
+vig doctor -c examples/gate_m3/vig.yaml
+
+# 2. Measure this machine instead of guessing about it.
+vig calibrate -c examples/gate_m3/vig.yaml -o measured.yaml
+
+# 3. Run the governor in front of Triton.
+vig serve -c measured.yaml --listen 127.0.0.1:9001
 ```
 
-`calibrate` misst je Variante die Laufzeit allein und unter Nebenlast, prüft
-paarweise, wie stark die Modelle einander bremsen, und schreibt eine fertige
-Konfiguration samt Umgebungs-Fingerabdrücken. Auf einer RTX 3070 fand es
-Verlangsamungen von über 5x (Detektor und Pose jeweils neben dem VLM) bis
-1,19x (Detektor neben Pose) und trug die schädlichen Paare selbst als
-`no_corun` ein — darunter zwei, die in der Spezifikation niemand vermutet
-hatte.
+Your client changes one line — the endpoint. Optionally it adds parameters
+that say how fresh its data is:
 
-**Verträge fasst es nicht an.** Wie frisch ein Ergebnis sein muss und welcher
-Strom wichtiger ist, sind Aussagen darüber, was der Roboter braucht — die
-stehen in keinem Messgerät. Ein System, das sich seine Deadlines selbst
-ausdenkt, kann an ihnen nicht mehr gemessen werden
-([ADR-0018](docs/adr/0018-calibrate-hardware-not-requirements.md)).
+```python
+# Before: talking to Triton directly
+client = grpcclient.InferenceServerClient("triton:8001")
 
-Zur Laufzeit läuft die Kalibrierung weiter: der Online Estimator korrigiert die
-Laufzeitprognosen, die Marge zieht bei Fehlprognosen an und fällt zurück
-([ADR-0013](docs/adr/0013-margin-corrects-forecasts-not-contracts.md)), ein
-Profil aus fremder Umgebung wird erkannt
-([ADR-0016](docs/adr/0016-unverified-profiles-widen-the-margin.md)), und eine
-Last, die den Vertrag sprengt, wird gemeldet
-([ADR-0017](docs/adr/0017-load-that-breaks-the-contract-is-a-finding.md)).
+# After: same API, same request, different address
+client = grpcclient.InferenceServerClient("governor:9001")
 
-## Was OneTimer nicht ist
-
-- Keine Hard-Realtime-Runtime und kein Safety-zertifiziertes System.
-- Kein GPU-Preemptor. Eine laufende Inferenz wird nicht zurueckgeholt; deshalb
-  wird ueberholte Arbeit **vor** dem Dispatch entfernt.
-- Kein Ersatz fuer Triton, Holoscan oder TensorRT.
-- Die Latest-Frame-Semantik ist kein Alleinstellungsmerkmal; Holoscan-Async-
-  Buffer kennen sie ebenfalls. Der Unterschied liegt in der Kombination aus
-  Frische, deadline-bewusster Zulassung, Variantenwahl und Protokoll-
-  kompatibilitaet.
-
-## Aufbau
-
-```
-crates/onetimer-core/   Scheduling-Kern: rein, deterministisch, ohne Dependencies
-crates/onetimer-sim/    Discrete-Event-Simulator, Baseline und Gate S
-docs/benchmark/         Gate-S-Report
-docs/adr/               Architekturentscheidungen (Abweichungen von der Spec)
-Vigilant_OneTimer_Product_Specification_v1.0.md   Die Spezifikation
+client.infer("detector", inputs, parameters={
+    "vig_age_us":    12_000,   # this frame was captured 12 ms ago
+    "vig_max_age_us": 66_000,  # useless if older than 66 ms
+})
 ```
 
-Der Kern kennt kein I/O, keine Uhr und keine Payload. Er bekommt `now` an jedem
-Eintrittspunkt uebergeben — deshalb laeuft derselbe Code im Simulator und im
-spaeteren Gateway, und ein Live-Trace ist offline exakt reproduzierbar.
+A minimal configuration:
 
-## Bauen und pruefen
+```yaml
+version: 1
+backend:
+  type: triton
+  grpc_endpoint: "127.0.0.1:8001"
+  slots: 1                    # how many inferences the GPU runs at once
+  trust: strict               # reject anything that would bypass the governor
+
+models:
+  detector:
+    class: protected          # this one must not be starved
+    queue: { policy: latest, capacity: 1 }   # only the newest frame matters
+    contract: { period_ms: 33, deadline_ms: 33, max_age_ms: 66 }
+    variants:
+      - id: rfdetr
+        backend_model: rfdetr
+        quality: { value: 1.0, source: measured }
+        profile: { p50_us: 14916, p95_us: 17081, p99_us: 17470, samples: 120 }
+```
+
+## How it works
+
+```mermaid
+flowchart TD
+    A[Request arrives] --> B{Newer request<br/>for this stream<br/>already waiting?}
+    B -->|yes| X1[Drop: superseded]
+    B -->|no| C{Would the result<br/>already be too old<br/>when finished?}
+    C -->|yes| X2[Drop: stale]
+    C -->|no| D{Is protected work<br/>expected before<br/>this would finish?}
+    D -->|yes| W[Wait — deliberately idle]
+    D -->|no| E[Choose the best variant<br/>that still fits the deadline]
+    E --> F[Forward to Triton]
+    W -.retry.-> D
+    style X1 fill:#c0392b,color:#fff
+    style X2 fill:#c0392b,color:#fff
+    style W fill:#e67e22,color:#fff
+    style F fill:#27ae60,color:#fff
+```
+
+**The deliberate idle in the middle is the heart of it.** Every general-purpose
+scheduler is work-conserving: if the GPU is free and work is waiting, it
+starts. That is exactly what makes a 95 ms job block a 33 ms camera. The
+governor looks ahead one period, and when it sees protected work coming, it
+waits — but only when waiting actually rescues something.
+
+**Time is measured from capture, not from arrival.** A frame that spent 25 ms
+in the network does not get a fresh 30 ms budget. This is why the client
+passes `vig_age_us`.
+
+**Runtimes are measured, never guessed.** `vig calibrate` measures how long
+each model takes alone, how much two models slow each other down, and — for
+decomposable models — the fixed per-request cost. An online estimator corrects
+the prediction while running.
+
+**The scheduling core has no clock, no I/O and no payload.** It receives `now`
+at every entry point. The same code runs in the simulator and in production,
+so a live trace is exactly reproducible offline.
+
+## Architecture
+
+```
+crates/vig-core/            scheduling core: pure, deterministic, no dependencies
+crates/vig-gateway/         OIP gateway, actor loop, shared-memory passthrough
+crates/vig-backend-triton/  Triton adapter
+crates/vig-protocol-oip/    protocol types and parameter mapping
+crates/vig-config/          configuration schema and validation
+crates/vig-cli/             vig doctor / profile / calibrate / serve
+crates/vig-sim/             discrete-event simulator and baselines
+crates/vig-bench/           benchmark harness against real hardware
+
+docs/benchmark/             every measurement, including the discarded runs
+docs/adr/                   architecture decisions and why we deviated
+```
+
+## Status: what works and what does not
+
+**Working and measured on real hardware:** the scheduling core, the gateway,
+the Triton adapter, shared-memory passthrough, the online estimator,
+calibration, cooperative decomposition for generative models, Prometheus
+metrics, graceful shutdown, and an eight-hour soak run with no drift and no
+leak.
+
+**Not done yet — this is not production-ready:**
+
+| Open | Why it matters |
+|---|---|
+| Hardware beyond one machine | Every performance number here comes from one RTX 3070 Laptop. The scheduling core is built and tested for `aarch64` in CI, but **no Jetson measurement exists** — and emulation says nothing about runtime. [What you have to run first.](docs/hardware-qualification.md) |
+| Output semantics across variants | You can declare a canonical `io_signature` per model, and any variant that does not meet it prevents startup. But identical shapes can still carry different meanings, and no tool can check that — only your declaration can. |
+| Field operation | Signed releases and an update path now exist. A hardware qualification programme and long-term support commitments do not. |
+
+| Contact and licence terms | `info@vigilant.example` is a placeholder. Before any distribution, the licensor identity, a real contact and the scope of the Additional Use Grant need a lawyer's eye. |
+| A soak run after these repairs | The eight-hour run predates them. It has to be repeated before anyone leaves this unattended. |
+
+Since the last review round these moved from open to done: an inference
+timeout that releases the client but **not** the slot credit, a drain that
+waits for outstanding backend calls rather than just for clients, readiness
+that also reacts to transport failures, immediate refusal instead of silent
+waiting when every slot is quarantined, a byte budget that counts both
+payload representations, cooperative quanta that keep the client's token limit
+and extra inputs, TLS/mTLS and bearer-token authentication, and signed
+reproducible releases with an SBOM.
+
+We would rather you read that list before the benchmark table.
+
+## Build and verify
 
 ```bash
 cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace
+cargo test --workspace          # 209 tests
 cargo deny check licenses bans advisories sources
 ```
 
-Alle vier muessen gruen sein — das ist die Definition of Done fuer jeden Task.
-Gebaut wird in den Cargo-Standard `<workspace>/target`, also auf dasselbe
-Laufwerk wie das Projekt; `CARGO_TARGET_DIR` woandershin zu setzen verlegt
-6,6 GB still auf die Systemplatte
-(siehe [`CONTRIBUTING.md`](CONTRIBUTING.md)).
+All four must be green. That is the definition of done for every change.
 
-## Wo die Entscheidungen stehen
+## What this is not
 
-Die Spezifikation v1.0 ist die Baseline und bleibt unveraendert. Wo die
-Umsetzung davon abweicht, steht der Grund in [`docs/adr/`](docs/adr/) — unter
-anderem: warum das Backend als Slot-Menge und nicht als serielle Ressource
-modelliert wird, warum die Erfolgsmetrik fuer Latest-Streams periodenbezogen
-sein muss, und warum der Interferenzprofiler hinter das Falsifikationsgate
-verschoben wurde.
+- Not a hard-real-time runtime and not a safety-certified system.
+- Not a GPU preemptor. A running inference is never pulled back — which is
+  precisely why superseded work is removed *before* dispatch.
+- Not a replacement for Triton, Holoscan or TensorRT. It sits in front of one.
+- Latest-frame semantics alone are not novel; Holoscan async buffers have
+  them. The combination — freshness, deadline-aware admission, variant
+  selection and protocol compatibility — is what we are building.
 
-## Lizenz
+## License
 
-Apache-2.0. Siehe [LICENSE](LICENSE), [NOTICE](NOTICE) und
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+**Business Source License 1.1.** Free for evaluation, development, research,
+benchmarking, teaching and CI. Production use requires a commercial license
+from Vigilant e.K. Four years after publication, each version becomes
+Apache-2.0 automatically.
 
-NVIDIA Triton und die NVIDIA-Containerimages werden **nicht** mitgeliefert.
+See [LICENSE](LICENSE), [NOTICE](NOTICE) and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). NVIDIA Triton and the NVIDIA
+container images are **not** redistributed here.
+
+Commercial licensing and pilot enquiries: info@vigilant.example

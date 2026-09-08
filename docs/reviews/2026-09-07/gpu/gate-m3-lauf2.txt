@@ -1,0 +1,20 @@
+gate-m3: OneTimer gegen Triton, gleiche Modelle, gleiche GPU
+Backend 127.0.0.1:8001 · geschuetzte serialisierte Auslastung 92 %
+Messdauer 30 s je Lauf und Puffertiefe [1, 8]
+
+  depth     -> depth_main        2352 KB  Periode   66 ms
+  detector  -> rfdetr            3072 KB  Periode   33 ms
+  pose      -> pose_main         2352 KB  Periode   33 ms
+  vlm       -> vlm_main         28224 KB  Periode  800 ms
+
+  Strom     | Abdeckung Triton | OneTimer | Antwortalter p95 T | O | Faktor
+  ----------|------------------|----------|----------------|----------|-------
+  depth     |             97 % |    100 % |          50 ms |    49 ms | besser
+  detector  |             84 % |     99 % |          76 ms |    33 ms |  22.6x
+  pose      |             91 % |     99 % |          51 ms |    33 ms |  12.0x
+  vlm       |            100 % |      0 % |          83 ms |     0 ms | -1000.0x
+
+  Governor: angenommen 3721 weitergereicht 3641 supersediert 0 stale 78 unmachbar 0 verspaetet 0 zurueckgestellt 3480 best-effort ausgehungert 78
+
+Abdeckung nach ADR-0005: Anteil der Perioden mit einem gelieferten Ergebnis,
+dessen Alter unter max_age lag.

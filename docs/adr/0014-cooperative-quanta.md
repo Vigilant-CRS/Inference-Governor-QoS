@@ -65,6 +65,30 @@ Fehler. Ein halb erzeugter Text, der wie ein vollstaendiger aussieht, waere
 schlimmer als kein Ergebnis; die Anwendung kann den Unterschied sonst nicht
 erkennen.
 
+## Nachtrag 2026-09-08: die Quantenkosten sind affin, nicht proportional
+
+Die urspruengliche Umsetzung leitete die Dauer eines Quantums allein aus seiner
+Tokenzahl ab. Auf der Messmaschine kostet aber **jeder Auftrag einen festen
+Sockel von 14–18 ms** — Round-Trip, Backend-Scheduling und, trotz aktivem
+Prefix-Caching, die erneute Prefill-Berechnung des gewachsenen Prompts. Bei
+einer 33-ms-Periode und rund 15 ms Detektorlaufzeit bleiben etwa 18 ms Slack:
+der Sockel ist damit so gross wie die Luecke, in die das Quantum passen soll.
+
+Ein rein proportionales Modell ist dort nicht ungenau, sondern strukturell
+falsch. Es kann nicht ausdruecken, dass **gar kein** Quantum passt, weil es die
+Kosten mit der Tokenzahl gegen null gehen laesst.
+
+`Cooperative` traegt deshalb jetzt ein Pflichtfeld `base_cost_us`, und
+`size_quantum` rechnet `Sockel + Token/Rate`. Der Wert wird gemessen, nicht
+geraten — wie `tokens_per_second`. Offen bleibt, ihn in `onetimer calibrate`
+zu erheben, statt ihn von Hand einzutragen.
+
+Erst mit diesem Modell zeigt die Messung, was diese Entscheidung versprochen
+hat: 40 statt 1 Generierung fuer 7 Punkte Detektor-Abdeckung
+(`docs/reviews/2026-09-07/gpu/ERGEBNIS.md`). Der vorherige Messstand, der
+ADR-0014 als wirkungslos auswies, beruhte auf diesem Modellfehler und darauf,
+dass die Zerlegung im Actor gar nicht angeschlossen war.
+
 ## Was das nicht ist
 
 **Keine GPU-Praeemption.** Ein laufendes Quantum wird nicht unterbrochen. Die

@@ -1,8 +1,8 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
-Upstream-Name: onetimer
+Upstream-Name: vigilant-inference-governor
 Upstream-Contact: Vigilant e.K. <info@vigilant.example>
-Source: https://github.com/vigilant/onetimer
+Source: https://github.com/Vigilant-CRS/Inference-QoS
 
 Files: *
 Copyright: 2026 Vigilant e.K.
-License: Apache-2.0
+License: BUSL-1.1

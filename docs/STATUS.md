@@ -12,11 +12,11 @@ Stand: 2026-09-01 · **Gate M3 bestanden** · Phasen 0-4 fertig · WP26 gemessen
 - CI: fmt, clippy `-D warnings`, test, `cargo deny`, `reuse lint`.
 - Apache-2.0, NOTICE, THIRD_PARTY_NOTICES, SECURITY.md, deny.toml mit der
   Lizenz-Allowlist aus Spec 20.8.
-- `onetimer-core::time` — monotone, geprueft ueberlaufsichere Zeitarithmetik.
+- `vig-core::time` — monotone, geprueft ueberlaufsichere Zeitarithmetik.
   Sicherheitsmargen als exakter Bruch statt `f64`, damit der Hot Path
   gleitkommafrei bleibt.
-- `onetimer-core::arrayvec` — Vektor fester Hoechstkapazitaet ohne Heap.
-- `onetimer-sim` — Discrete-Event-Uhr mit totaler Ereignisordnung,
+- `vig-core::arrayvec` — Vektor fester Hoechstkapazitaet ohne Heap.
+- `vig-sim` — Discrete-Event-Uhr mit totaler Ereignisordnung,
   PCG32 (selbst implementiert, damit Ergebnisse dauerhaft reproduzierbar
   bleiben), lognormale Laufzeitverteilungen an p50/p99 kalibriert,
   Trace-Digest.
@@ -68,14 +68,14 @@ sie zeigten sich nur als Systemverhalten unter Dauerlast.
 
 ### Phase 2a — Gateway, Adapter, Konfiguration, CLI
 
-- `onetimer-protocol-oip` — Wire-Typen aus den unveraenderten Triton-.proto-
+- `vig-protocol-oip` — Wire-Typen aus den unveraenderten Triton-.proto-
   Dateien; Extraktion der `onetimer_`-Parameter; Uhrenbehandlung nach ADR-0011.
-- `onetimer-config` — YAML-Schema, `diagnose()` sammelt alle Befunde.
-- `onetimer-backend-triton` — gRPC-Client mit Verbindungsheilung. Keine
+- `vig-config` — YAML-Schema, `diagnose()` sammelt alle Befunde.
+- `vig-backend-triton` — gRPC-Client mit Verbindungsheilung. Keine
   fachliche Politik im Adapter (Spec 8.4).
-- `onetimer-gateway` — Single-Owner-Actor ueber bounded Kanal, gRPC-Dienst mit
+- `vig-gateway` — Single-Owner-Actor ueber bounded Kanal, gRPC-Dienst mit
   allen 21 OIP-Methoden, Uebersetzung terminaler Zustaende in Statuscodes.
-- `onetimer-cli` — `onetimer doctor` und `onetimer serve`.
+- `vig-cli` — `onetimer doctor` und `onetimer serve`.
 
 **Gemessen** gegen ein echtes gRPC-Backend (Release, leere Tensoren):
 Zusatzaufwand des Governors rund 0,1 bis 0,2 ms je Request. In einem Burst von
@@ -122,7 +122,7 @@ Offen in Phase 3: Profiler-CLI (WP10) und Prometheus-Export (WP13).
 
 ### Wire-Benchmark
 
-`crates/onetimer-bench` faehrt denselben Workload zweimal durch den echten
+`crates/vig-bench` faehrt denselben Workload zweimal durch den echten
 Stack — einmal direkt zum Backend, einmal ueber OneTimer. Gleiche Frames,
 gleiche Laufzeiten, gleiche Kapazitaet, gleicher Client. Die Baseline wird mit
 mehreren Puffertiefen gefahren; je Strom zaehlt ihr bestes Ergebnis.

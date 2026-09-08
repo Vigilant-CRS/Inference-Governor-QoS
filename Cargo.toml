@@ -1,24 +1,24 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/onetimer-core",
-    "crates/onetimer-backend-triton",
-    "crates/onetimer-bench",
-    "crates/onetimer-cli",
-    "crates/onetimer-config",
-    "crates/onetimer-gateway",
-    "crates/onetimer-protocol-oip",
-    "crates/onetimer-sim",
+    "crates/vig-core",
+    "crates/vig-backend-triton",
+    "crates/vig-bench",
+    "crates/vig-cli",
+    "crates/vig-config",
+    "crates/vig-gateway",
+    "crates/vig-protocol-oip",
+    "crates/vig-sim",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
-license = "Apache-2.0"
+license = "BUSL-1.1"
 authors = ["Vigilant e.K. <info@vigilant.example>"]
-repository = "https://github.com/vigilant/onetimer"
-description = "Vigilant OneTimer - adaptive inference governor for edge AI"
+repository = "https://github.com/Vigilant-CRS/Inference-QoS"
+description = "Inference QoS for edge robotics: a freshness- and deadline-aware governor in front of NVIDIA Triton"
 
 # Siehe Spec 26.4 (Coding-Regeln) und docs/adr/.
 # Diese Lints sind bewusst als deny konfiguriert: sie kodieren die
@@ -45,7 +45,7 @@ print_stdout = "deny"
 print_stderr = "deny"
 pedantic = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"
-# Produktnamen wie OneTimer/Triton/NVIDIA stehen in nahezu jedem
+# Produktnamen wie Vigilant/Triton/NVIDIA stehen in nahezu jedem
 # Doc-Kommentar; Backticks waeren hier Rauschen statt Praezision.
 doc_markdown = "allow"
 

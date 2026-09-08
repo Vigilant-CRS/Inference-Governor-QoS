@@ -1,0 +1,54 @@
+# Review-Reproduktionen: Stand nach den Reparaturen
+
+Die 21 Prüfungen dieses Verzeichnisses sind als Regressionstests ins Repo
+gehoben worden und laufen dort in der normalen Suite mit:
+
+  crates/onetimer-core/tests/review_invariants.rs      (15 Tests)
+  crates/onetimer-gateway/tests/review_invariants.rs   (5 Tests)
+  crates/onetimer-config/tests/schema.rs               (3 Tests, angehängt)
+  crates/onetimer-sim/src/coverage.rs                  (4 Tests, Peak-AoI)
+  crates/onetimer-protocol-oip/src/params.rs           (1 Test, geklemmtes Alter)
+
+Das eigenständige Crate hier bleibt als Beleg des Ausgangsbefunds bestehen.
+Drei seiner Erwartungen wurden dabei an die reparierte Semantik angepasst und
+sind unten begründet.
+
+## Vorher (Ausgangsbefund, Commit 1d703ac)
+
+    test result: FAILED. 4 passed; 17 failed
+
+## Nachher
+
+    cargo test --manifest-path docs/reviews/2026-09-07/repros/Cargo.toml --offline -- --test-threads=1
+    test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+    cargo test --workspace
+    191 passed; 0 failed   (vorher: 155 passed)
+
+    cargo clippy --workspace --all-targets   ohne Befund
+    cargo fmt --all -- --check               ohne Befund
+
+## Angepasste Erwartungen
+
+`old_age_hint_does_not_turn_stale_input_fresh`
+    Vorher erwartet: das gemeldete Alter von 2 s bleibt exakt erhalten.
+    Jetzt erwartet: es wird nicht jünger als die Plausibilitätsgrenze.
+    Grund: ein unplausibel hohes Alter wird auf `max_plausible_age` geklemmt
+    statt auf die Ankunftszeit zurückzufallen. Die geprüfte Eigenschaft — ein
+    als alt gemeldetes Datum darf nicht frisch werden — bleibt dieselbe; die
+    exakte Zahl war eine Eigenschaft des alten Fallbacks, nicht der Regel.
+
+`accepted_config_does_not_panic_during_dispatch`
+    Vorher erwartet: die Konfiguration wird angenommen und panickt nicht.
+    Jetzt erwartet: sie wird gar nicht erst angenommen.
+    Grund: `min_tokens > max_total_tokens` ist jetzt ein Validierungsfehler.
+    Der Test prüft zusätzlich, dass ein gültiges Intervall weiterhin durchgeht.
+
+`guard_uses_learned_protected_runtime`
+    Vorher: geschützte Deadline 10 ms bei gelernter Laufzeit 10 ms.
+    Jetzt: Deadline 40 ms, Best-Effort-Laufzeit 30 ms.
+    Grund: die alte Kalibrierung lag exakt auf der Machbarkeitsgrenze. Mit der
+    gelernten Marge (260 %) ist die geschützte Ankunft dort auch ohne Kandidat
+    nicht mehr machbar — der Guard vetoiert dann korrekt nicht, weil er nichts
+    zu retten hätte. Die neue Kalibrierung trennt die beiden Fälle: mit der
+    Profillaufzeit von 1 ms würde gestartet, mit der gelernten von 10 ms nicht.

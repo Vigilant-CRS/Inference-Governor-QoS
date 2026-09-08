@@ -8,3 +8,4 @@
 *.pth
 *.plan
 *.engine
+__pycache__/

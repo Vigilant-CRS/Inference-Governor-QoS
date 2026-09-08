@@ -10,7 +10,7 @@ beschrieben und **nicht** als allgemeingültige Produktleistung zu lesen.
 | [`data-plane.md`](data-plane.md) | Was kostet der Governor auf dem Draht? | 160 µs mit Shared Memory, 11,7 ms ohne |
 | [`gate-m3.md`](gate-m3.md) | Schlägt er einen getunten Triton? | ja, 22,4x weniger unabgedeckte Perioden |
 | [`wire-bench.md`](wire-bench.md) | Wo wirkt er, wo nicht? | nur unter Konkurrenz |
-| [`wp26.md`](wp26.md) | Lösen kooperative Quanten die Aushungerung? | nein, gemessen und begründet |
+| [`wp26.md`](wp26.md) | Lösen kooperative Quanten die Aushungerung? | **ja** — 20x mehr Best-Effort-Fortschritt für 7 Punkte Abdeckung (Neumessung 2026-09-08) |
 | [`load-ramp.md`](load-ramp.md) | Ab welcher Auslastung lohnt es sich? | Knick zwischen 100 % und 110 % |
 | [`diy-baseline.md`](diy-baseline.md) | Reicht Supersession im Client? | 47x gegen den Eigenbau |
 | [`soak.md`](soak.md) | Haelt es acht Stunden durch? | keine Drift, kein Leck |

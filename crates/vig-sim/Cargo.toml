@@ -1,0 +1,15 @@
+[package]
+name = "vig-sim"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Discrete-event simulator and baseline schedulers"
+
+[dependencies]
+vig-core = { path = "../vig-core", version = "0.1.0" }
+
+[lints]
+workspace = true

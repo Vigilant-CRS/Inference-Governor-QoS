@@ -1,7 +1,7 @@
 # Architecture Decision Records
 
 Diese ADRs dokumentieren Entscheidungen, die von der
-`Vigilant_OneTimer_Product_Specification_v1.0.md` abweichen oder sie präzisieren.
+`Vigilant_Inference_Governor_Specification_v1.0.md` abweichen oder sie präzisieren.
 
 Die Spezifikation v1.0 bleibt unverändert als Baseline erhalten. Wo ein ADR und
 die Spec sich widersprechen, gilt das ADR — jedes ADR benennt die betroffene

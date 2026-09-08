@@ -1,0 +1,70 @@
+# Beispielkonfiguration: zeitkritische Wahrnehmung neben langsamer
+# Hintergrundlast auf einer geteilten Edge-GPU (Spec 1.3, 6.2).
+#
+# Pruefen mit:  vig doctor -c vig.yaml
+version: 1
+
+backend:
+  type: triton
+  grpc_endpoint: "127.0.0.1:8001"
+
+  # Muss zur Instance-Group-Konfiguration in Triton passen (ADR-0004).
+  # Zu hoch gesetzt entsteht hinter dem Governor eine unsichtbare Queue,
+  # zu niedrig bleibt Rechenkapazitaet ungenutzt.
+  slots: 1
+
+  # Ein zusaetzlicher Kredit haelt das Backend warm und die Backend-Queue
+  # bei hoechstens eins (ADR-0002). 0 haelt sie exakt leer, kostet dafuer
+  # je Fertigstellung eine Round-Trip-Luecke.
+  pipelining_depth: 1
+
+  # Der VLM darf nicht neben dem Detector laufen (ADR-0006).
+  no_corun:
+    - [detector, vlm]
+
+  safety_margin_percent: 110
+
+models:
+  detector:
+    class: protected
+    queue:
+      policy: latest        # nur der juengste wartende Frame bleibt erhalten
+      capacity: 1
+      overflow: reject_new
+    contract:
+      period_ms: 33         # 30 FPS - Grundlage des Look-ahead
+      deadline_ms: 33
+      max_age_ms: 66        # aelter als zwei Frames ist fachlich wertlos
+      variant_dwell_ms: 200
+    variants:
+      - id: large
+        backend_model: detector_large
+        quality:
+          value: 1.00
+          source: measured
+          measured_on: "coco-val2017-subset"
+        profile: { p50_us: 10000, p95_us: 13000, p99_us: 16000, samples: 2000 }
+      - id: small
+        backend_model: detector_small
+        quality:
+          value: 0.93
+          source: measured
+          measured_on: "coco-val2017-subset"
+        profile: { p50_us: 6000, p95_us: 8000, p99_us: 10000, samples: 2000 }
+
+  vlm:
+    class: best_effort
+    queue:
+      policy: fifo          # Nutzerkommandos werden nicht supersediert
+      capacity: 4
+      overflow: backpressure_client
+    contract:
+      deadline_ms: 800
+      max_age_ms: 1500
+    variants:
+      - id: main
+        backend_model: vlm_main
+        quality:
+          value: 1.00
+          source: user_declared
+        profile: { p50_us: 200000, p95_us: 280000, p99_us: 320000, samples: 500 }

@@ -1,0 +1,903 @@
+//! Invarianten aus dem Codereview vom 07.09.2026, Gatewayebene.
+//!
+//! Was hier geprueft wird, laesst sich im Kern nicht pruefen: es geht um die
+//! Verdrahtung zwischen Scheduler, Actor und gRPC-Dienst. Genau dort lagen
+//! die Fehler — der Kern kannte den Fehlerfall, der Actor meldete ihn nie.
+
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
+
+mod mock_backend;
+
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use vig_config::Config;
+use vig_gateway::{GatewayService, MonotonicClock, actor};
+use vig_protocol_oip::inference::ModelInferRequest;
+use vig_protocol_oip::inference::grpc_inference_service_server::GrpcInferenceService;
+
+fn yaml(endpoint: &str) -> String {
+    format!(
+        r"
+version: 1
+backend:
+  type: triton
+  grpc_endpoint: {endpoint}
+  slots: 1
+  pipelining_depth: 0
+models:
+  detector:
+    class: protected
+    queue: {{ policy: fifo, capacity: 64 }}
+    contract: {{ deadline_ms: 10000 }}
+    variants:
+      - id: large
+        backend_model: detector_large
+        quality: {{ value: 1.0, source: measured }}
+        profile: {{ p50_us: 1000, p95_us: 1000, p99_us: 1000, samples: 1000 }}
+"
+    )
+}
+
+fn request() -> ModelInferRequest {
+    ModelInferRequest {
+        model_name: "detector".into(),
+        id: "review".into(),
+        ..Default::default()
+    }
+}
+
+/// Ein fehlgeschlagener Backendaufruf zaehlt als Fehler, nicht als Erfolg.
+///
+/// Der Actor erzeugte auch im Fehlerfall ein gewoehnliches
+/// Completion-Ereignis. `backend_failures` blieb dadurch im echten Gateway
+/// dauerhaft null — und der Margen-Regler bekam die Fast-Null-Laufzeit eines
+/// Verbindungsfehlers als Beleg dafuer, dass seine Prognose zu konservativ
+/// gewesen sei. Jede Aussage der Form „null Backendfehler im Dauerlauf" war
+/// mit diesem Zaehler unbelegt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_backend_call_is_counted_as_a_failure() {
+    // Der Listener existiert nur, um einen sicher freien Port zu belegen; er
+    // wird vor dem Aufruf geschlossen.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = listener.local_addr().unwrap().to_string();
+    drop(listener);
+
+    let resolved = Arc::new(
+        Config::from_yaml(&yaml(&endpoint))
+            .unwrap()
+            .resolve()
+            .unwrap(),
+    );
+    let clock = MonotonicClock::start();
+    let backend = Arc::new(vig_backend_triton::TritonClient::new(endpoint));
+    let handle = actor::spawn(resolved.clone(), &backend, clock, &[]).unwrap();
+    let service = GatewayService::new(resolved, backend, handle.clone(), clock);
+
+    assert!(
+        service
+            .model_infer(tonic::Request::new(request()))
+            .await
+            .is_err(),
+        "der Client bekommt den Fehler zu sehen"
+    );
+    let metrics = handle.metrics().await.unwrap();
+    assert_eq!(
+        (metrics.backend_failures, metrics.completed_valid),
+        (1, 0),
+        "und die Statistik sagt dasselbe"
+    );
+}
+
+/// Die Antwort traegt den logischen Modellnamen, nicht den der Variante.
+///
+/// Welche physische Variante gelaufen ist, ist eine interne Entscheidung.
+/// Steht ihr Name in der Antwort, koppelt sich der Client daran, und die
+/// Variantenwahl waere faktisch nicht mehr frei.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_response_keeps_the_logical_model_name() {
+    let backend_impl = Arc::new(mock_backend::MockBackend::new(
+        std::time::Duration::from_millis(1),
+    ));
+    let endpoint = mock_backend::start(backend_impl).await.to_string();
+
+    let resolved = Arc::new(
+        Config::from_yaml(&yaml(&endpoint))
+            .unwrap()
+            .resolve()
+            .unwrap(),
+    );
+    let clock = MonotonicClock::start();
+    let backend = Arc::new(vig_backend_triton::TritonClient::new(endpoint));
+    let handle = actor::spawn(resolved.clone(), &backend, clock, &[]).unwrap();
+    let service = GatewayService::new(resolved, backend, handle, clock);
+
+    let response = service
+        .model_infer(tonic::Request::new(request()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(response.model_name, "detector");
+}
+
+/// Ein abgebrochener Client verbraucht keine Backendzeit mehr.
+///
+/// Arbeit fuer einen Empfaenger, den es nicht mehr gibt, ist der teuerste
+/// Leerlauf im System: sie belegt genau die Kapazitaet, um die noch wartende
+/// Stroeme konkurrieren.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_client_request_never_reaches_the_backend() {
+    let backend_impl = Arc::new(mock_backend::MockBackend::new(
+        std::time::Duration::from_millis(100),
+    ));
+    let endpoint = mock_backend::start(backend_impl.clone()).await.to_string();
+
+    let resolved = Arc::new(
+        Config::from_yaml(&yaml(&endpoint))
+            .unwrap()
+            .resolve()
+            .unwrap(),
+    );
+    let clock = MonotonicClock::start();
+    let backend = Arc::new(vig_backend_triton::TritonClient::new(endpoint));
+    let handle = actor::spawn(resolved.clone(), &backend, clock, &[]).unwrap();
+    let service = Arc::new(GatewayService::new(
+        resolved,
+        backend,
+        handle.clone(),
+        clock,
+    ));
+
+    // Der erste Request belegt den einzigen Slot fuer 100 ms.
+    let svc = service.clone();
+    let first = tokio::spawn(async move { svc.model_infer(tonic::Request::new(request())).await });
+    while handle.metrics().await.unwrap().received < 1 {
+        tokio::task::yield_now().await;
+    }
+
+    // Der zweite wartet in der Queue — und wird dort abgebrochen.
+    let svc = service.clone();
+    let second = tokio::spawn(async move { svc.model_infer(tonic::Request::new(request())).await });
+    while handle.metrics().await.unwrap().received < 2 {
+        tokio::task::yield_now().await;
+    }
+    second.abort();
+    let _ = second.await;
+
+    first.await.unwrap().unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    assert_eq!(
+        backend_impl.served.load(Ordering::Relaxed),
+        1,
+        "der abgebrochene Request wurde nicht mehr weitergereicht"
+    );
+    assert_eq!(handle.metrics().await.unwrap().cancelled, 1);
+}
+
+/// Ein zerlegbarer Auftrag laeuft tatsaechlich ueber mehrere Quanten.
+///
+/// Der Auftragszustand wurde frueher erst in der *Fortsetzung* angelegt — also
+/// nie. `forward()` fand beim ersten Quantum keinen Job und reichte den
+/// vollstaendigen Request weiter; zusaetzlich entnahm es das Template, das die
+/// Fortsetzung gebraucht haette. Die Zerlegung war damit eine
+/// Konfigurationsoption ohne Wirkung, und ein Vergleich „mit und ohne Quanten"
+/// musste identisch ausfallen — nicht weil die Hardware es so wollte, sondern
+/// weil nichts zerlegt wurde.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cooperative_job_is_actually_split_into_several_quanta() {
+    let backend_impl = Arc::new(mock_backend::MockBackend::generative(
+        std::time::Duration::from_millis(1),
+        4,
+    ));
+    let endpoint = mock_backend::start(backend_impl.clone()).await.to_string();
+
+    let yaml = format!(
+        r"
+version: 1
+backend:
+  type: triton
+  grpc_endpoint: {endpoint}
+  slots: 1
+  pipelining_depth: 0
+models:
+  vlm:
+    class: best_effort
+    queue: {{ policy: fifo, capacity: 64 }}
+    contract: {{ deadline_ms: 10000 }}
+    cooperative: {{ tokens_per_second: 1000, min_tokens: 1, max_total_tokens: 3, base_cost_us: 0 }}
+    variants:
+      - id: main
+        backend_model: qwen
+        quality: {{ value: 1.0, source: measured }}
+        profile: {{ p50_us: 1000, p95_us: 1000, p99_us: 1000, samples: 1000 }}
+"
+    );
+    let resolved = Arc::new(Config::from_yaml(&yaml).unwrap().resolve().unwrap());
+    let clock = MonotonicClock::start();
+    let backend = Arc::new(vig_backend_triton::TritonClient::new(endpoint));
+    let handle = actor::spawn(resolved.clone(), &backend, clock, &[]).unwrap();
+    let service = GatewayService::new(resolved, backend, handle, clock);
+
+    let response = service
+        .model_infer(tonic::Request::new(text_request("Beschreibe: ")))
+        .await
+        .unwrap()
+        .into_inner();
+
+    // Drei Quanten a vier Zeichen (rund ein Token je vier Zeichen) erreichen
+    // die Obergrenze von drei Token.
+    assert_eq!(
+        backend_impl.served.load(Ordering::Relaxed),
+        3,
+        "der Auftrag wurde in drei Backendaufrufe zerlegt"
+    );
+
+    // Der Zustand reist im Prompt: jedes Quantum sieht Prompt plus bisher
+    // Erzeugtes. Genau das ist die Zusage von ADR-0014.
+    let prompts = backend_impl.seen_prompts.lock().unwrap().clone();
+    assert_eq!(prompts.len(), 3);
+    assert_eq!(prompts[0], "Beschreibe: ");
+    assert_eq!(prompts[1], "Beschreibe: xxxx");
+    assert_eq!(prompts[2], "Beschreibe: xxxxxxxx");
+
+    // Und der Client bekommt genau eine Antwort mit dem gesammelten Text.
+    let text = read_length_prefixed(response.raw_output_contents.first().unwrap()).unwrap();
+    assert_eq!(text, "xxxxxxxxxxxx");
+}
+
+fn text_request(prompt: &str) -> ModelInferRequest {
+    use vig_protocol_oip::inference::model_infer_request::InferInputTensor;
+    ModelInferRequest {
+        model_name: "vlm".into(),
+        id: "review".into(),
+        inputs: vec![InferInputTensor {
+            name: "text_input".into(),
+            datatype: "BYTES".into(),
+            shape: vec![1],
+            parameters: std::collections::HashMap::new(),
+            contents: None,
+        }],
+        raw_input_contents: vec![length_prefixed(prompt)],
+        ..Default::default()
+    }
+}
+
+fn length_prefixed(value: &str) -> Vec<u8> {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len().saturating_add(4));
+    out.extend_from_slice(&u32::try_from(bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
+    out.extend_from_slice(bytes);
+    out
+}
+
+fn read_length_prefixed(bytes: &[u8]) -> Option<String> {
+    let (header, rest) = bytes.split_at_checked(4)?;
+    let length = u32::from_le_bytes([
+        *header.first()?,
+        *header.get(1)?,
+        *header.get(2)?,
+        *header.get(3)?,
+    ]);
+    let end = usize::try_from(length).ok()?.min(rest.len());
+    String::from_utf8(rest.get(..end)?.to_vec()).ok()
+}
+
+/// Ein decoupled Modell gilt erst mit seiner **letzten** Antwort als fertig.
+///
+/// Frueher kehrte der Adapter bei der ersten Teilantwort zurueck. Bei einem
+/// tatsaechlich streamenden Modell heisst das: Teiltext wird als Endergebnis
+/// ausgeliefert, und der Slot ist frei, waehrend das Backend noch rechnet —
+/// der Governor plant dann gegen eine Belegung, die es nicht mehr gibt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_decoupled_model_is_read_to_its_final_response() {
+    // Eine Nutzlast, danach eine leere Abschlussmarkierung: der uebliche
+    // unaere Fall ueber den Stream-Endpunkt.
+    let single = Arc::new(mock_backend::MockBackend::streaming(
+        std::time::Duration::from_millis(1),
+        1,
+        true,
+    ));
+    let endpoint = mock_backend::start(single).await.to_string();
+    let client = vig_backend_triton::TritonClient::new(endpoint);
+    let response = client
+        .infer_decoupled(ModelInferRequest {
+            model_name: "vlm".into(),
+            id: "1".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        read_length_prefixed(response.raw_output_contents.first().unwrap()).unwrap(),
+        "teil0",
+        "die Nutzlast ueberlebt die nachfolgende Abschlussmarkierung"
+    );
+
+    // Mehrere Teilantworten: das Zusammenfuegen ist modellspezifisch. Sie
+    // stillschweigend auf die erste zu reduzieren waere ein falsches Ergebnis
+    // bei gruener Metrik — deshalb wird der Fall gemeldet.
+    let multi = Arc::new(mock_backend::MockBackend::streaming(
+        std::time::Duration::from_millis(1),
+        3,
+        false,
+    ));
+    let endpoint = mock_backend::start(multi).await.to_string();
+    let client = vig_backend_triton::TritonClient::new(endpoint);
+    let error = client
+        .infer_decoupled(ModelInferRequest {
+            model_name: "vlm".into(),
+            id: "2".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error}").contains("Teilantworten"),
+        "der Fall wird benannt statt still abgeschnitten: {error}"
+    );
+}
+
+/// Auch ein bereits zerlegter Auftrag lässt sich abbrechen.
+///
+/// Eine Fortsetzung tritt als neue Ankunft mit neuer Kennung an; der Client
+/// kennt nur seine erste. Ohne Übersetzung liefe der Auftrag nach dem Abbruch
+/// weiter, bis sein Tokenbudget erschöpft ist — bei einem generativen Modell
+/// die teuerste Arbeit im System, für einen Empfänger, den es nicht mehr gibt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_client_stops_a_job_that_is_already_split() {
+    // 20 ms je Quantum, Budget für 8 Quanten: genug Zeit, um mitten im
+    // Auftrag abzubrechen.
+    let backend_impl = Arc::new(mock_backend::MockBackend::generative(
+        std::time::Duration::from_millis(20),
+        4,
+    ));
+    let endpoint = mock_backend::start(backend_impl.clone()).await.to_string();
+
+    let yaml = format!(
+        r"
+version: 1
+backend:
+  type: triton
+  grpc_endpoint: {endpoint}
+  slots: 1
+  pipelining_depth: 0
+models:
+  vlm:
+    class: best_effort
+    queue: {{ policy: fifo, capacity: 64 }}
+    contract: {{ deadline_ms: 60000 }}
+    cooperative: {{ tokens_per_second: 1000, min_tokens: 1, max_total_tokens: 8, base_cost_us: 0 }}
+    variants:
+      - id: main
+        backend_model: qwen
+        quality: {{ value: 1.0, source: measured }}
+        profile: {{ p50_us: 20000, p95_us: 20000, p99_us: 20000, samples: 1000 }}
+"
+    );
+    let resolved = Arc::new(Config::from_yaml(&yaml).unwrap().resolve().unwrap());
+    let clock = MonotonicClock::start();
+    let backend = Arc::new(vig_backend_triton::TritonClient::new(endpoint));
+    let handle = actor::spawn(resolved.clone(), &backend, clock, &[]).unwrap();
+    let service = Arc::new(GatewayService::new(resolved, backend, handle, clock));
+
+    let svc = service.clone();
+    let call = tokio::spawn(async move {
+        svc.model_infer(tonic::Request::new(text_request("los: ")))
+            .await
+    });
+
+    // Warten, bis der Auftrag tatsächlich fortgesetzt hat — erst dann trägt er
+    // eine andere Kennung als die des Clients.
+    while backend_impl.served.load(Ordering::Relaxed) < 2 {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    call.abort();
+    let _ = call.await;
+
+    let after_abort = backend_impl.served.load(Ordering::Relaxed);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let finally = backend_impl.served.load(Ordering::Relaxed);
+
+    // Das laufende Quantum darf zu Ende laufen; ein weiteres wird nicht mehr
+    // gestartet. Ohne die Übersetzung liefe der Auftrag bis zum Budgetende
+    // von acht Quanten weiter.
+    assert!(
+        finally <= after_abort.saturating_add(1),
+        "nach dem Abbruch wurden noch {} Quanten gestartet (vorher {after_abort})",
+        finally.saturating_sub(after_abort)
+    );
+    assert!(finally < 8, "das Tokenbudget wurde nicht ausgeschöpft");
+}
+
+/// Ein hängendes Backend gibt den Client frei — und den Slot **nicht**.
+///
+/// Ein Inferenztimeout, der den Slotkredit zurückgibt, ist schlimmer als
+/// keiner: die Recheneinheit ist womöglich noch belegt, und der Governor
+/// plant anschließend gegen eine Belegung, die es nicht gibt. Er würde eine
+/// zweite Ausführung auf dieselbe GPU legen und beide verspäten.
+///
+/// Richtig ist: Client antworten, Kredit halten, Zustand melden.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hanging_backend_releases_the_client_but_not_the_slot() {
+    let backend_impl = Arc::new(mock_backend::MockBackend::hanging());
+    let endpoint = mock_backend::start(backend_impl.clone()).await.to_string();
+
+    // 200 ms Timeout, ein Slot.
+    let yaml = format!(
+        r"
+version: 1
+backend:
+  type: triton
+  grpc_endpoint: {endpoint}
+  slots: 1
+  pipelining_depth: 0
+  inference_timeout_ms: 200
+models:
+  detector:
+    class: protected
+    queue: {{ policy: fifo, capacity: 64 }}
+    contract: {{ deadline_ms: 10000 }}
+    variants:
+      - id: large
+        backend_model: detector_large
+        quality: {{ value: 1.0, source: measured }}
+        profile: {{ p50_us: 1000, p95_us: 1000, p99_us: 1000, samples: 1000 }}
+"
+    );
+    let resolved = Arc::new(Config::from_yaml(&yaml).unwrap().resolve().unwrap());
+    let clock = MonotonicClock::start();
+    let backend = Arc::new(vig_backend_triton::TritonClient::new(endpoint));
+    let handle = actor::spawn(resolved.clone(), &backend, clock, &[]).unwrap();
+    let service = GatewayService::new(resolved, backend, handle.clone(), clock);
+
+    let started = std::time::Instant::now();
+    let status = service
+        .model_infer(tonic::Request::new(request()))
+        .await
+        .expect_err("das Backend antwortet nie");
+
+    // Der Client wartet nicht ewig.
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "der Client wurde nach {:?} freigegeben",
+        started.elapsed()
+    );
+    assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
+    assert_eq!(
+        status
+            .metadata()
+            .get("vig-reason")
+            .and_then(|v| v.to_str().ok()),
+        Some("backend_timeout"),
+        "der Grund ist maschinenlesbar, nicht nur Text"
+    );
+
+    // Und der Slot bleibt gehalten, solange das Backend nicht antwortet.
+    let metrics = handle.metrics().await.unwrap();
+    assert_eq!(metrics.backend_timeouts, 1);
+    assert_eq!(
+        metrics.quarantined, 1,
+        "der Kredit wird gehalten, nicht zurueckgegeben"
+    );
+    assert_eq!(
+        metrics.completed_valid, 0,
+        "ein Timeout ist keine gueltige Fertigstellung"
+    );
+}
+
+/// Ein geordnetes Ende beantwortet wartende Arbeit, statt sie fallen zu lassen.
+///
+/// `serve()` reagierte früher nur auf Ctrl-C — im Container ist SIGTERM der
+/// Normalfall, und der Prozess wurde dort immer hart getötet. Ein Client, der
+/// mitten in einer Inferenz die Verbindung verliert, kann nicht unterscheiden,
+/// ob sein Request lief oder nicht.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_drain_answers_pending_work_before_the_actor_stops() {
+    let backend_impl = Arc::new(mock_backend::MockBackend::new(
+        std::time::Duration::from_millis(50),
+    ));
+    let endpoint = mock_backend::start(backend_impl.clone()).await.to_string();
+
+    let resolved = Arc::new(
+        Config::from_yaml(&yaml(&endpoint))
+            .unwrap()
+            .resolve()
+            .unwrap(),
+    );
+    let clock = MonotonicClock::start();
+    let backend = Arc::new(vig_backend_triton::TritonClient::new(endpoint));
+    let handle = actor::spawn(resolved.clone(), &backend, clock, &[]).unwrap();
+    let service = Arc::new(GatewayService::new(
+        resolved,
+        backend,
+        handle.clone(),
+        clock,
+    ));
+
+    // Zwei Requests: einer läuft, einer wartet.
+    let mut calls = Vec::new();
+    for _ in 0..2 {
+        let svc = service.clone();
+        calls.push(tokio::spawn(async move {
+            svc.model_infer(tonic::Request::new(request())).await
+        }));
+    }
+    while handle.metrics().await.unwrap().received < 2 {
+        tokio::task::yield_now().await;
+    }
+
+    let finished = handle
+        .drain(std::time::Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert!(finished, "der Drain lief innerhalb der Frist zu Ende");
+
+    for call in calls {
+        call.await
+            .unwrap()
+            .expect("jeder angenommene Request bekommt seine Antwort");
+    }
+
+    // Und danach ist der Actor wirklich beendet.
+    assert!(
+        handle.metrics().await.is_err(),
+        "nach dem Drain nimmt der Governor nichts mehr an"
+    );
+}
+
+fn yaml_with(endpoint: &str, extra_backend: &str) -> String {
+    format!(
+        r"
+version: 1
+backend:
+  type: triton
+  grpc_endpoint: {endpoint}
+  slots: 1
+  pipelining_depth: 0
+{extra_backend}models:
+  detector:
+    class: normal
+    queue: {{ policy: fifo, capacity: 64 }}
+    contract: {{ deadline_ms: 10000 }}
+    variants:
+      - id: large
+        backend_model: detector_large
+        quality: {{ value: 1.0, source: measured }}
+        profile: {{ p50_us: 1000, p95_us: 1000, p99_us: 1000, samples: 1000 }}
+"
+    )
+}
+
+fn service_with(endpoint: &str, extra_backend: &str) -> GatewayService {
+    let resolved = Arc::new(
+        Config::from_yaml(&yaml_with(endpoint, extra_backend))
+            .unwrap()
+            .resolve()
+            .unwrap(),
+    );
+    let clock = MonotonicClock::start();
+    let backend = Arc::new(vig_backend_triton::TritonClient::new(endpoint.to_owned()));
+    let handle = actor::spawn(resolved.clone(), &backend, clock, &[]).unwrap();
+    GatewayService::new(resolved, backend, handle, clock)
+}
+
+/// Im strikten Modus führt der physische Modellname nicht am Governor vorbei.
+///
+/// Unkonfigurierte Modelle unverändert durchzureichen ist die dokumentierte
+/// Zusage für ein abgeschlossenes Netz (Spec L-002). Steht der Governor nicht
+/// in einem, genügt sonst der Aufruf von `detector_large` statt `detector`, um
+/// ohne Kredit, ohne Frischeprüfung und ohne Look-ahead zu laufen — und genau
+/// die geschützte Arbeit zu verdrängen, die geschützt werden soll.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn strict_mode_refuses_to_run_past_the_governor() {
+    let backend_impl = Arc::new(mock_backend::MockBackend::new(
+        std::time::Duration::from_millis(1),
+    ));
+    let endpoint = mock_backend::start(backend_impl.clone()).await.to_string();
+
+    let bypass = ModelInferRequest {
+        model_name: "detector_large".into(),
+        id: "bypass".into(),
+        ..Default::default()
+    };
+
+    // Offen: durchgereicht, wie dokumentiert.
+    let open = service_with(&endpoint, "");
+    open.model_infer(tonic::Request::new(bypass.clone()))
+        .await
+        .expect("im offenen Modus laeuft ein Standardclient unveraendert weiter");
+    assert_eq!(backend_impl.served.load(Ordering::Relaxed), 1);
+
+    // Strikt: abgelehnt, und das Backend sieht den Aufruf nicht.
+    let strict = service_with(&endpoint, "  trust: strict\n");
+    let status = strict
+        .model_infer(tonic::Request::new(bypass))
+        .await
+        .expect_err("im strikten Modus nicht");
+    assert_eq!(status.code(), tonic::Code::NotFound);
+    assert_eq!(
+        backend_impl.served.load(Ordering::Relaxed),
+        1,
+        "der Aufruf hat das Backend nie erreicht"
+    );
+}
+
+/// Im strikten Modus darf ein Client seine Klasse senken, nicht anheben.
+///
+/// Sonst setzt sich jeder Aufrufer selbst auf `protected`, und die Prioritäten
+/// sind eine Empfehlung statt einer Zusage.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn strict_mode_lets_clients_lower_their_class_but_not_raise_it() {
+    use vig_protocol_oip::inference::InferParameter;
+    use vig_protocol_oip::inference::infer_parameter::ParameterChoice;
+
+    let backend_impl = Arc::new(mock_backend::MockBackend::new(
+        std::time::Duration::from_millis(1),
+    ));
+    let endpoint = mock_backend::start(backend_impl).await.to_string();
+    let strict = service_with(&endpoint, "  trust: strict\n");
+
+    let with_class = |class: &str| {
+        let mut r = request();
+        r.model_name = "detector".into();
+        r.parameters.insert(
+            vig_protocol_oip::params::P_CLASS.to_owned(),
+            InferParameter {
+                parameter_choice: Some(ParameterChoice::StringParam(class.to_owned())),
+            },
+        );
+        r
+    };
+
+    // Beides wird ausgeführt — die Klasse ist keine Zugangsentscheidung.
+    // Geprüft wird, dass die Anhebung wirkungslos bleibt: der Vertrag sagt
+    // `normal`, und dabei bleibt es.
+    strict
+        .model_infer(tonic::Request::new(with_class("protected")))
+        .await
+        .expect("der Request laeuft, nur eben als normal");
+    strict
+        .model_infer(tonic::Request::new(with_class("best_effort")))
+        .await
+        .expect("und ein freiwilliger Rücktritt ist harmlos");
+}
+
+/// Das Nutzlastbudget begrenzt Bytes, nicht nur Requests.
+///
+/// Der Ereigniskanal fasst 1.024 offene Requests. Bei 64 MiB je Tensor sind
+/// das 64 GiB, bevor irgendeine Zahl auffällt — auf einem Edgegerät mit 8 GB
+/// kein theoretischer Fall.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_payload_budget_counts_bytes_not_requests() {
+    let backend_impl = Arc::new(mock_backend::MockBackend::new(
+        std::time::Duration::from_millis(200),
+    ));
+    let endpoint = mock_backend::start(backend_impl).await.to_string();
+    // 1 MiB Budget.
+    let service = Arc::new(service_with(&endpoint, "  max_inflight_mib: 1\n"));
+
+    let big = || {
+        let mut r = request();
+        r.model_name = "detector".into();
+        r.raw_input_contents = vec![vec![0_u8; 700 * 1024]];
+        r
+    };
+
+    // Der erste 700-KiB-Request passt, der zweite nicht mehr.
+    let svc = service.clone();
+    let first = tokio::spawn(async move { svc.model_infer(tonic::Request::new(big())).await });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let status = service
+        .model_infer(tonic::Request::new(big()))
+        .await
+        .expect_err("zwei mal 700 KiB passen nicht in 1 MiB");
+    assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+
+    // Und nach dem Abschluss ist das Budget wieder frei.
+    first.await.unwrap().unwrap();
+    service
+        .model_infer(tonic::Request::new(big()))
+        .await
+        .expect("das Budget wird zurueckgegeben, nicht verbraucht");
+}
+
+/// Ohne gültiges Token kommt keine Anfrage durch — auch keine Metadatenabfrage.
+///
+/// Der Governor steuert eine ganze GPU. Wer ihn ohne Identitätsprüfung ins
+/// Netz stellt, gibt diese Steuerung an jeden im Netz. Deshalb bindet er auf
+/// Loopback; wer ihn öffnet, schaltet TLS oder Token ein.
+///
+/// Geprüft wird hier die Tokenvariante samt der Stelle, an der sie am
+/// leichtesten vergessen wird: die Nebenendpunkte. `system_shared_memory_register`
+/// ist der gefährlichste davon — er verknüpft fremden Speicher mit dem Backend.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn without_a_valid_token_nothing_gets_through() {
+    use std::io::Write as _;
+    use vig_protocol_oip::inference::grpc_inference_service_server::GrpcInferenceService as _;
+
+    let backend_impl = Arc::new(mock_backend::MockBackend::new(
+        std::time::Duration::from_millis(1),
+    ));
+    let endpoint = mock_backend::start(backend_impl.clone()).await.to_string();
+
+    let mut token_file = tempfile::NamedTempFile::new().unwrap();
+    writeln!(token_file, "# der Roboter\ns3cret").unwrap();
+    token_file.flush().unwrap();
+
+    let tokens = vig_gateway::auth::Tokens::load(token_file.path()).unwrap();
+    let service = service_with(&endpoint, "").with_tokens(tokens);
+
+    let authorised = |with_token: bool| {
+        let mut r = tonic::Request::new(request());
+        if with_token {
+            r.metadata_mut()
+                .insert("authorization", "Bearer s3cret".parse().unwrap());
+        }
+        r
+    };
+
+    // Ohne Token: abgelehnt, und das Backend sieht nichts.
+    let status = service
+        .model_infer(authorised(false))
+        .await
+        .expect_err("ohne Token nicht");
+    assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    assert_eq!(backend_impl.served.load(Ordering::Relaxed), 0);
+
+    // Auch der Shared-Memory-Endpunkt ist geschützt.
+    let shm = service
+        .system_shared_memory_status(tonic::Request::new(
+            vig_protocol_oip::inference::SystemSharedMemoryStatusRequest::default(),
+        ))
+        .await
+        .expect_err("Nebenendpunkte ebenso");
+    assert_eq!(shm.code(), tonic::Code::Unauthenticated);
+
+    // Mit Token: normal.
+    service
+        .model_infer(authorised(true))
+        .await
+        .expect("mit gueltigem Token laeuft alles wie vorher");
+    assert_eq!(backend_impl.served.load(Ordering::Relaxed), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Produktionsreife-Review vom 08.09.2026
+// ---------------------------------------------------------------------------
+
+/// Ein Drain darf keinen sauberen Abschluss melden, während die GPU noch rechnet.
+///
+/// Der Actor prüfte, ob noch Clients warten. Nach einem Timeout ist der Client
+/// beantwortet und die Recheneinheit möglicherweise weiterhin belegt — der
+/// Prozess endete also mit „alles erledigt", und der nächste startete in eine
+/// Belegung, von der er nichts wusste.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_drain_does_not_report_success_while_the_backend_still_runs() {
+    let backend_impl = Arc::new(mock_backend::MockBackend::hanging());
+    let endpoint = mock_backend::start(backend_impl).await.to_string();
+    let service = service_with(&endpoint, "  inference_timeout_ms: 150\n");
+    let handle = service.scheduler_handle();
+
+    let status = service
+        .model_infer(tonic::Request::new(request()))
+        .await
+        .expect_err("das Backend antwortet nie");
+    assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
+
+    let metrics = handle.metrics().await.unwrap();
+    assert_eq!(metrics.quarantined, 1);
+    assert_eq!(metrics.outstanding_backend_calls, 1);
+
+    assert!(
+        !handle
+            .drain(std::time::Duration::from_millis(400))
+            .await
+            .unwrap(),
+        "solange ein Backendaufruf offen ist, ist der Drain nicht fertig"
+    );
+}
+
+/// Bei vollständiger Quarantäne wird neue Arbeit abgewiesen, nicht eingereiht.
+///
+/// Sie einzureihen hieße: der Client wartet bis in sein eigenes Timeout, und
+/// der Governor hält Speicher für Arbeit, die nie beginnt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full_quarantine_refuses_new_work_instead_of_letting_it_wait() {
+    let backend_impl = Arc::new(mock_backend::MockBackend::hanging());
+    let endpoint = mock_backend::start(backend_impl).await.to_string();
+    let service = service_with(&endpoint, "  inference_timeout_ms: 150\n");
+    let handle = service.scheduler_handle();
+
+    // Der einzige Slot geht in Quarantäne.
+    let _ = service.model_infer(tonic::Request::new(request())).await;
+    assert_eq!(handle.metrics().await.unwrap().quarantined, 1);
+
+    let started = std::time::Instant::now();
+    let status = service
+        .model_infer(tonic::Request::new(request()))
+        .await
+        .expect_err("es kann nichts starten");
+    assert_eq!(status.code(), tonic::Code::Unavailable);
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(200),
+        "und zwar sofort, nicht nach einem weiteren Timeout ({:?})",
+        started.elapsed()
+    );
+    assert_eq!(handle.metrics().await.unwrap().rejected_quarantined, 1);
+}
+
+/// Ein abgelehnter Verbindungsaufbau nimmt den Governor aus der Rotation.
+///
+/// Er erzeugt **keine** Quarantäne — der Aufruf kehrt sofort zurück, der
+/// Slotkredit wird regulär frei. Wer nur auf Quarantäne schaut, übersieht damit
+/// den häufigsten Backendausfall und meldet grün.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readiness_fails_after_a_confirmed_transport_failure() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = listener.local_addr().unwrap().to_string();
+    drop(listener);
+
+    let service = service_with(&endpoint, "");
+    let handle = service.scheduler_handle();
+
+    assert!(
+        service
+            .model_infer(tonic::Request::new(request()))
+            .await
+            .is_err()
+    );
+    let metrics = handle.metrics().await.unwrap();
+    assert_eq!(
+        metrics.quarantined, 0,
+        "ein Verbindungsfehler quarantaeniert nicht"
+    );
+    assert!(metrics.consecutive_transport_failures >= 1);
+    assert!(
+        vig_gateway::exporter::readiness(&metrics).is_err(),
+        "aber bereit ist der Governor damit nicht"
+    );
+}
+
+/// Das Bytebudget zählt beide zulässigen Payloadformen.
+///
+/// OIP erlaubt Rohdaten in `raw_input_contents` **und** typisierte Werte in
+/// `inputs[].contents`. Nur die erste zu zählen hieß, dass ein Client das
+/// Budget umgeht, ohne etwas Unerlaubtes zu tun — er benutzt die andere Form.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_payload_budget_also_counts_typed_tensor_contents() {
+    use vig_protocol_oip::inference::InferTensorContents;
+    use vig_protocol_oip::inference::model_infer_request::InferInputTensor;
+
+    let backend_impl = Arc::new(mock_backend::MockBackend::new(
+        std::time::Duration::from_millis(200),
+    ));
+    let endpoint = mock_backend::start(backend_impl).await.to_string();
+    let service = service_with(&endpoint, "  max_inflight_mib: 1\n");
+
+    // 2 MiB als fp32, ausschliesslich in `contents`.
+    let mut typed = request();
+    typed.model_name = "detector".into();
+    typed.inputs = vec![InferInputTensor {
+        name: "images".into(),
+        datatype: "FP32".into(),
+        shape: vec![1, 524_288],
+        parameters: std::collections::HashMap::new(),
+        contents: Some(InferTensorContents {
+            fp32_contents: vec![0.0_f32; 524_288],
+            ..Default::default()
+        }),
+    }];
+
+    let status = service
+        .model_infer(tonic::Request::new(typed))
+        .await
+        .expect_err("2 MiB passen nicht in 1 MiB, egal in welcher Darstellung");
+    assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+}

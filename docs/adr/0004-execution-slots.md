@@ -23,7 +23,7 @@ und damit der Kern von Admission Control und Variantenwahl — unbegründet.
 
 ## Entscheidung
 
-`onetimer-core` modelliert das Backend als endliche, konfigurierte Menge von
+`vig-core` modelliert das Backend als endliche, konfigurierte Menge von
 **Execution Slots**.
 
 - Ein **Slot** ist eine Ausführungskapazität, die genau einen Request gleichzeitig

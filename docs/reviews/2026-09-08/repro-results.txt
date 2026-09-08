@@ -1,0 +1,65 @@
+Stand: 034c3a5b856fb50449f72313c315132e5733ba7e
+Command: cargo test --manifest-path docs/reviews/2026-09-08/repros/Cargo.toml --offline --locked --target-dir /tmp/onetimer-review-wBMlqJ/target -- --test-threads=1
+Exit code: 101
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s
+     Running tests/production.rs (/tmp/onetimer-review-wBMlqJ/target/debug/deps/production-c8659561132ccf90)
+
+running 8 tests
+test all_quarantined_must_not_leave_new_client_waiting_past_its_deadline ... FAILED
+test control_quarantine_blocks_readiness ... ok
+test control_raw_tensor_over_budget_is_rejected ... ok
+test cooperative_quantum_must_preserve_clients_total_token_limit ... FAILED
+test delivery_outside_measurement_window_must_not_inflate_peak_aoi ... FAILED
+test drain_must_not_report_success_while_backend_is_quarantined ... FAILED
+test payload_budget_must_also_count_typed_tensor_contents ... FAILED
+test readiness_must_fail_when_backend_connection_is_refused ... FAILED
+
+failures:
+
+---- all_quarantined_must_not_leave_new_client_waiting_past_its_deadline stdout ----
+
+thread 'all_quarantined_must_not_leave_new_client_waiting_past_its_deadline' (1023179) panicked at tests/production.rs:159:5:
+new work has a 100-ms deadline but is still unanswered after 300 ms; all credits are quarantined
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- cooperative_quantum_must_preserve_clients_total_token_limit stdout ----
+
+thread 'cooperative_quantum_must_preserve_clients_total_token_limit' (1023186) panicked at tests/production.rs:195:5:
+client requested at most 4 tokens but first quantum uses {"max_tokens": 32, "temperature": 0.0}
+
+---- delivery_outside_measurement_window_must_not_inflate_peak_aoi stdout ----
+
+thread 'delivery_outside_measurement_window_must_not_inflate_peak_aoi' (1023187) panicked at tests/production.rs:173:5:
+100-ms measurement reports 1000000000 ns peak from a delivery at 1000 ms
+
+---- drain_must_not_report_success_while_backend_is_quarantined stdout ----
+
+thread 'drain_must_not_report_success_while_backend_is_quarantined' (1023188) panicked at tests/production.rs:69:5:
+drain reported success although the backend has never completed
+
+---- payload_budget_must_also_count_typed_tensor_contents stdout ----
+
+thread 'payload_budget_must_also_count_typed_tensor_contents' (1023191) panicked at tests/production.rs:111:5:
+assertion `left == right` failed: 2 MiB of typed tensor data bypassed the configured 1 MiB budget
+  left: None
+ right: Some(ResourceExhausted)
+
+---- readiness_must_fail_when_backend_connection_is_refused stdout ----
+
+thread 'readiness_must_fail_when_backend_connection_is_refused' (1023194) panicked at tests/production.rs:88:5:
+readiness says ready after a confirmed backend connection failure
+
+
+failures:
+    all_quarantined_must_not_leave_new_client_waiting_past_its_deadline
+    cooperative_quantum_must_preserve_clients_total_token_limit
+    delivery_outside_measurement_window_must_not_inflate_peak_aoi
+    drain_must_not_report_success_while_backend_is_quarantined
+    payload_budget_must_also_count_typed_tensor_contents
+    readiness_must_fail_when_backend_connection_is_refused
+
+test result: FAILED. 2 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.65s
+
+error: test failed, to rerun pass `--test production`
+
