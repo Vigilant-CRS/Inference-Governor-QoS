@@ -229,4 +229,4 @@ usually means the backend stopped answering.
 
 Open a GitHub issue for bugs and questions about the software. For a commercial
 licence, a supervised pilot, or anything that needs a person rather than a
-tracker: **info@v-verlag.de** ([who we are](../IMPRINT.md)).
+tracker: **info@vigilant-crs.de** ([who we are](../IMPRINT.md)).

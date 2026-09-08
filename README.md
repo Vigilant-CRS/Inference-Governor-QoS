@@ -86,11 +86,15 @@ was below the configured limit. Higher is better.*
 | pose | 91 % | **99 %** | **12.0× fewer** |
 | depth | 97 % | **99–100 %** | **5.4× fewer** |
 
-We also tried Triton's strongest available setting — a globally limited shared
-resource, which enforces real mutual exclusion across models. It moves the
-problem rather than solving it: the detector rises to 89–91 %, but pose drops
-to 78 %. Triton's rate limiter can reorder who waits; it cannot know whether
-waiting is still worth it.
+Against Triton's *strongest* setting — a globally limited shared resource
+instead of priorities alone — the detector figure is **12.9–15.1×**, because
+that configuration lifts Triton's own detector coverage to 89–91 %. We quote
+the range rather than the best number: which one applies depends on how Triton
+is configured, and you will find both in the raw logs anyway.
+
+That configuration moves the problem rather than solving it: the detector
+rises, but pose drops to 78 %. Triton's rate limiter can reorder who waits; it
+cannot know whether waiting is still worth it.
 
 **And the honest other half:** in that same run the background language model
 gets **0 % coverage**. A 95 ms block that cannot be interrupted does not fit
@@ -332,8 +336,8 @@ Commercial register HRA 726240, Amtsgericht Stuttgart · VAT ID DE 239010954
 
 | Subject | Contact |
 |---|---|
-| Commercial licence, pilots, evaluations | **info@v-verlag.de** · +49 711 540 464 08 |
-| Security reports — please not as a public issue | **info@v-verlag.de**, subject `SECURITY` ([policy](SECURITY.md)) |
+| Commercial licence, pilots, evaluations | **info@vigilant-crs.de** · +49 711 540 464 08 |
+| Security reports — please not as a public issue | **info@vigilant-crs.de**, subject `SECURITY` ([policy](SECURITY.md)) |
 | Bugs and questions about the software | GitHub issues |
 
 Full legal details: [IMPRINT.md](IMPRINT.md).

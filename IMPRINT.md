@@ -14,7 +14,7 @@ Germany
 | | |
 |---|---|
 | Phone | +49 711 540 464 08 |
-| E-mail | info@v-verlag.de |
+| E-mail | info@vigilant-crs.de |
 | Commercial register | HRA 726240, Amtsgericht Stuttgart |
 | Registered office | Stuttgart |
 | VAT ID (USt-IdNr.) | DE 239010954 |
@@ -27,9 +27,9 @@ Damir Dulovic, address as above.
 
 | Subject | Where |
 |---|---|
-| **Commercial licence** — production use under the [Business Source Licence](LICENSE) | info@v-verlag.de |
-| **Pilot or evaluation** — a supervised trial on your hardware | info@v-verlag.de |
-| **Security report** — please do **not** open a public issue | info@v-verlag.de, subject `SECURITY`; see [SECURITY.md](SECURITY.md) |
+| **Commercial licence** — production use under the [Business Source Licence](LICENSE) | info@vigilant-crs.de |
+| **Pilot or evaluation** — a supervised trial on your hardware | info@vigilant-crs.de |
+| **Security report** — please do **not** open a public issue | info@vigilant-crs.de, subject `SECURITY`; see [SECURITY.md](SECURITY.md) |
 | **Bugs and questions** about the software itself | GitHub issues |
 
 We acknowledge security reports within three working days.

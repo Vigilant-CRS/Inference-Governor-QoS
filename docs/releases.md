@@ -89,7 +89,7 @@ margins at runtime and starts from the configured values every time.
 Pre-1.0: the newest release only. There are no backports, and we would rather
 say that than imply a maintenance window we do not staff.
 
-Security reports: [SECURITY.md](../SECURITY.md) — to info@v-verlag.de, not as
+Security reports: [SECURITY.md](../SECURITY.md) — to info@vigilant-crs.de, not as
 a public issue.
 
 Commercial licences, pilots and everything else that needs a human:

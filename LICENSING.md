@@ -64,7 +64,7 @@ rather tell you that now than after an invoice.
 
 ## Contact
 
-**info@v-verlag.de** · +49 711 540 464 08
+**info@vigilant-crs.de** · +49 711 540 464 08
 Vigilant e.K., Königstraße 22, 70173 Stuttgart, Germany
 Full provider details: [IMPRINT.md](IMPRINT.md) · Licence text: [LICENSE](LICENSE)
 

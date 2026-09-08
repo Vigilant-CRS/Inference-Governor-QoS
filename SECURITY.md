@@ -3,7 +3,7 @@
 ## Meldung von Schwachstellen
 
 Sicherheitsrelevante Funde bitte **nicht** als oeffentliches Issue melden,
-sondern an info@v-verlag.de mit dem Betreff `SECURITY`.
+sondern an info@vigilant-crs.de mit dem Betreff `SECURITY`.
 Anbieterangaben stehen in IMPRINT.md. Wir bestaetigen den Eingang innerhalb von
 drei Werktagen.
 
