@@ -19,7 +19,16 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 tracing = "0.1"
 axum = "0.8.9"
 
+[features]
+# Der Fake-Executor gehoert zu den Tests, wird aber auch von Integrationstests
+# anderer Crates gebraucht. Als Feature statt als `pub` im Produktivpfad:
+# ein Backend, das Antworten erfindet, soll nicht versehentlich verlinkbar sein.
+testing = []
+
 [dev-dependencies]
+# Der Fake-Executor liegt hinter einem Feature; die Integrationstests dieses
+# Crates brauchen ihn.
+vig-gateway = { path = ".", features = ["testing"] }
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }
 tokio-stream = { version = "0.1.19", features = ["net"] }

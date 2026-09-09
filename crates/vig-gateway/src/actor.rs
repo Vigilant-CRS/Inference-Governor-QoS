@@ -17,6 +17,7 @@
 
 use crate::clock::MonotonicClock;
 use crate::cooperative::GenerativeJob;
+use crate::executor::{Executor, Ticket, TritonExecutor};
 use crate::outcome::{mark_obsolete, status_for};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -291,7 +292,7 @@ struct Actor {
     /// Backends unvereinbare Bibliotheksstaende brauchen. Die Kapazitaets-
     /// rechnung bleibt davon unberuehrt: die Slots modellieren die GPU, nicht
     /// den Prozess.
-    backends: HashMap<String, Arc<TritonClient>>,
+    backends: HashMap<String, Arc<dyn Executor>>,
     clock: MonotonicClock,
     tx: mpsc::Sender<Msg>,
     /// Wartende Clients je Request.
@@ -375,16 +376,46 @@ pub fn spawn(
 ) -> Result<Handle, SchedulerError> {
     // Fuer jeden in der Konfiguration genannten Endpunkt ein Client. Der
     // uebergebene deckt den Standardendpunkt ab.
-    let mut backends: HashMap<String, Arc<TritonClient>> = HashMap::new();
+    let mut backends: HashMap<String, Arc<dyn Executor>> = HashMap::new();
     for endpoint in config.endpoints() {
         let client = if endpoint == config.backend_endpoint {
             Arc::clone(backend)
         } else {
             Arc::new(TritonClient::new(&endpoint))
         };
-        backends.insert(endpoint, client);
+        backends.insert(endpoint, Arc::new(TritonExecutor::new(client)));
     }
+    spawn_with(config, backends, clock, unverified)
+}
 
+/// Startet den Actor mit selbst gewaehlten Executoren (NV-07).
+///
+/// Die Naht, an der ein Test ohne GPU ansetzt: derselbe Actor, dieselbe
+/// Ablaufsteuerung, ein Backend, das auf Kommando abbricht. Genau die
+/// Fehlerpfade, in denen sich entscheidet, ob ein Slotkredit zu frueh
+/// zurueckkommt, lassen sich auf echter Hardware kaum herbeifuehren.
+///
+/// # Errors
+///
+/// Wenn die Konfiguration keinen gueltigen Scheduler ergibt.
+pub fn spawn_with<S: std::hash::BuildHasher>(
+    config: Arc<Resolved>,
+    backends: HashMap<String, Arc<dyn Executor>, S>,
+    clock: MonotonicClock,
+    unverified: &[vig_core::ModelIdx],
+) -> Result<Handle, SchedulerError> {
+    // Der Actor fuehrt seine eigene Tabelle; der Hasher des Aufrufers geht
+    // ihn nichts an.
+    let backends: HashMap<String, Arc<dyn Executor>> = backends.into_iter().collect();
+    spawn_owned(config, backends, clock, unverified)
+}
+
+fn spawn_owned(
+    config: Arc<Resolved>,
+    backends: HashMap<String, Arc<dyn Executor>>,
+    clock: MonotonicClock,
+    unverified: &[vig_core::ModelIdx],
+) -> Result<Handle, SchedulerError> {
     let overload = OverloadController::new(OverloadConfig::default(), clock.now())
         .map_err(|_| SchedulerError::NoModels)?;
     let mut scheduler = Scheduler::new(
@@ -900,6 +931,7 @@ impl Actor {
         };
         let tx = self.tx.clone();
         let timeout = std::time::Duration::from_nanos(self.config.inference_timeout.as_nanos());
+        let model_name = oip.model_name.clone();
         self.outstanding = self.outstanding.saturating_add(1);
 
         // Der Anspruch auf den Slotkredit entsteht **hier**, mit dem Dispatch,
@@ -923,13 +955,11 @@ impl Actor {
             },
         );
         tokio::spawn(async move {
-            let call = async move {
-                if decoupled {
-                    backend.infer_decoupled(*oip).await
-                } else {
-                    backend.infer(*oip).await
-                }
-            };
+            let call = backend.execute(Ticket {
+                model: model_name,
+                decoupled,
+                request: oip,
+            });
             tokio::pin!(call);
 
             // Zwei Stufen, und das ist der Punkt: beim Timeout wird der Client
@@ -1087,7 +1117,7 @@ impl Actor {
     }
 
     /// Der Client fuer ein Backendmodell, sofern eindeutig bestimmbar.
-    fn backend_for_model_name(&self, backend_model: &str) -> Option<Arc<TritonClient>> {
+    fn backend_for_model_name(&self, backend_model: &str) -> Option<Arc<dyn Executor>> {
         let index = self
             .config
             .backend_models
@@ -1113,7 +1143,7 @@ impl Actor {
     }
 
     /// Der Client fuer das Backend eines Modells.
-    fn backend_for(&self, model: vig_core::ModelIdx) -> Option<Arc<TritonClient>> {
+    fn backend_for(&self, model: vig_core::ModelIdx) -> Option<Arc<dyn Executor>> {
         self.backends
             .get(self.config.endpoint_of(model))
             .map(Arc::clone)
