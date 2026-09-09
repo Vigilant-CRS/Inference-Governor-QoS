@@ -55,6 +55,7 @@ const SAMPLES: usize = 200;
 pub(crate) async fn run(
     path: &Path,
     samples: usize,
+    periodic_us: Option<u64>,
     identity: &IdentityArgs,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let text = std::fs::read_to_string(path)?;
@@ -94,7 +95,9 @@ pub(crate) async fn run(
         ServerMetadataResponse::default()
     };
 
-    println!("# Aufwaermlaeufe: {WARMUP}, Messlaeufe: {samples}");
+    if !announce_method(periodic_us, samples) {
+        return Ok(ExitCode::FAILURE);
+    }
     println!(
         "# ACHTUNG Ein Profil gilt nur fuer diese Umgebung. Aendern sich GPU,\n\
          # Treiber, Backend-Version oder das Modell selbst, muss neu gemessen\n\
@@ -114,6 +117,7 @@ pub(crate) async fn run(
                 samples,
                 &server_meta,
                 identity,
+                periodic_us,
             ))
             .await
             {
@@ -165,6 +169,45 @@ pub(crate) async fn run(
     Ok(ExitCode::SUCCESS)
 }
 
+/// Prueft die Uhr und schreibt in den Kopf, **wie** gemessen wird (NV-05).
+///
+/// Gibt `false`, wenn die Uhr fuer diese Groessenordnung nicht taugt. Eine
+/// Zahl, die nur gerundet ist, ist keine Messung — und der Betreiber soll das
+/// erfahren, bevor er sie in seine Konfiguration schreibt.
+fn announce_method(periodic_us: Option<u64>, samples: usize) -> bool {
+    // Der kuerzeste erwartete Wert ist eine Millisekunde; darunter waere die
+    // Aussage ohnehin eine ueber die Uhr und nicht ueber das Modell.
+    match vig_platform::verify_clock(1_000_000) {
+        vig_platform::ClockVerdict::Usable { resolution_ns } => {
+            println!("# Uhraufloesung: {resolution_ns} ns");
+        }
+        vig_platform::ClockVerdict::TooCoarse {
+            resolution_ns,
+            needed_ns,
+        } => {
+            eprintln!(
+                "FEHLER Die monotone Uhr loest {resolution_ns} ns auf; fuer diese \
+                 Messung waeren {needed_ns} ns noetig. Gemessene Zahlen waeren \
+                 gerundete Zahlen."
+            );
+            return false;
+        }
+    }
+
+    match periodic_us {
+        Some(us) => println!(
+            "# Freigabe auf absolutem Raster alle {us} us — die Zahl, die zu einem\n\
+             # Vertrag gehoert. Ein Ueberzug verschiebt das Raster nicht."
+        ),
+        None => println!(
+            "# Saettigungsmessung: Ruecken an Ruecken. Das ist eine Aussage ueber\n\
+             # die Kapazitaet, nicht ueber das Verhalten unter Takt."
+        ),
+    }
+    println!("# Aufwaermlaeufe: {WARMUP}, Messlaeufe: {samples}");
+    true
+}
+
 /// Belegt fehlende Geraetefelder aus der Hardwarebeobachtung vor (NV-04).
 ///
 /// Was der Betreiber angegeben hat, bleibt stehen. Was er nicht angegeben hat
@@ -194,13 +237,36 @@ struct Measured {
     manifest: vig_config::manifest::ProfileManifest,
 }
 
+/// Misst eine Variante und fuehrt dabei Buch (NV-05).
+///
+/// Drei Dinge unterscheiden das vom naiven „schicken, Zeit nehmen,
+/// wiederholen":
+///
+/// * **Der Hardwarezustand wird vorher und nachher gelesen.** Faellt der Takt
+///   oder kommt ein thermisches Limit hinzu, beschreiben die Zahlen davor und
+///   danach zwei verschiedene Maschinen. Die Zelle wird dann verworfen — mit
+///   Grund.
+/// * **Fehlschlaege sind Daten.** Ein abgebrochener Aufruf beendet die Reihe
+///   nicht und faellt auch nicht heraus; er wird gezaehlt. Ein Fehlschlag,
+///   der aus der Messreihe faellt, verbessert das Quantil.
+/// * **Der Puffer steht vor der Schleife.** Eine Nachbelegung mitten in der
+///   Messung waere ein Ausreisser, den niemand als solchen erkennt.
+///
+/// Bei `period_us` wird auf einem **absoluten** Raster freigegeben statt
+/// Rueckn-an-Ruecken. Das ist die Zahl, die zu einem Vertrag gehoert: wer nach
+/// jeder Antwort eine Periode wartet, misst bei langsamen Antworten seltener
+/// und macht die Messung genau dann gnaedig, wenn sie hart wuerde.
 async fn profile_variant(
     client: &TritonClient,
     model: &str,
     samples: usize,
     server: &ServerMetadataResponse,
     identity: &IdentityArgs,
+    period_us: Option<u64>,
 ) -> Result<Measured, BackendError> {
+    use vig_platform::measure::{CellId, CellRun, ReleaseOutcome, ReleaseSchedule};
+    use vig_platform::{Collector as _, measure};
+
     let metadata = client.model_metadata(model).await?;
     let request = zero_request(model, &metadata)?;
 
@@ -208,25 +274,83 @@ async fn profile_variant(
         client.infer(request.clone()).await?;
     }
 
-    let mut measurements = Vec::with_capacity(samples);
-    for _ in 0..samples {
-        let started = Instant::now();
-        client.infer(request.clone()).await?;
-        measurements.push(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
-    }
-    measurements.sort_unstable();
+    // Vor der Reihe: Zustand merken, damit ein Wechsel hinterher auffaellt.
+    let mut collector = vig_platform::NvidiaSmi::default();
+    let before = collector.snapshot().ok();
 
-    let pick = |percent: usize| -> u64 {
-        if measurements.is_empty() {
-            return 0;
+    let mut run = CellRun::with_capacity(
+        CellId {
+            model: model.to_owned(),
+            concurrency: 1,
+            batch: 1,
+        },
+        samples,
+    );
+
+    let origin = Instant::now();
+    let mut schedule = period_us.map(|us| ReleaseSchedule::new(0, us.saturating_mul(1_000).max(1)));
+
+    for _ in 0..samples {
+        // Auf dem Raster warten, falls periodisch gemessen wird.
+        if let Some(schedule) = schedule.as_mut() {
+            let due_ns = schedule.take();
+            let now_ns = u64::try_from(origin.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            if due_ns > now_ns {
+                tokio::time::sleep(std::time::Duration::from_nanos(
+                    due_ns.saturating_sub(now_ns),
+                ))
+                .await;
+            }
         }
-        let index = measurements
-            .len()
-            .saturating_mul(percent)
-            .checked_div(100)
-            .unwrap_or(0)
-            .min(measurements.len().saturating_sub(1));
-        measurements.get(index).copied().unwrap_or(0)
+
+        let started = Instant::now();
+        let outcome = match client.infer(request.clone()).await {
+            Ok(_) => {
+                let latency_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                let overrun = schedule.as_ref().is_some_and(|s| {
+                    let now_ns = u64::try_from(origin.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                    now_ns > s.next_release_ns()
+                });
+                if overrun {
+                    ReleaseOutcome::Overrun { latency_ns }
+                } else {
+                    ReleaseOutcome::Completed { latency_ns }
+                }
+            }
+            Err(e) => ReleaseOutcome::Failed {
+                reason: e.to_string(),
+            },
+        };
+        run.record(outcome);
+
+        // Nach einem Ueberzug auf das Raster aufschliessen: die
+        // ausgelassenen Punkte werden gebucht, der naechste Freigabepunkt
+        // wird **nicht** nach hinten geschoben.
+        if let Some(schedule) = schedule.as_mut() {
+            let now_ns = u64::try_from(origin.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            run.record_skipped(schedule.catch_up(now_ns));
+        }
+    }
+
+    // Mindestens hundert verwertbare Messwerte und hoechstens fuenf Prozent
+    // Fehlschlaege; darunter ist das p99 kein Quantil, sondern das Maximum.
+    run.qualify(100.min(samples), 50);
+
+    if let (Some(before), Ok(after)) = (before.as_ref(), collector.snapshot())
+        && let Some(reason) = measure::hardware_invalidates(before, &after)
+    {
+        run.discard(reason);
+    }
+
+    if let Some(reason) = run.discarded() {
+        return Err(BackendError::Malformed {
+            detail: format!("Messung verworfen: {reason}"),
+        });
+    }
+
+    let pick = |percent: u32| -> u64 {
+        run.quantile_ns(percent)
+            .map_or(0, |ns| ns.checked_div(1_000).unwrap_or(0))
     };
 
     let observation = vig_backend_triton::observe(server, &metadata);
@@ -245,7 +369,7 @@ async fn profile_variant(
         p50_us: pick(50),
         p95_us: pick(95),
         p99_us: pick(99),
-        samples: u32::try_from(measurements.len()).unwrap_or(u32::MAX),
+        samples: u32::try_from(run.completed().saturating_add(run.overruns())).unwrap_or(u32::MAX),
         fingerprint: vig_backend_triton::fingerprint(server, &metadata),
         manifest: assemble(
             &observation,

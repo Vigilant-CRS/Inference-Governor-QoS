@@ -55,6 +55,14 @@ enum Command {
         /// Number of measurement runs per variant.
         #[arg(long, default_value_t = profile::DEFAULT_SAMPLES)]
         samples: usize,
+        /// Release on an absolute grid with this period, in microseconds.
+        ///
+        /// This is the number that belongs to a contract. Without it, the tool
+        /// measures back to back, which is a statement about capacity, not
+        /// about behaviour under a cycle. An overrun never shifts the grid;
+        /// the missed release points are counted.
+        #[arg(long, value_name = "US")]
+        periodic_us: Option<u64>,
         /// Where the numbers come from and what they are claimed valid for.
         #[command(flatten)]
         identity: identity::IdentityArgs,
@@ -143,8 +151,9 @@ async fn run() -> ExitCode {
         Command::Profile {
             config,
             samples,
+            periodic_us,
             identity,
-        } => Box::pin(profile::run(&config, samples, &identity)).await,
+        } => Box::pin(profile::run(&config, samples, periodic_us, &identity)).await,
         Command::Calibrate {
             config,
             samples,

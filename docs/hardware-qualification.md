@@ -110,6 +110,24 @@ else was using the GPU. When you merge two runs into one profile, say so with
 `--independent-runs 2`: two hundred samples from one process start are not the
 same evidence as two hundred from two.
 
+Two things happen automatically and are worth knowing about:
+
+* **The clock is checked first.** A clock that can only round a 4 ms inference
+  is not measuring it. If the resolution does not suffice, you get a finding
+  instead of a number.
+* **The hardware state is read before and after each variant.** If the clock
+  drops or a thermal limit appears mid-series, the numbers before and after
+  describe two different machines — so the cell is discarded, with the reason
+  and both timestamps, rather than averaged.
+
+`vig profile --periodic-us 33000` measures on an absolute release grid instead
+of back to back. That is the number that belongs to a contract: waiting one
+period *after each answer* means measuring less often when answers are slow,
+which makes the measurement generous exactly where it should be harsh. An
+overrun never shifts the grid; the missed release points are counted.
+Back-to-back measurement is still the default, because it is a legitimate
+statement about capacity — just a different one.
+
 ### 4. Establish the baseline
 
 Before comparing anything, measure your streams against your backend **without**

@@ -40,10 +40,15 @@
 
 pub mod collector;
 pub mod gpu;
+pub mod measure;
 pub mod snapshot;
 
 pub use collector::{Collector, CollectorHealth, Fallback, NvidiaSmi, Recorded};
 pub use gpu::{GpuState, ThrottleReason, parse_query_line};
+pub use measure::{
+    CellId, CellRun, CellSummary, ClockVerdict, DiscardReason, ReleaseOutcome, ReleaseSchedule,
+    RunManifest, verify_clock,
+};
 pub use snapshot::{Change, HardwareSnapshot, diff};
 
 use serde::{Deserialize, Serialize};
