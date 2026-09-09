@@ -139,12 +139,25 @@ pub fn resolve(
     }
     let occupancy = slots.occupancy();
 
-    // Ohne automatische Variantenwahl bleibt es bei der besten Variante; sie
-    // wird nur noch auf Machbarkeit geprueft (ADR-0007).
-    let considered = if contract.auto_variant_selection() {
+    // Die beste **freigegebene** Variante ist der Ausgangspunkt (NV-02).
+    // Freigabe und Qualitaet sind verschiedene Aussagen: eine Variante kann
+    // ueber der Mindestqualitaet liegen und trotzdem nie zertifiziert worden
+    // sein. Ist keine freigegeben, gibt es nichts zu waehlen — und das ist
+    // eine Ablehnung, keine stille Aufwertung auf die naechstbeste.
+    let Some(first) = (0..contract.variants.len())
+        .map(|i| VariantIdx(u16::try_from(i).unwrap_or(u16::MAX)))
+        .find(|idx| contract.variant_approved(*idx))
+    else {
+        return Resolution::NoVariant;
+    };
+    let start = first.get();
+
+    // Ohne automatische Variantenwahl bleibt es bei dieser einen; sie wird
+    // nur noch auf Machbarkeit geprueft (ADR-0007).
+    let end = if contract.auto_variant_selection() {
         contract.variants.len()
     } else {
-        1
+        start.saturating_add(1)
     };
 
     let mut best_feasible: Option<VariantSelection> = None;
@@ -153,9 +166,12 @@ pub fn resolve(
     let mut any_variant_considered = false;
     let mut any_slot_available = false;
 
-    for i in 0..considered {
+    for i in start..end {
         let idx = VariantIdx(u16::try_from(i).unwrap_or(u16::MAX));
-        if !contract.meets_min_quality(idx) {
+        // Qualitaet **und** Freigabe, in einer Frage: die Reihenfolge zweier
+        // Bedingungen zu vergessen ist der billigste Weg zu einer
+        // unautorisierten Lockerung.
+        if !contract.variant_usable(idx) {
             continue;
         }
         let Some(variant) = contract.variant(idx) else {

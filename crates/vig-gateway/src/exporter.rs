@@ -192,6 +192,30 @@ fn render_derived(out: &mut String, metrics: &Metrics) {
         ratio(u64::from(metrics.stale_compute_permille()))
     );
 
+    render_per_model_series(out, metrics);
+
+    for (index, count) in metrics.variant_selected.iter().enumerate() {
+        if index == 0 {
+            let _ = writeln!(
+                out,
+                "# HELP vig_variant_selected_total Wie oft welche Variante \
+                 gewaehlt wurde."
+            );
+            let _ = writeln!(out, "# TYPE vig_variant_selected_total counter");
+        }
+        let _ = writeln!(
+            out,
+            "vig_variant_selected_total{{variant=\"{index}\"}} {count}"
+        );
+    }
+}
+
+/// Die Reihen, die je Modell einen Wert haben.
+///
+/// Getrennt von [`render_derived`], weil sie als Block wachsen: jede neue
+/// Verbrauchersicht kommt hier dazu, und eine Funktion, die zwei Themen
+/// mischt, wird von beiden laenger.
+fn render_per_model_series(out: &mut String, metrics: &Metrics) {
     // Verbrauchersicht: was eine Abdeckungszahl nicht zeigt. Zehn verstreute
     // Ausfaelle und ein Block von zehn ergeben dieselbe Rate — fuer eine
     // Regelung ist das der ganze Unterschied.
@@ -207,6 +231,22 @@ fn render_derived(out: &mut String, metrics: &Metrics) {
         "vig_consecutive_misses",
         "Aufeinanderfolgende Requests ohne gueltiges Ergebnis je Modell.",
         &metrics.consecutive_misses,
+        metrics.models,
+    );
+    // NV-02: gezaehlt ueber den Vertragstakt, nicht ueber angenommene
+    // Requests. Ein Governor, der alles ablehnt, faellt hier auf.
+    render_per_model(
+        out,
+        "vig_weakly_hard_misses",
+        "Fehlversorgte Verbraucherzyklen im laufenden Fenster je Modell.",
+        &metrics.weakly_hard_misses,
+        metrics.models,
+    );
+    render_per_model(
+        out,
+        "vig_weakly_hard_violated",
+        "1, wo die Weakly-hard-Bedingung im letzten vollstaendigen Fenster verletzt ist.",
+        &metrics.weakly_hard_violated,
         metrics.models,
     );
     render_per_model(
@@ -230,21 +270,6 @@ fn render_derived(out: &mut String, metrics: &Metrics) {
         &metrics.margin_percent,
         metrics.models,
     );
-
-    for (index, count) in metrics.variant_selected.iter().enumerate() {
-        if index == 0 {
-            let _ = writeln!(
-                out,
-                "# HELP vig_variant_selected_total Wie oft welche Variante \
-                 gewaehlt wurde."
-            );
-            let _ = writeln!(out, "# TYPE vig_variant_selected_total counter");
-        }
-        let _ = writeln!(
-            out,
-            "vig_variant_selected_total{{variant=\"{index}\"}} {count}"
-        );
-    }
 }
 
 /// Nanosekunden als Sekunden mit Millisekundenaufloesung.
@@ -445,7 +470,12 @@ fn render_health(out: &mut String, metrics: &Metrics) {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )]
 
     use super::*;
 
@@ -488,6 +518,34 @@ mod tests {
         assert!(
             text.contains("vig_backend_compute_seconds_total 30.000"),
             "{text}"
+        );
+    }
+
+    /// NV-02: eine verletzte Weakly-hard-Bedingung muss im Dashboard stehen.
+    ///
+    /// Ein Vertrag, dessen Bruch nur im Log auftaucht, wird erst nachtraeglich
+    /// bemerkt — und dann meist von jemandem, der die Folgen schon gesehen hat.
+    #[test]
+    fn a_weakly_hard_violation_is_exported() {
+        let mut metrics = Metrics {
+            models: 2,
+            ..Metrics::default()
+        };
+        metrics.weakly_hard_misses[0] = 7;
+        metrics.weakly_hard_violated[0] = 1;
+
+        let text = render(&metrics);
+        assert!(
+            text.contains(r#"vig_weakly_hard_misses{model="0"} 7"#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#"vig_weakly_hard_violated{model="0"} 1"#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#"vig_weakly_hard_violated{model="1"} 0"#),
+            "ein Modell ohne Budget meldet 0 und nicht nichts: {text}"
         );
     }
 

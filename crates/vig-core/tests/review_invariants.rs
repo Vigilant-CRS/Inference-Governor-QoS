@@ -65,6 +65,7 @@ fn contract(class: Criticality, policy: QueuePolicy, runtimes_ms: &[u64]) -> Mod
         variant_dwell: Duration::ZERO,
         variants,
         cooperative: None,
+        extension: None,
     }
 }
 

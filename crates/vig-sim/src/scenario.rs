@@ -140,6 +140,9 @@ impl StreamSpec {
             variant_dwell: Duration::from_nanos_unbounded(100_000_000),
             variants,
             cooperative: None,
+            // Der Simulator beschreibt Lastszenarien, keine Vertragszusaetze.
+            // Ein Zusatz haette hier keine Beobachtungsquelle (NV-02).
+            extension: None,
         }
     }
 }

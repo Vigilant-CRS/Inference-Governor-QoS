@@ -28,6 +28,7 @@ Spec-Stelle explizit.
 | [0017](0017-load-that-breaks-the-contract-is-a-finding.md) | Eine Last, die den Vertrag sprengt, ist ein Befund | soak.md, L-017 | Akzeptiert |
 | [0018](0018-calibrate-hardware-not-requirements.md) | Der Kalibrator misst Hardware, keine Anforderungen | WP12, ADR-0006 | Akzeptiert |
 | [0019](0019-profile-identity-beyond-a-metadata-hash.md) | Profilidentitaet ist mehr als ein Metadaten-Hash | NV-03, ADR-0016, G-010 | Akzeptiert |
+| [0020](0020-contract-extensions-are-additive-and-versioned.md) | Vertragszusaetze sind additiv, versioniert und vom Betreiber | NV-02 | Akzeptiert |
 
 ## Format
 

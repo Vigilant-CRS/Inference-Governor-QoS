@@ -23,6 +23,7 @@
 //! work-conserving Scheduler trennt.
 
 use crate::arrayvec::ArrayVec;
+use crate::contract_ext::{CycleOutcome, MissWindow, WeaklyHardStatus};
 use crate::estimator::{MarginController, RuntimeEstimator};
 use crate::feasibility::{DEFAULT_HORIZON, ExpectedArrival, GuardVerdict, guard_protected};
 use crate::ids::{MAX_MODELS, ModelIdx, RequestId, SlotIdx, VariantIdx};
@@ -236,6 +237,12 @@ pub struct Scheduler {
     last_valid: [Option<Instant>; MAX_MODELS],
     /// Aufeinanderfolgende Requests ohne gueltiges Ergebnis je Modell.
     consecutive_misses: [u32; MAX_MODELS],
+    /// Der Weakly-hard-Monitor je Modell, falls einer vereinbart ist (NV-02).
+    ///
+    /// `None`, wo kein Missbudget im Vertrag steht. Ein Monitor beobachtet;
+    /// er erzwingt nichts. Die Kritikalitaetsklasse `Protected` ist noch kein
+    /// Weakly-hard-Vertrag.
+    miss_windows: [Option<MissWindow>; MAX_MODELS],
     horizon: Duration,
     inflight: ArrayVec<Dispatched, MAX_INFLIGHT>,
     metrics: Metrics,
@@ -283,6 +290,18 @@ impl Scheduler {
             }
         }
 
+        // Je Vertrag mit Missbudget ein Monitor. `MissWindow::new` gibt
+        // `None`, wo kein Verbrauchertakt vereinbart ist — ohne Takt liesse
+        // sich nur raten, welcher Zyklus gerade laeuft.
+        let mut miss_windows: [Option<MissWindow>; MAX_MODELS] = [const { None }; MAX_MODELS];
+        for (i, contract) in contracts.iter().enumerate() {
+            if let Some(extension) = contract.extension.as_ref()
+                && let Some(cell) = miss_windows.get_mut(i)
+            {
+                *cell = MissWindow::new(extension);
+            }
+        }
+
         Ok(Self {
             contracts,
             queues,
@@ -291,6 +310,7 @@ impl Scheduler {
             arrivals: [crate::arrival::ArrivalTracker::default(); MAX_MODELS],
             last_valid: [None; MAX_MODELS],
             consecutive_misses: [0; MAX_MODELS],
+            miss_windows,
             slots,
             overload,
             margin,
@@ -383,6 +403,11 @@ impl Scheduler {
             Event::Cancel { request } => self.on_cancel(request, sink),
             Event::Tick => {}
         }
+        // NV-02: der Vertragstakt laeuft unabhaengig davon weiter, was gerade
+        // eintrifft. Deshalb hier und nicht im Ankunftspfad — ein Governor,
+        // der alles ablehnt, soll nicht dadurch gut dastehen, dass keine
+        // Zyklen entstehen.
+        self.observe_cycles(now);
         self.schedule(now, sink);
     }
 
@@ -567,6 +592,90 @@ impl Scheduler {
             request,
             state: RequestState::Failed,
         });
+    }
+
+    /// Traegt die seit dem letzten Ereignis vergangenen Verbraucherzyklen ein.
+    ///
+    /// Jeder Zyklus wird an **seinem eigenen** Zeitpunkt bewertet, nicht am
+    /// aktuellen: bei `latest_state` versorgt ein Ergebnis von vor 20 ms auch
+    /// den Zyklus, in dem nichts Neues ankam, solange es unter dem
+    /// Hoechstalter bleibt. Die Alternative — nur den letzten Zeitpunkt zu
+    /// kennen — wuerde ruhige Zyklen als Misses zaehlen und damit genau die
+    /// Groesse verderben, um die es geht.
+    fn observe_cycles(&mut self, now: Instant) {
+        for index in 0..self.contracts.len() {
+            let Some(contract) = self.contracts.get(index) else {
+                continue;
+            };
+            let Some(extension) = contract.extension.as_ref() else {
+                continue;
+            };
+            // Ohne Hoechstalter gibt es kein Kriterium fuer „vertragsgemaess
+            // versorgt". Die Deadline ist keines: sie gilt je Request, nicht
+            // je Verbraucherzyklus.
+            let Some(max_age) = contract.max_age else {
+                continue;
+            };
+            let require_new = extension.require_new_sample_each_cycle;
+            let tick = extension.tick();
+            let last_valid = self.last_valid.get(index).copied().flatten();
+            let Some(window) = self.miss_windows.get_mut(index).and_then(Option::as_mut) else {
+                continue;
+            };
+            window.advance_with(now, |at| {
+                let Some(valid) = last_valid else {
+                    return CycleOutcome::Missed;
+                };
+                // Ein Ergebnis, das es zu diesem Zyklus noch nicht gab, kann
+                // ihn nicht versorgt haben.
+                if valid.as_nanos() > at.as_nanos() {
+                    return CycleOutcome::Missed;
+                }
+                let age = at.saturating_since(valid);
+                if age.as_nanos() > max_age.as_nanos() {
+                    return CycleOutcome::Missed;
+                }
+                // Verlangt der Vertrag je Zyklus einen neuen Messwert, genuegt
+                // ein noch frisches Bestandsresultat nicht.
+                if require_new && tick.is_some_and(|t| age.as_nanos() >= t.as_nanos()) {
+                    return CycleOutcome::Missed;
+                }
+                CycleOutcome::Supplied
+            });
+        }
+        self.publish_weakly_hard();
+    }
+
+    /// Schreibt den Monitorstand in den Metrikabzug.
+    fn publish_weakly_hard(&mut self) {
+        for index in 0..MAX_MODELS {
+            let Some(window) = self.miss_windows.get(index).and_then(Option::as_ref) else {
+                continue;
+            };
+            // Waehrend der Aufwaermphase steht 0 bei `violated` — das ist
+            // keine Zusage, sondern die Aussage, dass noch nichts feststeht.
+            let (misses, violated) = match window.status() {
+                WeaklyHardStatus::Violated { misses, .. } => (misses, 1),
+                WeaklyHardStatus::Warmup { .. } | WeaklyHardStatus::Holding => {
+                    (window.misses_in_window(), 0)
+                }
+            };
+            if let Some(cell) = self.metrics.weakly_hard_misses.get_mut(index) {
+                *cell = misses;
+            }
+            if let Some(cell) = self.metrics.weakly_hard_violated.get_mut(index) {
+                *cell = violated;
+            }
+        }
+    }
+
+    /// Der Weakly-hard-Befund eines Modells, falls einer vereinbart ist.
+    #[must_use]
+    pub fn weakly_hard(&self, model: ModelIdx) -> Option<WeaklyHardStatus> {
+        self.miss_windows
+            .get(model.get())
+            .and_then(Option::as_ref)
+            .map(MissWindow::status)
     }
 
     /// Beobachtet die Versorgungslage eines Stroms.

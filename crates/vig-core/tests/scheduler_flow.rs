@@ -6,6 +6,8 @@
 #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 
 use vig_core::arrayvec::ArrayVec;
+use vig_core::contract_ext::{ApprovedVariants, ContractExtension};
+use vig_core::ids::VariantIdx;
 use vig_core::model::{ModelContract, Quality, QualitySource, QualityValue, Variant};
 use vig_core::overload::{OverloadConfig, OverloadController};
 use vig_core::profile::{RuntimeProfile, SafetyMargin, VariantProfile};
@@ -63,6 +65,7 @@ fn contract(
         variant_dwell: Duration::ZERO,
         variants,
         cooperative: None,
+        extension: None,
     }
 }
 
@@ -105,6 +108,8 @@ struct Backend {
     dispatched: Vec<RequestId>,
     terminated: Vec<(RequestId, RequestState)>,
     observed: Vec<u64>,
+    /// NV-02: welche Variante tatsaechlich gelaufen ist.
+    variants: Vec<vig_core::ids::VariantIdx>,
 }
 
 impl Backend {
@@ -115,9 +120,11 @@ impl Backend {
                     request,
                     slot,
                     predicted_runtime,
+                    variant,
                     ..
                 } => {
                     self.dispatched.push(request);
+                    self.variants.push(variant);
                     let finish = now.checked_add(predicted_runtime).unwrap();
                     self.pending.push((finish, request, slot));
                 }
@@ -137,6 +144,10 @@ impl Backend {
             .partition(|(finish, _, _)| *finish <= now);
         self.pending = rest;
         due.into_iter().map(|(_, r, s)| (r, s)).collect()
+    }
+
+    fn variants_used(&self) -> &[vig_core::ids::VariantIdx] {
+        &self.variants
     }
 
     fn count(&self, state: RequestState) -> usize {
@@ -494,4 +505,229 @@ fn a_load_within_the_contract_stays_silent() {
     });
 
     assert_eq!(scheduler.arrival_exceeds_contract(ModelIdx(0)), Some(false));
+}
+
+// ---------------------------------------------------------------------------
+// NV-02 — Freigabe ist keine Qualitaetsschwelle
+// ---------------------------------------------------------------------------
+
+/// Ein Vertrag mit drei Varianten, von denen nur die genannten freigegeben sind.
+fn with_approved(mut contract: ModelContract, approved: &[u16]) -> ModelContract {
+    let indices: Vec<VariantIdx> = approved.iter().copied().map(VariantIdx).collect();
+    contract.extension = Some(ContractExtension {
+        approved_variants: ApprovedVariants::from_indices(&indices),
+        ..ContractExtension::default()
+    });
+    contract
+}
+
+#[test]
+fn an_unapproved_variant_is_never_dispatched() {
+    // Drei Varianten, aber nur die langsame mittlere ist freigegeben. Die
+    // beste waere qualitativ und zeitlich besser — und bleibt trotzdem aus.
+    let detector = with_approved(
+        contract(
+            Criticality::Protected,
+            QueuePolicy::Latest,
+            Some(33),
+            33,
+            66,
+            &[5, 8, 12],
+        ),
+        &[1],
+    );
+    assert!(detector.validate().is_ok());
+
+    let mut scheduler = build(vec![detector.clone()], 1);
+    let mut backend = Backend::default();
+    let mut next_id = 0_u64;
+    run(&mut scheduler, &mut backend, 1_000, |t| {
+        if t % 33 == 0 {
+            next_id = next_id.saturating_add(1);
+            vec![frame(next_id, 0, t, &detector)]
+        } else {
+            Vec::new()
+        }
+    });
+
+    assert!(
+        !backend.variants_used().is_empty(),
+        "es muss ueberhaupt etwas gelaufen sein"
+    );
+    assert!(
+        backend.variants_used().iter().all(|v| *v == VariantIdx(1)),
+        "gelaufen sind {:?}; freigegeben war nur v1",
+        backend.variants_used()
+    );
+}
+
+#[test]
+fn a_contract_that_approves_nothing_dispatches_nothing() {
+    let detector = with_approved(
+        contract(
+            Criticality::Protected,
+            QueuePolicy::Latest,
+            Some(33),
+            33,
+            66,
+            &[5],
+        ),
+        &[],
+    );
+    // Eine leere Freigabeliste ergibt die leere Maske — der Vertrag ist
+    // ungueltig und wird beim Start abgelehnt, nicht im Feld entdeckt.
+    assert!(detector.validate().is_err());
+}
+
+#[test]
+fn approval_narrows_the_choice_without_touching_min_quality() {
+    // Ohne Zusatz waehlt der Governor frei zwischen drei Varianten.
+    let open = contract(
+        Criticality::Protected,
+        QueuePolicy::Latest,
+        Some(33),
+        33,
+        66,
+        &[5, 8, 12],
+    );
+    assert!(open.variant_usable(VariantIdx(0)));
+    assert!(open.variant_usable(VariantIdx(2)));
+
+    // Mit Zusatz bleibt die Mindestqualitaet unveraendert; nur die Freigabe
+    // schraenkt ein.
+    let narrowed = with_approved(open.clone(), &[0, 1]);
+    assert_eq!(narrowed.min_quality, open.min_quality);
+    assert!(
+        narrowed.meets_min_quality(VariantIdx(2)),
+        "qualitativ genuegt sie"
+    );
+    assert!(
+        !narrowed.variant_usable(VariantIdx(2)),
+        "freigegeben ist sie nicht"
+    );
+}
+
+/// Ein Vertrag mit Weakly-hard-Bedingung.
+fn with_miss_budget(mut c: ModelContract, m: u32, k: u32, l: Option<u32>) -> ModelContract {
+    c.extension = Some(ContractExtension {
+        consumer_period: Some(ms(33)),
+        miss_budget: Some(vig_core::contract_ext::MissBudget {
+            max_misses: m,
+            window_cycles: k,
+            max_consecutive: l,
+        }),
+        ..ContractExtension::default()
+    });
+    c
+}
+
+#[test]
+fn a_stream_that_is_supplied_holds_its_miss_budget() {
+    let detector = with_miss_budget(
+        contract(
+            Criticality::Protected,
+            QueuePolicy::Latest,
+            Some(33),
+            33,
+            66,
+            &[5],
+        ),
+        2,
+        10,
+        Some(1),
+    );
+    let mut scheduler = build(vec![detector.clone()], 1);
+    let mut backend = Backend::default();
+    let mut next_id = 0_u64;
+    run(&mut scheduler, &mut backend, 2_000, |t| {
+        if t % 33 == 0 {
+            next_id = next_id.saturating_add(1);
+            vec![frame(next_id, 0, t, &detector)]
+        } else {
+            Vec::new()
+        }
+    });
+    assert_eq!(
+        scheduler.weakly_hard(ModelIdx(0)),
+        Some(vig_core::contract_ext::WeaklyHardStatus::Holding)
+    );
+}
+
+#[test]
+fn the_contract_tick_keeps_running_when_nothing_arrives() {
+    // Die Abnahme von NV-02: der Vertragstakt kommt aus dem Vertrag. Wer
+    // nichts schickt, haelt keinen Vertrag ein — er erzeugt nur keine
+    // Requests.
+    let detector = with_miss_budget(
+        contract(
+            Criticality::Protected,
+            QueuePolicy::Latest,
+            Some(33),
+            33,
+            66,
+            &[5],
+        ),
+        2,
+        10,
+        None,
+    );
+    let mut scheduler = build(vec![detector.clone()], 1);
+    let mut backend = Backend::default();
+    let mut next_id = 0_u64;
+    run(&mut scheduler, &mut backend, 2_000, |t| {
+        // Nur in der ersten halben Sekunde kommt etwas; danach Stille.
+        if t < 500 && t % 33 == 0 {
+            next_id = next_id.saturating_add(1);
+            vec![frame(next_id, 0, t, &detector)]
+        } else {
+            Vec::new()
+        }
+    });
+    assert!(
+        matches!(
+            scheduler.weakly_hard(ModelIdx(0)),
+            Some(vig_core::contract_ext::WeaklyHardStatus::Violated { .. })
+        ),
+        "Stille ist keine Vertragserfuellung, sondern eine Versorgungsluecke: {:?}",
+        scheduler.weakly_hard(ModelIdx(0))
+    );
+    assert_eq!(scheduler.metrics().weakly_hard_violated[0], 1);
+}
+
+#[test]
+fn a_still_fresh_result_supplies_a_quiet_cycle() {
+    // `latest_state`: ein Ergebnis von vor 33 ms versorgt bei einem
+    // Hoechstalter von 66 ms auch den Zyklus, in dem nichts Neues ankam.
+    // Wuerde der Monitor nur den letzten Zeitpunkt kennen, zaehlte er hier
+    // Misses, die keine sind.
+    let detector = with_miss_budget(
+        contract(
+            Criticality::Protected,
+            QueuePolicy::Latest,
+            Some(66),
+            66,
+            66,
+            &[5],
+        ),
+        0,
+        10,
+        None,
+    );
+    let mut scheduler = build(vec![detector.clone()], 1);
+    let mut backend = Backend::default();
+    let mut next_id = 0_u64;
+    // Nur alle 66 ms ein Frame, aber der Verbraucher tastet alle 33 ms ab.
+    run(&mut scheduler, &mut backend, 2_000, |t| {
+        if t % 66 == 0 {
+            next_id = next_id.saturating_add(1);
+            vec![frame(next_id, 0, t, &detector)]
+        } else {
+            Vec::new()
+        }
+    });
+    assert_eq!(
+        scheduler.weakly_hard(ModelIdx(0)),
+        Some(vig_core::contract_ext::WeaklyHardStatus::Holding),
+        "M=0 haelt nur, wenn ruhige Zyklen aus dem Bestand versorgt zaehlen"
+    );
 }

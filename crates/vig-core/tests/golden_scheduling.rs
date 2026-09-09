@@ -66,6 +66,7 @@ fn contract(
         variant_dwell: ms(dwell_ms),
         variants: list,
         cooperative: None,
+        extension: None,
     }
 }
 

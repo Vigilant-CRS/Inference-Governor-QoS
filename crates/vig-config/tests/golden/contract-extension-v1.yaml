@@ -1,0 +1,57 @@
+# Golden: ein Vertrag mit Zusatz (NV-02, Zusatzversion 1).
+#
+# Der Zusatz sagt, was der Verbraucher braucht — nicht, was gemessen wurde.
+# Der Takt kommt aus `consumer_period_ms` und nicht aus den Ankuenften: sonst
+# koennte man einen Vertrag dadurch einhalten, dass man alles ablehnt.
+version: 1
+
+backend:
+  type: triton
+  grpc_endpoint: "127.0.0.1:8001"
+  slots: 1
+  safety_margin_percent: 110
+
+models:
+  detector:
+    class: protected
+    queue:
+      policy: latest
+      capacity: 1
+      overflow: reject_new
+    contract:
+      period_ms: 33
+      deadline_ms: 33
+      max_age_ms: 66
+      extension:
+        version: 1
+        consumer_period_ms: 33
+        phase_ms: 0
+        release_jitter_ms: 2
+        delivery_boundary: consumer
+        delivery_semantics: latest_state
+        require_new_sample_each_cycle: false
+        observation_window: 300
+        # Hoechstens zwei Misses in hundert Zyklen und nie zwei
+        # hintereinander. Das ist L=1, nicht L=2.
+        miss_budget:
+          max_misses: 2
+          window_cycles: 100
+          max_consecutive: 1
+        minimum_background_progress_pct: 5
+        # Nur die grosse Variante ist zertifiziert. Die kleine ist qualitativ
+        # ueber der Schwelle und trotzdem gesperrt — Freigabe ist keine
+        # Qualitaetsschwelle.
+        approved_variants: [large]
+        max_input_kib: 3072
+        max_occupancy_pct: 92
+        evidence_required: qualified_slo
+        contract_version: 4
+    variants:
+      - id: large
+        backend_model: detector_large
+        quality: { value: 1.00, source: measured, measured_on: "coco-val2017" }
+        profile: { p50_us: 10000, p95_us: 13000, p99_us: 16000, samples: 2000 }
+      - id: small
+        backend_model: detector_small
+        quality: { value: 0.93, source: measured, measured_on: "coco-val2017" }
+        profile: { p50_us: 6000, p95_us: 8000, p99_us: 10000, samples: 2000 }

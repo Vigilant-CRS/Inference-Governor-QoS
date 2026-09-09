@@ -116,6 +116,63 @@ Automatic selection is switched off when the variants are not interchangeable �
 different input or output signatures, unknown quality provenance, or a stateful
 model.
 
+**Quality and approval are different things.** A contract may list which
+variants are *approved* (`approved_variants`). A variant can sit above the
+minimum quality and still never have been certified — trained on another
+dataset, or simply not signed off. An unapproved variant is never dispatched,
+whatever the deadline pressure. A contract that approves nothing is rejected at
+startup rather than discovered in the field.
+
+## Contract extensions
+
+The contract above — period, deadline, max age, criticality, minimum quality —
+is what most streams need. Some need more, and the extension block says so.
+It is optional, versioned, and additive: without it nothing changes, and old
+configuration files keep working.
+
+```yaml
+contract:
+  period_ms: 33
+  deadline_ms: 33
+  max_age_ms: 66
+  extension:
+    version: 1
+    consumer_period_ms: 33      # when the consumer samples, not when requests arrive
+    delivery_boundary: consumer
+    delivery_semantics: latest_state
+    miss_budget:                # at most 2 misses in 100 cycles,
+      max_misses: 2             # and never two in a row
+      window_cycles: 100
+      max_consecutive: 1
+    approved_variants: [large]
+    evidence_required: qualified_slo
+    contract_version: 4
+```
+
+Three properties are worth naming, because they are what makes the numbers
+mean anything:
+
+* **The cycle comes from the contract, not from the arrivals.** A miss budget
+  without `consumer_period_ms` is rejected. If cycles were counted from
+  accepted requests, a governor could satisfy any contract by rejecting
+  everything.
+* **Every cycle is judged at its own instant.** Under `latest_state` a result
+  from 33 ms ago covers a quiet cycle too, as long as it stays under the
+  maximum age. `require_new_sample_each_cycle: true` says otherwise.
+* **`evidence_required` is a requirement, not an observation.** It says how
+  strong a promise the operator needs. What actually happened is a separate
+  number, and no code path turns one into the other.
+
+`M=2, K=100, L=1` means "at most two misses in a hundred cycles and never two
+in a row" — not `L=2`. The governor rejects `M >= K` and `L > M` at startup:
+both describe rules that cannot bind.
+
+The monitor **reports**; it does not enforce. A bounded ring is enough to
+observe a weakly-hard condition — `vig_weakly_hard_misses` and
+`vig_weakly_hard_violated` are exported per model. Enforcing one needs future
+capacity and controlled interference, and the criticality class `protected` is
+a priority, not a weakly-hard contract.
+
 ## Time
 
 **Time is measured from capture.** A frame that spent 25 ms in the network does

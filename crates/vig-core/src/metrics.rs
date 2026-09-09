@@ -52,6 +52,19 @@ pub struct Metrics {
     ///
     /// Faellt auf null zurueck, sobald wieder etwas Brauchbares ankommt.
     pub consecutive_misses: [u32; MAX_MODELS],
+    /// Fehlversorgte Verbraucherzyklen im laufenden Fenster, je Modell (NV-02).
+    ///
+    /// Zaehlt ueber den **Vertragstakt**, nicht ueber angenommene Requests:
+    /// ein Governor, der alles ablehnt, erzeugt trotzdem Zyklen und faellt
+    /// hier auf. Null, wo kein Missbudget vereinbart ist.
+    pub weakly_hard_misses: [u32; MAX_MODELS],
+    /// 1, wo die Weakly-hard-Bedingung im letzten vollstaendigen Fenster
+    /// verletzt ist; sonst 0 (NV-02).
+    ///
+    /// Waehrend der Aufwaermphase — bevor ein vollstaendiges Fenster
+    /// beobachtet wurde — steht hier 0. Das ist keine Zusage, sondern die
+    /// Aussage, dass noch nichts feststeht.
+    pub weakly_hard_violated: [u32; MAX_MODELS],
     /// Ausfuehrungsenden, die durch Abgleich mit dem Backend belegt wurden.
     ///
     /// Jeder davon ist ein Slotkredit, der ohne Antwort des Backends

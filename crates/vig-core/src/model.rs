@@ -1,6 +1,7 @@
 //! Modellvertraege und Varianten (Spec 12, ADR-0007).
 
 use crate::arrayvec::ArrayVec;
+use crate::contract_ext::ContractExtension;
 use crate::ids::{MAX_VARIANTS, VariantIdx};
 use crate::profile::VariantProfile;
 use crate::queue::{QueueConfig, QueueConfigError};
@@ -139,6 +140,14 @@ pub enum ContractError {
     CooperativeZeroRate,
     /// Die Queue-Konfiguration ist unzulaessig.
     Queue(QueueConfigError),
+    /// Der Vertragszusatz ist unzulaessig (NV-02).
+    Extension(crate::contract_ext::ExtensionError),
+}
+
+impl From<crate::contract_ext::ExtensionError> for ContractError {
+    fn from(e: crate::contract_ext::ExtensionError) -> Self {
+        Self::Extension(e)
+    }
 }
 
 impl core::fmt::Display for ContractError {
@@ -169,11 +178,12 @@ impl core::fmt::Display for ContractError {
             Self::MinQualityUnreachable => {
                 write!(
                     f,
-                    "min_acceptable_quality wird von keiner Variante erreicht"
+                    "min_acceptable_quality wird von keiner freigegebenen Variante erreicht"
                 )
             }
             Self::ZeroDeadline => write!(f, "die relative Deadline muss groesser als null sein"),
             Self::Queue(e) => write!(f, "Queue-Konfiguration: {e}"),
+            Self::Extension(e) => write!(f, "Vertragszusatz: {e}"),
         }
     }
 }
@@ -295,6 +305,12 @@ pub struct ModelContract {
     pub variants: ArrayVec<Variant, MAX_VARIANTS>,
     /// Zerlegbarkeit in kooperative Quanten (ADR-0014), falls zutreffend.
     pub cooperative: Option<Cooperative>,
+    /// Der versionierte Vertragszusatz (NV-02), falls einer vereinbart ist.
+    ///
+    /// Optional und additiv: die Felder oben bleiben die Ausgangswerte. Fehlt
+    /// der Zusatz, verhaelt sich der Vertrag wie vor NV-02 — es gibt kein
+    /// zweites, paralleles Auftragsmodell.
+    pub extension: Option<ContractExtension>,
 }
 
 impl ModelContract {
@@ -333,6 +349,23 @@ impl ModelContract {
             && !self.variants.iter().any(|v| v.quality.value >= min)
         {
             return Err(ContractError::MinQualityUnreachable);
+        }
+
+        if let Some(extension) = self.extension.as_ref() {
+            extension.validate(self.variants.len())?;
+            // Eine Mindestqualitaet, die nur ausserhalb der Freigabe
+            // erreichbar waere, ist kein erfuellbarer Vertrag. Sie erst beim
+            // Dispatch scheitern zu lassen hiesse, im Feld zu entdecken, was
+            // beim Start feststeht.
+            if let Some(min) = self.min_quality
+                && !self.variants.iter().enumerate().any(|(i, v)| {
+                    v.quality.value >= min
+                        && u16::try_from(i)
+                            .is_ok_and(|idx| extension.approved_variants.contains(VariantIdx(idx)))
+                })
+            {
+                return Err(ContractError::MinQualityUnreachable);
+            }
         }
 
         if let Some(cooperative) = self.cooperative {
@@ -380,5 +413,31 @@ impl ModelContract {
             (None, Some(_)) => true,
             (_, None) => false,
         }
+    }
+
+    /// Wahr, wenn diese Variante fachlich freigegeben ist (NV-02).
+    ///
+    /// „Gut genug" und „freigegeben" sind verschiedene Aussagen. Eine
+    /// Variante kann ueber der Mindestqualitaet liegen und trotzdem nie
+    /// zertifiziert worden sein. Ohne Vertragszusatz ist alles freigegeben —
+    /// wer nichts einschraenkt, soll nicht ploetzlich eingeschraenkt sein.
+    #[must_use]
+    pub fn variant_approved(&self, idx: VariantIdx) -> bool {
+        if self.variant(idx).is_none() {
+            return false;
+        }
+        self.extension
+            .as_ref()
+            .is_none_or(|e| e.approved_variants.contains(idx))
+    }
+
+    /// Wahr, wenn die Variante verwendet werden darf.
+    ///
+    /// Qualitaet **und** Freigabe. Der Scheduler fragt diese Funktion, nicht
+    /// die beiden einzeln — die Reihenfolge zweier Bedingungen zu vergessen
+    /// ist der billigste Weg zu einer unautorisierten Lockerung.
+    #[must_use]
+    pub fn variant_usable(&self, idx: VariantIdx) -> bool {
+        self.meets_min_quality(idx) && self.variant_approved(idx)
     }
 }

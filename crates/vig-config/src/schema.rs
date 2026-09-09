@@ -6,7 +6,11 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use vig_core::Duration;
 use vig_core::arrayvec::ArrayVec;
-use vig_core::ids::{MAX_MODELS, MAX_VARIANTS, ModelIdx};
+use vig_core::contract_ext::{
+    ApprovedVariants, ContractExtension, DeliveryBoundary, DeliverySemantics, EvidenceLevel,
+    MissBudget, ValidityEnvelope,
+};
+use vig_core::ids::{MAX_MODELS, MAX_VARIANTS, ModelIdx, VariantIdx};
 use vig_core::model::{ModelContract, Quality, QualitySource, QualityValue, Variant};
 use vig_core::profile::{RuntimeProfile, SafetyMargin, VariantProfile};
 use vig_core::queue::QueueConfig;
@@ -446,6 +450,116 @@ pub struct ContractConfig {
     /// Mindestverweildauer vor einer Variantenaufwertung (Spec 12.4).
     #[serde(default = "default_dwell_ms")]
     pub variant_dwell_ms: u64,
+    /// Der versionierte Vertragszusatz (NV-02).
+    ///
+    /// Optional und additiv. Fehlt er, gilt der Vertrag wie vor NV-02 — alte
+    /// Konfigurationsdateien bleiben unveraendert nutzbar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension: Option<ContractExtensionConfig>,
+}
+
+/// Der Vertragszusatz in der Konfiguration (NV-02).
+///
+/// Die Felder beschreiben, was der **Verbraucher** braucht — nicht, was
+/// gemessen wurde. Anforderungen kommen vom Betreiber, Messwerte vom
+/// Profiler; die eine Groesse aus der anderen abzuleiten waere der Weg zu
+/// einem Vertrag, den man immer einhaelt, weil man ihn passend gemacht hat.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContractExtensionConfig {
+    /// Formatversion des Zusatzes. Eine unbekannte Version wird abgelehnt.
+    #[serde(default = "default_extension_version")]
+    pub version: u32,
+    /// Der Abtasttakt des Verbrauchers in Millisekunden.
+    ///
+    /// **Nicht** die Ankunftsperiode der Requests: der Vertragstakt kommt aus
+    /// dem Vertrag. Wuerde er aus den angenommenen Requests abgeleitet,
+    /// koennte man ihn durch Ablehnen aller Requests einhalten.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer_period_ms: Option<u64>,
+    /// Versatz des ersten Abtastzeitpunkts in Millisekunden.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_ms: Option<u64>,
+    /// Zulaessige Schwankung eines Abtastzeitpunkts in Millisekunden.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_jitter_ms: Option<u64>,
+    /// Bis wohin die Zusage reicht: `governor` oder `consumer`.
+    #[serde(default = "default_delivery_boundary")]
+    pub delivery_boundary: String,
+    /// Was der Verbraucher aus einer Lieferung macht:
+    /// `latest_state`, `every_event` oder `stateful_sequence`.
+    #[serde(default = "default_delivery_semantics")]
+    pub delivery_semantics: String,
+    /// Ob jeder Zyklus einen neuen Messwert verlangt.
+    #[serde(default)]
+    pub require_new_sample_each_cycle: bool,
+    /// Ueber wie viele Zyklen beobachtet wird.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_window: Option<u32>,
+    /// Die Weakly-hard-Bedingung.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub miss_budget: Option<MissBudgetConfig>,
+    /// Mindestfortschritt fuer Hintergrundlast, in Prozent der Zyklen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum_background_progress_pct: Option<u32>,
+    /// Die Kurznamen der freigegebenen Varianten.
+    ///
+    /// Leer heisst „alle freigegeben". Eine Liste, die keine existierende
+    /// Variante trifft, wird abgelehnt — sonst waere ein Tippfehler eine
+    /// stille Vollsperrung.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approved_variants: Vec<String>,
+    /// Bis zu welcher Eingabegroesse in KiB der Vertrag beansprucht wird.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_input_kib: Option<u64>,
+    /// Bis zu welcher serialisierten Auslastung in Prozent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_occupancy_pct: Option<u32>,
+    /// Welche Nachweisstufe verlangt wird: `observed`, `qualified_slo`
+    /// oder `proven`.
+    ///
+    /// Getrennt vom beobachteten SLO und niemals aus ihm abgeleitet.
+    #[serde(default = "default_evidence")]
+    pub evidence_required: String,
+    /// Die Revision des Vertrags, vom Betreiber vergeben.
+    #[serde(default = "default_contract_version")]
+    pub contract_version: u32,
+}
+
+/// Die Weakly-hard-Bedingung in der Konfiguration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MissBudgetConfig {
+    /// M — hoechstens so viele Misses je Fenster.
+    pub max_misses: u32,
+    /// K — die Fenstergroesse in Verbraucherzyklen.
+    pub window_cycles: u32,
+    /// L — hoechstens so viele Misses hintereinander.
+    ///
+    /// „Hoechstens zwei in hundert und nie zwei hintereinander" ist
+    /// `max_misses: 2, window_cycles: 100, max_consecutive: 1`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_consecutive: Option<u32>,
+}
+
+const fn default_extension_version() -> u32 {
+    vig_core::contract_ext::CONTRACT_EXTENSION_VERSION
+}
+
+fn default_delivery_boundary() -> String {
+    "governor".to_owned()
+}
+
+fn default_delivery_semantics() -> String {
+    "latest_state".to_owned()
+}
+
+fn default_evidence() -> String {
+    "observed".to_owned()
+}
+
+const fn default_contract_version() -> u32 {
+    1
 }
 
 const fn default_dwell_ms() -> u64 {
@@ -1163,6 +1277,139 @@ impl ModelConfig {
 }
 
 impl ModelConfig {
+    /// Uebersetzt den Vertragszusatz, falls einer da ist (NV-02).
+    ///
+    /// `Err(())` heisst: der Zusatz ist unbrauchbar und die Befunde stehen
+    /// bereits in `findings`. Ein halb verstandener Vertrag wird nicht
+    /// benutzt — er koennte genau die Einschraenkung enthalten, auf die sich
+    /// der Betreiber verlaesst.
+    #[allow(clippy::too_many_lines, reason = "eine flache Feldabbildung")]
+    fn build_extension(
+        &self,
+        path: &str,
+        findings: &mut Vec<Located>,
+    ) -> Result<Option<ContractExtension>, ()> {
+        let Some(raw) = self.contract.extension.as_ref() else {
+            return Ok(None);
+        };
+        let mut failed = false;
+        let mut fail = |e: ConfigError, sub: &str, failed: &mut bool| {
+            findings.push(e.at(format!("{path}.contract.extension.{sub}")));
+            *failed = true;
+        };
+
+        let delivery_boundary = match raw.delivery_boundary.as_str() {
+            "governor" => DeliveryBoundary::Governor,
+            "consumer" => DeliveryBoundary::Consumer,
+            other => {
+                fail(
+                    ConfigError::UnknownValue {
+                        found: other.to_owned(),
+                        allowed: "governor, consumer",
+                    },
+                    "delivery_boundary",
+                    &mut failed,
+                );
+                DeliveryBoundary::Governor
+            }
+        };
+        let delivery_semantics = match raw.delivery_semantics.as_str() {
+            "latest_state" => DeliverySemantics::LatestState,
+            "every_event" => DeliverySemantics::EveryEvent,
+            "stateful_sequence" => DeliverySemantics::StatefulSequence,
+            other => {
+                fail(
+                    ConfigError::UnknownValue {
+                        found: other.to_owned(),
+                        allowed: "latest_state, every_event, stateful_sequence",
+                    },
+                    "delivery_semantics",
+                    &mut failed,
+                );
+                DeliverySemantics::LatestState
+            }
+        };
+        let evidence_required = match raw.evidence_required.as_str() {
+            "observed" => EvidenceLevel::Observed,
+            "qualified_slo" => EvidenceLevel::QualifiedSlo,
+            "proven" => EvidenceLevel::Proven,
+            other => {
+                fail(
+                    ConfigError::UnknownValue {
+                        found: other.to_owned(),
+                        allowed: "observed, qualified_slo, proven",
+                    },
+                    "evidence_required",
+                    &mut failed,
+                );
+                EvidenceLevel::Observed
+            }
+        };
+
+        // Freigegebene Varianten ueber ihre Kurznamen. Ein Name, den es nicht
+        // gibt, ist ein Tippfehler mit Folgen — er wuerde eine Variante still
+        // sperren statt eine andere freizugeben.
+        let approved_variants = if raw.approved_variants.is_empty() {
+            ApprovedVariants::all()
+        } else {
+            let mut indices = Vec::new();
+            for name in &raw.approved_variants {
+                match self.variants.iter().position(|v| v.id == *name) {
+                    Some(index) => match u16::try_from(index) {
+                        Ok(idx) => indices.push(VariantIdx(idx)),
+                        Err(_) => fail(
+                            ConfigError::OutOfRange {
+                                expected: "ein Variantenindex im gueltigen Bereich",
+                            },
+                            "approved_variants",
+                            &mut failed,
+                        ),
+                    },
+                    None => fail(
+                        ConfigError::UnknownValue {
+                            found: name.clone(),
+                            allowed: "ein in diesem Modell definierter Variantenname",
+                        },
+                        "approved_variants",
+                        &mut failed,
+                    ),
+                }
+            }
+            ApprovedVariants::from_indices(&indices)
+        };
+
+        let extension = ContractExtension {
+            version: raw.version,
+            consumer_period: raw.consumer_period_ms.and_then(Duration::from_millis),
+            phase: raw.phase_ms.and_then(Duration::from_millis),
+            release_jitter_envelope: raw.release_jitter_ms.and_then(Duration::from_millis),
+            delivery_boundary,
+            delivery_semantics,
+            require_new_sample_each_cycle: raw.require_new_sample_each_cycle,
+            observation_window: raw.observation_window,
+            miss_budget: raw.miss_budget.as_ref().map(|b| MissBudget {
+                max_misses: b.max_misses,
+                window_cycles: b.window_cycles,
+                max_consecutive: b.max_consecutive,
+            }),
+            minimum_background_progress_pct: raw.minimum_background_progress_pct,
+            approved_variants,
+            validity_envelope: ValidityEnvelope {
+                max_input_kib: raw.max_input_kib,
+                max_occupancy_pct: raw.max_occupancy_pct,
+            },
+            evidence_required,
+            contract_version: raw.contract_version,
+        };
+
+        if let Err(e) = extension.validate(self.variants.len()) {
+            findings.push(ConfigError::Contract(e.into()).at(format!("{path}.contract.extension")));
+            failed = true;
+        }
+
+        if failed { Err(()) } else { Ok(Some(extension)) }
+    }
+
     fn to_contract(
         &self,
         path: &str,
@@ -1249,6 +1496,10 @@ impl ModelConfig {
 
         let (variants, physical) = self.resolve_variants(path, findings)?;
 
+        let Ok(extension) = self.build_extension(path, findings) else {
+            return None;
+        };
+
         let contract = ModelContract {
             // Bis das Backend etwas anderes sagt.
             variants_interchangeable: true,
@@ -1266,6 +1517,7 @@ impl ModelConfig {
             variant_dwell,
             variants,
             cooperative,
+            extension,
         };
 
         if let Err(e) = contract.validate() {

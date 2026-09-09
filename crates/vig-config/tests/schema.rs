@@ -511,3 +511,155 @@ fn an_unknown_manifest_key_is_rejected() {
     let broken = MANIFEST_V2.replace("compute_capability:", "compute_capabilty:");
     assert!(Config::from_yaml(&broken).is_err());
 }
+
+// ---------------------------------------------------------------------------
+// NV-02 — Vertragszusatz
+// ---------------------------------------------------------------------------
+
+/// Ein Vertrag mit vollstaendigem Zusatz.
+const EXTENSION_V1: &str = include_str!("golden/contract-extension-v1.yaml");
+
+#[test]
+fn a_contract_without_an_extension_still_resolves() {
+    // Die Abnahme, die alles andere traegt: alte Dateien bleiben nutzbar.
+    let resolved = Config::from_yaml(EXAMPLE).unwrap().resolve().unwrap();
+    for contract in resolved.contracts.iter() {
+        assert!(contract.extension.is_none());
+    }
+}
+
+#[test]
+fn a_full_extension_reaches_the_contract() {
+    let resolved = Config::from_yaml(EXTENSION_V1).unwrap().resolve().unwrap();
+    let detector = resolved.model_index("detector").unwrap();
+    let ext = resolved
+        .contracts
+        .get(detector.get())
+        .unwrap()
+        .extension
+        .unwrap();
+
+    assert_eq!(
+        ext.version,
+        vig_core::contract_ext::CONTRACT_EXTENSION_VERSION
+    );
+    assert_eq!(ext.consumer_period.unwrap().as_millis(), 33);
+    assert_eq!(
+        ext.delivery_boundary,
+        vig_core::contract_ext::DeliveryBoundary::Consumer
+    );
+    assert_eq!(
+        ext.evidence_required,
+        vig_core::contract_ext::EvidenceLevel::QualifiedSlo
+    );
+    assert_eq!(ext.contract_version, 4);
+    let budget = ext.miss_budget.unwrap();
+    assert_eq!(budget.max_misses, 2);
+    assert_eq!(budget.window_cycles, 100);
+    assert_eq!(budget.max_consecutive, Some(1));
+    assert_eq!(ext.validity_envelope.max_occupancy_pct, Some(92));
+    assert_eq!(ext.minimum_background_progress_pct, Some(5));
+}
+
+#[test]
+fn approved_variants_are_resolved_by_name() {
+    let resolved = Config::from_yaml(EXTENSION_V1).unwrap().resolve().unwrap();
+    let detector = resolved.model_index("detector").unwrap();
+    let contract = resolved.contracts.get(detector.get()).unwrap();
+    assert!(contract.variant_approved(vig_core::ids::VariantIdx(0)));
+    assert!(
+        !contract.variant_approved(vig_core::ids::VariantIdx(1)),
+        "small ist nicht freigegeben"
+    );
+    assert!(
+        contract.meets_min_quality(vig_core::ids::VariantIdx(1)),
+        "qualitativ waere sie zulaessig — das ist der Punkt"
+    );
+    assert!(!contract.variant_usable(vig_core::ids::VariantIdx(1)));
+}
+
+#[test]
+fn an_unknown_variant_name_in_the_approval_list_is_rejected() {
+    // Ein Tippfehler darf keine stille Vollsperrung sein.
+    let text = EXTENSION_V1.replace("approved_variants: [large]", "approved_variants: [larg]");
+    let finding = Config::from_yaml(&text).unwrap().resolve().unwrap_err();
+    assert!(
+        format!("{finding:?}").contains("approved_variants"),
+        "{finding:?}"
+    );
+}
+
+#[test]
+fn an_unknown_extension_version_is_rejected() {
+    let text = EXTENSION_V1.replace("        version: 1\n", "        version: 7\n");
+    assert!(Config::from_yaml(&text).unwrap().resolve().is_err());
+}
+
+#[test]
+fn an_unknown_delivery_semantics_is_rejected() {
+    let text = EXTENSION_V1.replace(
+        "delivery_semantics: latest_state",
+        "delivery_semantics: newest",
+    );
+    assert!(Config::from_yaml(&text).unwrap().resolve().is_err());
+}
+
+#[test]
+fn an_unknown_evidence_level_is_rejected() {
+    let text = EXTENSION_V1.replace(
+        "evidence_required: qualified_slo",
+        "evidence_required: certain",
+    );
+    assert!(Config::from_yaml(&text).unwrap().resolve().is_err());
+}
+
+#[test]
+fn an_invalid_miss_budget_is_rejected() {
+    // M >= K erlaubt jeden Zyklus als Miss.
+    let text = EXTENSION_V1.replace("max_misses: 2", "max_misses: 100");
+    assert!(Config::from_yaml(&text).unwrap().resolve().is_err());
+    // L > M beschreibt eine Regel, die nie greift.
+    let text = EXTENSION_V1.replace("max_consecutive: 1", "max_consecutive: 3");
+    assert!(Config::from_yaml(&text).unwrap().resolve().is_err());
+    // K = 0 zaehlt nichts.
+    let text = EXTENSION_V1.replace("window_cycles: 100", "window_cycles: 0");
+    assert!(Config::from_yaml(&text).unwrap().resolve().is_err());
+}
+
+#[test]
+fn a_miss_budget_without_a_consumer_period_is_rejected() {
+    let text = EXTENSION_V1.replace("        consumer_period_ms: 33\n", "");
+    assert!(
+        Config::from_yaml(&text).unwrap().resolve().is_err(),
+        "ohne Verbrauchertakt gibt es keinen Zyklus, ueber den gezaehlt wird"
+    );
+}
+
+#[test]
+fn an_unknown_extension_key_is_rejected() {
+    // Ein Tippfehler in einem Vertragsfeld darf nicht still verschwinden:
+    // er koennte genau die Einschraenkung sein, auf die sich jemand verlaesst.
+    let text = EXTENSION_V1.replace("        phase_ms: 0\n", "        phase_millis: 0\n");
+    assert!(Config::from_yaml(&text).is_err());
+}
+
+#[test]
+fn an_extension_survives_a_configuration_roundtrip() {
+    let before = Config::from_yaml(EXTENSION_V1).unwrap();
+    let text = serde_norway::to_string(&before).unwrap();
+    let after = Config::from_yaml(&text).unwrap();
+    let a = before.models["detector"]
+        .contract
+        .extension
+        .as_ref()
+        .unwrap();
+    let b = after.models["detector"]
+        .contract
+        .extension
+        .as_ref()
+        .unwrap();
+    assert_eq!(a.miss_budget.as_ref().unwrap().max_consecutive, Some(1));
+    assert_eq!(a.approved_variants, b.approved_variants);
+    assert_eq!(a.evidence_required, b.evidence_required);
+    assert_eq!(a.contract_version, b.contract_version);
+}

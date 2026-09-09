@@ -26,6 +26,7 @@
 
 pub mod arrayvec;
 pub mod arrival;
+pub mod contract_ext;
 pub mod estimator;
 pub mod feasibility;
 pub mod ids;
