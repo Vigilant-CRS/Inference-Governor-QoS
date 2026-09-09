@@ -38,6 +38,12 @@ There is no private signing key. We could not leak one, and you do not have to
 trust us to protect it — the signature binds the artifact to the workflow run
 that produced it, and that run is public.
 
+**The two commands do different things, and only one of them is security.**
+`cosign verify-blob` proves where the artifact came from. `sha256sum -c` catches
+a corrupted download — the checksum file is not signed, so an attacker who could
+replace the archive could replace the checksum with it. Run both; trust the
+first.
+
 ## Targets
 
 | Target | Built | Tested |

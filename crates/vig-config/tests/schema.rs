@@ -836,3 +836,83 @@ fn a_semantics_block_without_outputs_is_rejected() {
         Config::from_yaml(&text).is_err() || Config::from_yaml(&text).unwrap().resolve().is_err()
     );
 }
+
+// ---------------------------------------------------------------------------
+// NV-20 — Update und Rollback
+// ---------------------------------------------------------------------------
+
+/// Eine neue Binary liest jede aeltere Konfiguration.
+///
+/// Die Vorwaertsrichtung des Updates. Alle drei Profilstaende — vor G-010, mit
+/// Fingerabdruck, mit Manifest — muessen ohne Zutun auflösbar bleiben.
+#[test]
+fn a_new_binary_reads_every_older_configuration() {
+    for (name, text) in [
+        ("vor G-010", LEGACY_V0),
+        ("mit Fingerabdruck", LEGACY_V1),
+        ("mit Manifest", MANIFEST_V2),
+        ("mit Vertragszusatz", EXTENSION_V1),
+        ("mit Semantik", PERMUTED_LABELS),
+        ("Beispiel", EXAMPLE),
+    ] {
+        assert!(
+            Config::from_yaml(text).unwrap().resolve().is_ok(),
+            "{name} liess sich nicht aufloesen"
+        );
+    }
+}
+
+/// Eine aeltere Binary lehnt eine neuere Konfiguration ab, statt sie halb zu
+/// lesen.
+///
+/// Die Rueckwaertsrichtung, und der Grund, warum ein Rollback **Binary plus
+/// Konfiguration** ist. Getestet wird der Mechanismus, der das garantiert:
+/// jedes Schemaobjekt verbietet unbekannte Felder. Eine aeltere Binary kennt
+/// `manifest`, `extension` oder `semantics` nicht und lehnt deshalb ab — statt
+/// stillschweigend ohne die Einschraenkung zu planen, auf die sich der
+/// Betreiber verlaesst.
+#[test]
+fn an_unknown_block_is_rejected_not_partially_read() {
+    let cases = [
+        (
+            "profile",
+            "        profile: { p50_us: 1, p95_us: 1, p99_us: 1, samples: 100, kuenftig: 3 }",
+        ),
+        (
+            "contract",
+            "    contract:\n      deadline_ms: 33\n      kuenftig: 3",
+        ),
+        (
+            "variant",
+            "      - id: neu\n        backend_model: x\n        kuenftig: 3",
+        ),
+        (
+            "backend",
+            "backend:\n  type: triton\n  grpc_endpoint: \"127.0.0.1:8001\"\n  slots: 1\n  kuenftig: 3",
+        ),
+    ];
+    for (what, snippet) in cases {
+        let text = format!("version: 1\n{snippet}\n");
+        assert!(
+            Config::from_yaml(&text).is_err(),
+            "unbekanntes Feld in {what} wurde nicht abgelehnt"
+        );
+    }
+}
+
+/// Was `calibrate` schreibt, liest `serve` wieder.
+///
+/// Der Ablauf, den jeder Betreiber faehrt: messen, Datei schreiben, starten.
+/// Bricht der Roundtrip, ist die gemessene Konfiguration unbrauchbar — und
+/// zwar erst beim Start, nach der Messung.
+#[test]
+fn what_calibrate_writes_resolve_reads_again() {
+    let before = Config::from_yaml(MANIFEST_V2).unwrap();
+    let written = serde_norway::to_string(&before).unwrap();
+    let after = Config::from_yaml(&written).unwrap();
+    assert!(after.resolve().is_ok());
+    // Und noch einmal: eine Serialisierung, die beim zweiten Durchlauf
+    // etwas anderes ergibt, waere ein stiller Datenverlust.
+    let twice = serde_norway::to_string(&after).unwrap();
+    assert_eq!(written, twice);
+}
