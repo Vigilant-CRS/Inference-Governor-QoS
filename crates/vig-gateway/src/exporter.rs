@@ -133,6 +133,13 @@ pub fn render(metrics: &Metrics) -> String {
 /// Nur die belegten Slots: eine Zeitreihe je unbenutztem Modellslot kostet in
 /// Prometheus dauerhaft Speicher und macht jede Abfrage unleserlich.
 fn render_per_model(out: &mut String, name: &str, help: &str, values: &[u32], count: usize) {
+    // Ohne Modelle gibt es keine Reihe. Eine Metrikfamilie mit HELP und TYPE
+    // und ohne einen einzigen Messwert ist zwar formal zulaessig, sagt aber
+    // nichts — und je mehr Reihen dazukommen, desto mehr Rauschen steht in
+    // einem Abzug, der nichts enthaelt.
+    if count == 0 {
+        return;
+    }
     let _ = writeln!(out, "# HELP {name} {help}");
     let _ = writeln!(out, "# TYPE {name} gauge");
     for (index, value) in values.iter().take(count).enumerate() {
@@ -276,6 +283,13 @@ fn render_per_model_series(out: &mut String, metrics: &Metrics) {
         "vig_weakly_hard_misses",
         "Fehlversorgte Verbraucherzyklen im laufenden Fenster je Modell.",
         &metrics.weakly_hard_misses,
+        metrics.models,
+    );
+    render_per_model(
+        out,
+        "vig_weakly_hard_misses_left",
+        "Wie viele Misses das laufende Fenster noch vertraegt je Modell.",
+        &metrics.weakly_hard_misses_left,
         metrics.models,
     );
     render_per_model(

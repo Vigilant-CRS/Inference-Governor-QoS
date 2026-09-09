@@ -23,7 +23,7 @@
 //! work-conserving Scheduler trennt.
 
 use crate::arrayvec::ArrayVec;
-use crate::contract_ext::{CycleOutcome, MissWindow, WeaklyHardStatus};
+use crate::contract_ext::{BudgetSlack, CycleOutcome, MissWindow, WeaklyHardStatus};
 use crate::estimator::{MarginController, RuntimeEstimator};
 use crate::feasibility::{DEFAULT_HORIZON, ExpectedArrival, GuardVerdict, guard_protected};
 use crate::ids::{MAX_MODELS, ModelIdx, RequestId, SlotIdx, VariantIdx};
@@ -252,6 +252,16 @@ pub struct Scheduler {
     hardware_state: StateClass,
     /// Die Revision der Profilidentitaet, unter der gerade geplant wird.
     profile_revision: u32,
+    /// Ob das Missbudget in die Kandidatenwahl eingeht (NV-24).
+    ///
+    /// Aus: der Vorrang folgt allein Kritikalitaet und Deadline, wie bisher.
+    /// Ein: innerhalb derselben Kritikalitaetsklasse geht ein Strom vor,
+    /// dessen naechster Zyklus ein Pflichtzyklus ist. **Nie** ueber
+    /// Klassengrenzen — die Betreiberpolicy bleibt die Betreiberpolicy.
+    ///
+    /// Voreinstellung aus: dieses Paket liefert eine empirische Policy, keine
+    /// formale Zusage. Wer sie einschaltet, soll es entschieden haben.
+    miss_aware_policy: bool,
     /// Der Weakly-hard-Monitor je Modell, falls einer vereinbart ist (NV-02).
     ///
     /// `None`, wo kein Missbudget im Vertrag steht. Ein Monitor beobachtet;
@@ -340,6 +350,7 @@ impl Scheduler {
             predictor: Predictor::with_shape(models, variants, slot_count),
             hardware_state: StateClass::default(),
             profile_revision: 0,
+            miss_aware_policy: false,
             slots,
             overload,
             margin,
@@ -624,6 +635,42 @@ impl Scheduler {
         });
     }
 
+    /// Ob das Missbudget in die Kandidatenwahl eingeht (NV-24).
+    #[must_use]
+    pub const fn miss_aware_policy(&self) -> bool {
+        self.miss_aware_policy
+    }
+
+    /// Schaltet die missbudgetbewusste Kandidatenwahl (NV-24).
+    ///
+    /// Wirkt **nur innerhalb** einer Kritikalitaetsklasse. Ein Strom mit
+    /// erschoepftem Budget geht dann vor einem mit Spielraum; ein
+    /// `best_effort`-Strom geht deshalb nie vor einem `protected`. Der Vorrang
+    /// zwischen Klassen ist die Betreiberpolicy und bleibt es.
+    pub const fn set_miss_aware_policy(&mut self, enabled: bool) {
+        self.miss_aware_policy = enabled;
+    }
+
+    /// Wie viele Misses das Fenster eines Modells noch vertraegt (NV-24).
+    ///
+    /// `None`, wo kein Missbudget vereinbart ist.
+    #[must_use]
+    pub fn budget_slack(&self, model: ModelIdx) -> Option<BudgetSlack> {
+        self.miss_windows
+            .get(model.get())
+            .and_then(Option::as_ref)
+            .map(MissWindow::slack)
+    }
+
+    /// Ob der naechste Verbraucherzyklus eines Modells ein Pflichtzyklus ist.
+    #[must_use]
+    pub fn next_cycle_is_mandatory(&self, model: ModelIdx) -> bool {
+        self.miss_windows
+            .get(model.get())
+            .and_then(Option::as_ref)
+            .is_some_and(MissWindow::next_is_mandatory)
+    }
+
     /// Meldet dem Kern den beobachteten Hardwarezustand (NV-04, NV-06).
     ///
     /// Der Kern misst nichts; er bekommt den Zustand gesagt, wie er auch die
@@ -774,6 +821,11 @@ impl Scheduler {
             }
             if let Some(cell) = self.metrics.weakly_hard_violated.get_mut(index) {
                 *cell = violated;
+            }
+            // NV-24: nicht „wie viele Misses waren es", sondern „wie viele
+            // darf es noch geben" — die Groesse, mit der eine Policy arbeitet.
+            if let Some(cell) = self.metrics.weakly_hard_misses_left.get_mut(index) {
+                *cell = window.slack().misses_left;
             }
         }
     }
@@ -1300,7 +1352,12 @@ impl Scheduler {
 
     /// Der beste wartende Kandidat nach lexikographischer Ordnung (Spec 10.6).
     fn best_candidate(&self, vetoed: crate::slots::ModelMask) -> Option<(ModelIdx, RequestId)> {
-        let mut best: Option<(Criticality, Instant, Instant, ModelIdx, RequestId)> = None;
+        // Der Schluessel ist (Kritikalitaet, Pflichtzyklus, Deadline,
+        // Generationszeit). Der Pflichtzyklus steht **nach** der
+        // Kritikalitaet: er ordnet innerhalb einer Klasse um, nie ueber
+        // Klassengrenzen (NV-24). Ist die Policy aus, ist er fuer alle
+        // Modelle gleich und faellt damit heraus.
+        let mut best: Option<(Criticality, bool, Instant, Instant, ModelIdx, RequestId)> = None;
 
         for (i, queue) in self.queues.iter().enumerate() {
             let model = ModelIdx(u16::try_from(i).unwrap_or(u16::MAX));
@@ -1319,8 +1376,10 @@ impl Scheduler {
                 let deadline = descriptor
                     .absolute_deadline
                     .unwrap_or(Instant::from_nanos(u64::MAX));
+                let mandatory = self.miss_aware_policy && self.next_cycle_is_mandatory(model);
                 let key = (
                     descriptor.criticality,
+                    mandatory,
                     deadline,
                     descriptor.generation_time,
                     model,
@@ -1328,8 +1387,13 @@ impl Scheduler {
                 );
                 let better = match best {
                     None => true,
-                    Some((c, d, g, _, _)) => {
-                        (core::cmp::Reverse(key.0), key.1, key.2) < (core::cmp::Reverse(c), d, g)
+                    Some((c, m, d, g, _, _)) => {
+                        (
+                            core::cmp::Reverse(key.0),
+                            core::cmp::Reverse(key.1),
+                            key.2,
+                            key.3,
+                        ) < (core::cmp::Reverse(c), core::cmp::Reverse(m), d, g)
                     }
                 };
                 if better {
@@ -1337,7 +1401,7 @@ impl Scheduler {
                 }
             }
         }
-        best.map(|(_, _, _, model, id)| (model, id))
+        best.map(|(_, _, _, _, model, id)| (model, id))
     }
 
     /// Die erwarteten geschuetzten Ankuenfte im Look-ahead-Horizont.

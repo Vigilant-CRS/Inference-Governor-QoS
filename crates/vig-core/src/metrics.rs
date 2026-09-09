@@ -65,6 +65,12 @@ pub struct Metrics {
     /// beobachtet wurde — steht hier 0. Das ist keine Zusage, sondern die
     /// Aussage, dass noch nichts feststeht.
     pub weakly_hard_violated: [u32; MAX_MODELS],
+    /// Wie viele Misses das laufende Fenster noch vertraegt, je Modell (NV-24).
+    ///
+    /// Nicht „wie viele waren es", sondern „wie viele darf es noch geben" —
+    /// die Groesse, an der eine Policy entscheidet und ein Betreiber sieht,
+    /// wie eng es zugeht.
+    pub weakly_hard_misses_left: [u32; MAX_MODELS],
     /// Wie oft die zustandsabhaengige Prognose mit dem bisherigen Weg
     /// verglichen wurde (NV-06).
     pub predictor_comparisons: u64,

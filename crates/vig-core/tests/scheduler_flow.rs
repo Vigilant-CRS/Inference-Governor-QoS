@@ -112,6 +112,8 @@ struct Backend {
     observed: Vec<u64>,
     /// NV-02: welche Variante tatsaechlich gelaufen ist.
     variants: Vec<vig_core::ids::VariantIdx>,
+    /// NV-24: welches Modell, in Dispatchreihenfolge.
+    dispatched_models: Vec<ModelIdx>,
 }
 
 impl Backend {
@@ -123,10 +125,12 @@ impl Backend {
                     slot,
                     predicted_runtime,
                     variant,
+                    model,
                     ..
                 } => {
                     self.dispatched.push(request);
                     self.variants.push(variant);
+                    self.dispatched_models.push(model);
                     let finish = now.checked_add(predicted_runtime).unwrap();
                     self.pending.push((finish, request, slot));
                 }
@@ -150,6 +154,11 @@ impl Backend {
 
     fn variants_used(&self) -> &[vig_core::ids::VariantIdx] {
         &self.variants
+    }
+
+    /// Welche Modelle in Dispatchreihenfolge gelaufen sind (NV-24).
+    fn dispatched_models(&self) -> &[ModelIdx] {
+        &self.dispatched_models
     }
 
     fn count(&self, state: RequestState) -> usize {
@@ -843,4 +852,280 @@ fn a_hardware_state_change_invalidates_the_learned_cells() {
         scheduler.predictor_ledger().fallbacks > fallbacks_before,
         "nach dem Zustandswechsel gibt es zunaechst keine belegte Zelle mehr"
     );
+}
+
+// ---------------------------------------------------------------------------
+// NV-24 — das Missbudget in Entscheidungen einbeziehen
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_miss_aware_policy_is_off_by_default() {
+    let detector = contract(
+        Criticality::Protected,
+        QueuePolicy::Latest,
+        Some(33),
+        33,
+        66,
+        &[5],
+    );
+    let scheduler = build(vec![detector], 1);
+    assert!(
+        !scheduler.miss_aware_policy(),
+        "eine empirische Policy schaltet sich nicht selbst scharf"
+    );
+}
+
+#[test]
+fn an_exhausted_budget_wins_inside_its_criticality_class() {
+    use vig_core::contract_ext::{CycleOutcome, MissBudget};
+
+    // Zwei gleichwertige Stroeme, gleiche Klasse, gleiche Deadline. Einer hat
+    // sein Missbudget aufgebraucht, der andere nicht. Mit Policy geht der
+    // erschoepfte vor.
+    let with_budget = |m: u32| {
+        let mut c = contract(
+            Criticality::Protected,
+            QueuePolicy::Fifo,
+            Some(33),
+            100,
+            200,
+            &[10],
+        );
+        c.extension = Some(ContractExtension {
+            consumer_period: Some(ms(33)),
+            miss_budget: Some(MissBudget {
+                max_misses: m,
+                window_cycles: 10,
+                max_consecutive: None,
+            }),
+            ..ContractExtension::default()
+        });
+        c
+    };
+    let tight = with_budget(0);
+    let loose = with_budget(5);
+
+    // Ein dritter, langer Auftrag belegt den einen Slot, damit beide
+    // Kandidaten gleichzeitig in der Queue stehen, wenn er frei wird. Ohne
+    // ihn entscheidet die Ankunftsreihenfolge, weil der Scheduler bei jedem
+    // Ereignis sofort plant — und dann prueft der Test nichts.
+    let blocker = contract(
+        Criticality::Protected,
+        QueuePolicy::Fifo,
+        None,
+        400,
+        800,
+        &[40],
+    );
+    let mut scheduler = build(vec![tight.clone(), loose.clone(), blocker.clone()], 1);
+    scheduler.set_miss_aware_policy(true);
+
+    // Modell 0 hat kein Budget: sein naechster Zyklus ist immer Pflicht.
+    assert!(scheduler.next_cycle_is_mandatory(ModelIdx(0)));
+    assert!(!scheduler.next_cycle_is_mandatory(ModelIdx(1)));
+
+    let mut backend = Backend::default();
+    let mut next_id = 0_u64;
+    run(&mut scheduler, &mut backend, 120, |t| {
+        next_id = next_id.saturating_add(1);
+        match t {
+            0 => vec![frame(next_id, 2, t, &blocker)],
+            // Waehrend der Slot belegt ist, in umgekehrter Reihenfolge: der
+            // Strom mit Spielraum kommt zuerst an.
+            5 => vec![frame(next_id, 1, t, &loose)],
+            6 => vec![frame(next_id, 0, t, &tight)],
+            _ => Vec::new(),
+        }
+    });
+
+    let after_blocker: Vec<ModelIdx> = backend
+        .dispatched_models()
+        .iter()
+        .copied()
+        .filter(|m| *m != ModelIdx(2))
+        .collect();
+    assert_eq!(
+        after_blocker.first(),
+        Some(&ModelIdx(0)),
+        "der Strom mit erschoepftem Budget muss zuerst laufen, obwohl er \
+         spaeter ankam: {:?}",
+        backend.dispatched_models()
+    );
+    let _ = CycleOutcome::Supplied;
+}
+
+#[test]
+fn without_the_policy_the_arrival_order_decides_as_before() {
+    use vig_core::contract_ext::MissBudget;
+
+    let with_budget = |m: u32| {
+        let mut c = contract(
+            Criticality::Protected,
+            QueuePolicy::Fifo,
+            Some(33),
+            100,
+            200,
+            &[10],
+        );
+        c.extension = Some(ContractExtension {
+            consumer_period: Some(ms(33)),
+            miss_budget: Some(MissBudget {
+                max_misses: m,
+                window_cycles: 10,
+                max_consecutive: None,
+            }),
+            ..ContractExtension::default()
+        });
+        c
+    };
+    let tight = with_budget(0);
+    let loose = with_budget(5);
+    let blocker = contract(
+        Criticality::Protected,
+        QueuePolicy::Fifo,
+        None,
+        400,
+        800,
+        &[40],
+    );
+    // Policy aus — die Voreinstellung.
+    let mut scheduler = build(vec![tight.clone(), loose.clone(), blocker.clone()], 1);
+
+    let mut backend = Backend::default();
+    let mut next_id = 0_u64;
+    run(&mut scheduler, &mut backend, 120, |t| {
+        next_id = next_id.saturating_add(1);
+        match t {
+            0 => vec![frame(next_id, 2, t, &blocker)],
+            5 => vec![frame(next_id, 1, t, &loose)],
+            6 => vec![frame(next_id, 0, t, &tight)],
+            _ => Vec::new(),
+        }
+    });
+
+    let after_blocker: Vec<ModelIdx> = backend
+        .dispatched_models()
+        .iter()
+        .copied()
+        .filter(|m| *m != ModelIdx(2))
+        .collect();
+    assert_eq!(
+        after_blocker.first(),
+        Some(&ModelIdx(1)),
+        "ohne Policy gilt die Generationszeit wie bisher: {:?}",
+        backend.dispatched_models()
+    );
+}
+
+#[test]
+fn the_policy_never_reorders_across_criticality_classes() {
+    use vig_core::contract_ext::MissBudget;
+
+    // Ein best-effort-Strom mit erschoepftem Budget darf **nicht** vor einen
+    // protected-Strom mit Spielraum. Der Vorrang zwischen Klassen ist die
+    // Betreiberpolicy und bleibt es.
+    let mut starving = contract(
+        Criticality::BestEffort,
+        QueuePolicy::Fifo,
+        Some(33),
+        100,
+        200,
+        &[10],
+    );
+    starving.extension = Some(ContractExtension {
+        consumer_period: Some(ms(33)),
+        miss_budget: Some(MissBudget {
+            max_misses: 0,
+            window_cycles: 10,
+            max_consecutive: None,
+        }),
+        ..ContractExtension::default()
+    });
+    let protected = contract(
+        Criticality::Protected,
+        QueuePolicy::Fifo,
+        Some(33),
+        100,
+        200,
+        &[10],
+    );
+
+    let blocker = contract(
+        Criticality::Protected,
+        QueuePolicy::Fifo,
+        None,
+        400,
+        800,
+        &[40],
+    );
+    let mut scheduler = build(
+        vec![starving.clone(), protected.clone(), blocker.clone()],
+        1,
+    );
+    scheduler.set_miss_aware_policy(true);
+    assert!(scheduler.next_cycle_is_mandatory(ModelIdx(0)));
+
+    let mut backend = Backend::default();
+    let mut next_id = 0_u64;
+    run(&mut scheduler, &mut backend, 120, |t| {
+        next_id = next_id.saturating_add(1);
+        match t {
+            0 => vec![frame(next_id, 2, t, &blocker)],
+            // Der ausgehungerte best-effort-Strom kommt zuerst an.
+            5 => vec![frame(next_id, 0, t, &starving)],
+            6 => vec![frame(next_id, 1, t, &protected)],
+            _ => Vec::new(),
+        }
+    });
+
+    let after_blocker: Vec<ModelIdx> = backend
+        .dispatched_models()
+        .iter()
+        .copied()
+        .filter(|m| *m != ModelIdx(2))
+        .collect();
+    assert_eq!(
+        after_blocker.first(),
+        Some(&ModelIdx(1)),
+        "protected geht vor, auch wenn best_effort ausgehungert ist und \
+         frueher ankam: {:?}",
+        backend.dispatched_models()
+    );
+}
+
+#[test]
+fn the_slack_is_reported_per_model() {
+    use vig_core::contract_ext::MissBudget;
+
+    let mut detector = contract(
+        Criticality::Protected,
+        QueuePolicy::Latest,
+        Some(33),
+        33,
+        66,
+        &[5],
+    );
+    detector.extension = Some(ContractExtension {
+        consumer_period: Some(ms(33)),
+        miss_budget: Some(MissBudget {
+            max_misses: 3,
+            window_cycles: 10,
+            max_consecutive: None,
+        }),
+        ..ContractExtension::default()
+    });
+    let mut scheduler = build(vec![detector.clone()], 1);
+    let slack = scheduler.budget_slack(ModelIdx(0)).unwrap();
+    assert_eq!(slack.misses_left, 3);
+    assert!(!slack.observed);
+
+    // Nichts liefern: das Budget wird aufgebraucht.
+    let mut backend = Backend::default();
+    run(&mut scheduler, &mut backend, 1_000, |_| Vec::new());
+    assert_eq!(
+        scheduler.budget_slack(ModelIdx(0)).unwrap().misses_left,
+        0,
+        "Schweigen kostet Budget"
+    );
+    assert_eq!(scheduler.metrics().weakly_hard_misses_left[0], 0);
 }

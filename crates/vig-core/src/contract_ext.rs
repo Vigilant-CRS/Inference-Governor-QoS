@@ -489,6 +489,39 @@ pub enum WeaklyHardStatus {
     },
 }
 
+/// Wie viel Spielraum eine Weakly-hard-Bedingung noch laesst (NV-24).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BudgetSlack {
+    /// Wie viele Misses das Fenster noch vertraegt.
+    pub misses_left: u32,
+    /// Wie viele Misses hintereinander noch zulaessig sind.
+    ///
+    /// `None`, wenn keine Folgengrenze vereinbart ist — dann begrenzt allein
+    /// `misses_left`.
+    pub consecutive_left: Option<u32>,
+    /// Ob ueberhaupt schon ein vollstaendiges Fenster beobachtet wurde.
+    ///
+    /// Waehrend der Aufwaermphase sind die Zahlen oben eine Obergrenze und
+    /// kein Befund. Sie als Spielraum zu lesen hiesse, Kredit auf eine
+    /// Beobachtung zu geben, die noch nicht vorliegt.
+    pub observed: bool,
+}
+
+/// Die aktuell laufende Missfolge.
+fn current_run(window: &MissWindow) -> u32 {
+    let mut run = 0_u32;
+    let span = window.cycles.min(u64::from(window.window));
+    for back in 0..span {
+        let index = window.cycles.saturating_sub(back).saturating_sub(1);
+        if window.is_miss(index) {
+            run = run.saturating_add(1);
+        } else {
+            break;
+        }
+    }
+    run
+}
+
 /// Ein begrenzter Ring ueber die letzten Verbraucherzyklen.
 ///
 /// Beobachtet, ob eine Weakly-hard-Bedingung eingehalten wird. Der Ring hat
@@ -707,6 +740,36 @@ impl MissWindow {
             };
         }
         WeaklyHardStatus::Holding
+    }
+
+    /// Wie viel Spielraum im laufenden Fenster noch bleibt (NV-24).
+    ///
+    /// Die Groesse, die eine Policy braucht: nicht „wie viele Misses waren
+    /// es", sondern „wie viele darf es noch geben". Waehrend der Aufwaermphase
+    /// wird das Fenster als voll behandelt — ein noch nicht vollstaendig
+    /// beobachtetes Fenster darf keinen Spielraum vortaeuschen, der nicht
+    /// belegt ist.
+    #[must_use]
+    pub fn slack(&self) -> BudgetSlack {
+        let (misses, _) = self.scan();
+        BudgetSlack {
+            misses_left: self.max_misses.saturating_sub(misses),
+            consecutive_left: self
+                .max_consecutive
+                .map(|limit| limit.saturating_sub(current_run(self))),
+            observed: self.cycles >= u64::from(self.window),
+        }
+    }
+
+    /// Ob ein Miss im naechsten Zyklus die Bedingung verletzen wuerde.
+    ///
+    /// Das ist der „Pflichtzyklus" aus NV-24: eine Versorgung, deren
+    /// Ausbleiben eine Zusage bricht — im Unterschied zu einer, deren
+    /// Ausbleiben noch im Budget liegt.
+    #[must_use]
+    pub fn next_is_mandatory(&self) -> bool {
+        let slack = self.slack();
+        slack.misses_left == 0 || slack.consecutive_left == Some(0)
     }
 
     /// Zaehlt Misses und die laengste Folge im letzten Fenster.
@@ -1170,5 +1233,138 @@ mod tests {
             ..budget(2, 10, None)
         };
         assert_eq!(MissWindow::new(&ext).unwrap().contract_version(), 7);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
+mod slack_tests {
+    use super::*;
+
+    fn window(m: u32, k: u32, l: Option<u32>) -> MissWindow {
+        MissWindow::new(&ContractExtension {
+            consumer_period: Some(Duration::from_millis(10).unwrap()),
+            miss_budget: Some(MissBudget {
+                max_misses: m,
+                window_cycles: k,
+                max_consecutive: l,
+            }),
+            ..ContractExtension::default()
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn an_untouched_window_has_its_full_budget() {
+        let w = window(2, 10, Some(1));
+        let slack = w.slack();
+        assert_eq!(slack.misses_left, 2);
+        assert_eq!(slack.consecutive_left, Some(1));
+        assert!(
+            !slack.observed,
+            "vor dem ersten vollstaendigen Fenster ist das eine Obergrenze, \
+             kein Befund"
+        );
+        assert!(!w.next_is_mandatory());
+    }
+
+    #[test]
+    fn each_miss_eats_the_budget() {
+        let mut w = window(2, 10, None);
+        w.record(CycleOutcome::Missed);
+        assert_eq!(w.slack().misses_left, 1);
+        assert!(!w.next_is_mandatory());
+        w.record(CycleOutcome::Missed);
+        assert_eq!(w.slack().misses_left, 0);
+        assert!(
+            w.next_is_mandatory(),
+            "der naechste Zyklus ist jetzt ein Pflichtzyklus"
+        );
+    }
+
+    #[test]
+    fn a_running_miss_streak_eats_the_consecutive_budget() {
+        let mut w = window(5, 20, Some(2));
+        w.record(CycleOutcome::Supplied);
+        w.record(CycleOutcome::Missed);
+        assert_eq!(w.slack().consecutive_left, Some(1));
+        w.record(CycleOutcome::Missed);
+        assert_eq!(w.slack().consecutive_left, Some(0));
+        assert!(
+            w.next_is_mandatory(),
+            "ein dritter Miss hintereinander wuerde L=2 reissen"
+        );
+    }
+
+    #[test]
+    fn a_supply_ends_the_streak_and_gives_the_consecutive_budget_back() {
+        let mut w = window(5, 20, Some(2));
+        w.record(CycleOutcome::Missed);
+        w.record(CycleOutcome::Missed);
+        assert!(w.next_is_mandatory());
+        w.record(CycleOutcome::Supplied);
+        assert_eq!(w.slack().consecutive_left, Some(2));
+        assert!(
+            !w.next_is_mandatory(),
+            "das Folgenbudget ist wieder voll, das Fensterbudget nicht"
+        );
+        assert_eq!(w.slack().misses_left, 3);
+    }
+
+    #[test]
+    fn the_window_is_not_reset_by_a_violation() {
+        // NV-24 verlangt es ausdruecklich: unveraenderte Nenner, keine
+        // kuenstliche Fensterzurueckstellung. Ein Zaehler, der sich bei
+        // Ueberlast selbst zurueckstellt, meldet nie eine Verletzung.
+        let mut w = window(1, 5, None);
+        for _ in 0..5 {
+            w.record(CycleOutcome::Missed);
+        }
+        assert!(matches!(w.status(), WeaklyHardStatus::Violated { .. }));
+        assert_eq!(w.observed_cycles(), 5);
+        assert_eq!(w.misses_in_window(), 5, "nichts wurde vergessen");
+        assert_eq!(w.slack().misses_left, 0);
+    }
+
+    #[test]
+    fn recovery_takes_as_long_as_the_window_is_wide() {
+        // K=5, M=1: nach fuenf Misses braucht es vier gute Zyklen, bis nur
+        // noch ein Miss im Fenster liegt. Nicht einer und nicht fuenf —
+        // genau so viele, wie das Fenster gleitet.
+        let mut w = window(1, 5, None);
+        for _ in 0..5 {
+            w.record(CycleOutcome::Missed);
+        }
+        assert!(matches!(w.status(), WeaklyHardStatus::Violated { .. }));
+
+        for _ in 0..3 {
+            w.record(CycleOutcome::Supplied);
+        }
+        assert!(
+            matches!(w.status(), WeaklyHardStatus::Violated { .. }),
+            "drei gute Zyklen lassen noch zwei Misses im Fenster"
+        );
+
+        w.record(CycleOutcome::Supplied);
+        assert_eq!(w.status(), WeaklyHardStatus::Holding);
+        assert_eq!(w.slack().misses_left, 0, "aber ohne jeden Spielraum");
+        assert!(w.next_is_mandatory());
+
+        w.record(CycleOutcome::Supplied);
+        assert_eq!(
+            w.slack().misses_left,
+            1,
+            "erst jetzt ist das Fenster sauber"
+        );
+        assert!(!w.next_is_mandatory());
+    }
+
+    #[test]
+    fn a_fully_observed_window_says_so() {
+        let mut w = window(2, 4, None);
+        for _ in 0..4 {
+            w.record(CycleOutcome::Supplied);
+        }
+        assert!(w.slack().observed);
     }
 }
