@@ -108,10 +108,11 @@ hier, weil „umgesetzt" und „wirksam" verschiedene Aussagen sind:
 - **NV-20 — Releasequalifikation.** Feature- und Hardwarematrix, Update und
   Rollback ohne verlorene Lease-Generation, Runbook, Supportgrenzen.
   SBOM, signierbare Artefakte und `cargo auditable` sind da; das
-  [Runbook](runbook.md) und die Fehlerinjektion ohne GPU
-  (`crates/vig-gateway/tests/fault_injection.rs`) ebenfalls. Offen bleiben
-  Update und Rollback als gepruefter Ablauf und die Freigabe durch einen
-  Pilotverantwortlichen.
+  [Runbook](runbook.md), die [Supportmatrix](support-matrix.md) und die
+  Fehlerinjektion ohne GPU (`crates/vig-gateway/tests/fault_injection.rs`)
+  ebenfalls. Der Update- und Rollback-Pfad ist geprueft — und hat dabei einen
+  echten Fehler zutage gebracht (Abgleichs-Basislinie, Commit `b6f0777`).
+  Offen bleibt die Freigabe durch einen Pilotverantwortlichen.
 - **Zweite Hardware.** Die Logik ist portabel, die Zahlen sind es nicht. Auf
   `aarch64` ist der Kern unter Emulation gebaut und getestet; ueber Laufzeit,
   Durchsatz und Interferenz auf Jetson sagt das nichts
