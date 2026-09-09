@@ -159,6 +159,23 @@ where
         return GuardVerdict::Clear;
     }
 
+    // Bis wann der Kandidat ueberhaupt Einfluss hat.
+    //
+    // Eine Ankunft, die **nach** seinem Ende erwartet wird, kann er nicht
+    // verspaeten: der Slot ist dann wieder frei. Sie trotzdem zu pruefen
+    // schreibt ihm die Verzoegerung zu, die die kumulative Reservierung der
+    // *dazwischenliegenden* Ankuenfte erzeugt — und bestraft ihn fuer eine
+    // Ueberlast, an der er unschuldig ist.
+    //
+    // Ohne diese Grenze staut sich der Pessimismus mit der Zahl der erwarteten
+    // Ankuenfte im Horizont: bei 25-ms-Periode und 100-ms-Horizont sind das
+    // vier, und die vierte ist praktisch immer knapp. Im Dauerlauf hat genau
+    // das zwei von drei Stroemen dauerhaft ausgesperrt, waehrend jeder
+    // Kurzlauf unauffaellig blieb.
+    let Some(candidate_finish) = now.checked_add(candidate_runtime) else {
+        return GuardVerdict::Clear;
+    };
+
     // Die betrachteten Ankuenfte werden **kumulativ** reserviert, in der
     // Reihenfolge ihres Eintreffens. Wird jede einzeln gegen dieselbe leere
     // Belegung geprueft, passen zwei geschuetzte Jobs jeweils fuer sich und
@@ -180,6 +197,12 @@ where
     let mut baseline = slots.snapshot();
 
     for expected in ordered.iter() {
+        // Sortiert nach Ankunftszeit: ab hier ist der Kandidat schon fertig,
+        // und alles Weitere geht ihn nichts mehr an.
+        if expected.at >= candidate_finish {
+            break;
+        }
+
         let without = feasible_for(&baseline, expected);
         let with = feasible_for(&hypothetical, expected);
 
