@@ -25,7 +25,7 @@ pub mod fingerprint;
 pub mod request;
 
 pub use capabilities::{Capabilities, Extension};
-pub use fingerprint::fingerprint;
+pub use fingerprint::{Observation, fingerprint, observe};
 pub use request::{text_request, zero_request};
 
 pub use client::{

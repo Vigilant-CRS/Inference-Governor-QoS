@@ -16,8 +16,10 @@
 // heimlich druckt.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+mod artifact;
 mod calibrate;
 mod doctor;
+mod identity;
 mod profile;
 mod serve;
 mod verify;
@@ -53,6 +55,9 @@ enum Command {
         /// Number of measurement runs per variant.
         #[arg(long, default_value_t = profile::DEFAULT_SAMPLES)]
         samples: usize,
+        /// Where the numbers come from and what they are claimed valid for.
+        #[command(flatten)]
+        identity: identity::IdentityArgs,
     },
     /// Measure runtime **and** mutual interference, and write a complete
     /// configuration.
@@ -73,6 +78,9 @@ enum Command {
         /// comments, and your comments are the reasons.
         #[arg(short, long, value_name = "FILE")]
         out: Option<PathBuf>,
+        /// Where the numbers come from and what they are claimed valid for.
+        #[command(flatten)]
+        identity: identity::IdentityArgs,
     },
     /// Start the governor.
     Serve {
@@ -132,12 +140,17 @@ async fn run() -> ExitCode {
     // 90-KB-Future auf dem Stack des Aufrufers.
     let result = match cli.command {
         Command::Doctor { config, offline } => Box::pin(doctor::run(&config, offline)).await,
-        Command::Profile { config, samples } => Box::pin(profile::run(&config, samples)).await,
+        Command::Profile {
+            config,
+            samples,
+            identity,
+        } => Box::pin(profile::run(&config, samples, &identity)).await,
         Command::Calibrate {
             config,
             samples,
             out,
-        } => Box::pin(calibrate::run(&config, samples, out.as_deref())).await,
+            identity,
+        } => Box::pin(calibrate::run(&config, samples, out.as_deref(), &identity)).await,
         Command::Serve {
             config,
             listen,

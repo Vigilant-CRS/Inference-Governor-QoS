@@ -272,6 +272,26 @@ async fn startup_checks(
             ),
             crate::verify::Trust::Verified => {}
         }
+
+        // NV-03: was der Metadaten-Fingerabdruck nicht sehen kann.
+        let Some(comparison) = entry.manifest.as_ref() else {
+            continue;
+        };
+        for field in comparison.divergences() {
+            if let vig_config::manifest::FieldVerdict::Divergent { declared, actual } =
+                &field.verdict
+            {
+                tracing::warn!(
+                    model = %entry.logical,
+                    backend_model = %entry.physical,
+                    field = %field.field,
+                    %declared,
+                    %actual,
+                    identity_bearing = field.identity_bearing,
+                    "Profilmanifest weicht von der laufenden Umgebung ab (NV-03)."
+                );
+            }
+        }
     }
     let unverified = crate::verify::unverified_models(&checked);
 

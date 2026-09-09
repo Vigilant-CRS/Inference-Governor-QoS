@@ -26,6 +26,7 @@
 
 #![allow(clippy::print_stdout)]
 
+use crate::identity::{ArtifactLookup, IdentityArgs, MeasuredUnder, artifact_of, assemble};
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::Instant;
@@ -54,6 +55,7 @@ const SAMPLES: usize = 200;
 pub(crate) async fn run(
     path: &Path,
     samples: usize,
+    identity: &IdentityArgs,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let text = std::fs::read_to_string(path)?;
     let config = Config::from_yaml(&text)?;
@@ -105,19 +107,35 @@ pub(crate) async fn run(
         for physical in names {
             // Die generierten OIP-Typen sind gross; ungeboxt landet das
             // Future auf dem Stack des Aufrufers.
-            match Box::pin(profile_variant(&client, physical, samples, &server_meta)).await {
+            match Box::pin(profile_variant(
+                &client,
+                physical,
+                samples,
+                &server_meta,
+                identity,
+            ))
+            .await
+            {
                 Ok(measured) => {
                     println!("      - id: <unveraendert lassen>");
                     println!("        backend_model: {physical}");
-                    println!(
-                        "        profile: {{ p50_us: {}, p95_us: {}, p99_us: {}, samples: {}, \
-                         fingerprint: \"{}\" }}",
-                        measured.p50_us,
-                        measured.p95_us,
-                        measured.p99_us,
-                        measured.samples,
-                        measured.fingerprint
-                    );
+                    // Blockform statt Flow-Mapping: das Manifest ist ein
+                    // verschachtelter Block und passt nicht in eine Zeile.
+                    println!("        profile:");
+                    println!("          p50_us: {}", measured.p50_us);
+                    println!("          p95_us: {}", measured.p95_us);
+                    println!("          p99_us: {}", measured.p99_us);
+                    println!("          samples: {}", measured.samples);
+                    println!("          fingerprint: \"{}\"", measured.fingerprint);
+                    match vig_config::manifest::to_yaml_block(&measured.manifest, 12) {
+                        Ok(block) => {
+                            println!("          manifest:");
+                            print!("{block}");
+                        }
+                        Err(e) => {
+                            println!("          # Manifest nicht darstellbar: {e}");
+                        }
+                    }
                     if measured.p99_us > measured.p50_us.saturating_mul(3) {
                         println!(
                             "        # WARNUNG p99 liegt beim {}-fachen des Medians. Eine so\n\
@@ -154,6 +172,8 @@ struct Measured {
     samples: u32,
     /// G-010: unter welcher Umgebung diese Zahlen entstanden sind.
     fingerprint: String,
+    /// NV-03: woher sie stammen und wofuer sie gelten.
+    manifest: vig_config::manifest::ProfileManifest,
 }
 
 async fn profile_variant(
@@ -161,6 +181,7 @@ async fn profile_variant(
     model: &str,
     samples: usize,
     server: &ServerMetadataResponse,
+    identity: &IdentityArgs,
 ) -> Result<Measured, BackendError> {
     let metadata = client.model_metadata(model).await?;
     let request = zero_request(model, &metadata)?;
@@ -190,12 +211,35 @@ async fn profile_variant(
         measurements.get(index).copied().unwrap_or(0)
     };
 
+    let observation = vig_backend_triton::observe(server, &metadata);
+    let artifact = match artifact_of(identity, model, &observation.versions) {
+        ArtifactLookup::Found(found) => found,
+        ArtifactLookup::NotRequested => vig_config::manifest::ArtifactIdentity::default(),
+        ArtifactLookup::Failed(reason) => {
+            // Kein Abbruch: ein Profil ohne Digest ist ein unbelegtes Profil,
+            // kein falsches. Der Betreiber soll aber wissen, warum.
+            eprintln!("    Artefakt-Digest nicht bildbar ({reason}); Feld bleibt unknown");
+            vig_config::manifest::ArtifactIdentity::default()
+        }
+    };
+
     Ok(Measured {
         p50_us: pick(50),
         p95_us: pick(95),
         p99_us: pick(99),
         samples: u32::try_from(measurements.len()).unwrap_or(u32::MAX),
         fingerprint: vig_backend_triton::fingerprint(server, &metadata),
+        manifest: assemble(
+            &observation,
+            artifact,
+            identity,
+            MeasuredUnder {
+                warmup: u32::try_from(WARMUP).unwrap_or(u32::MAX),
+                concurrency: 1,
+                batch_size: 1,
+            },
+            crate::identity::now_rfc3339(),
+        ),
     })
 }
 

@@ -24,6 +24,7 @@
 //! Der Kalibrator fasst deshalb Vertraege nicht an. Er fuellt Profile,
 //! schlaegt eine Slotzahl vor und nennt Modellpaare, die sich nicht vertragen.
 
+use crate::identity::IdentityArgs;
 use crate::profile::WARMUP;
 use std::path::Path;
 use std::process::ExitCode;
@@ -31,6 +32,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use vig_backend_triton::TritonClient;
+use vig_config::manifest::{ArtifactIdentity, ProfileManifest};
 use vig_config::schema::{Config, ProfileConfig};
 use vig_protocol_oip::inference::{
     ModelInferRequest, ModelMetadataResponse, ServerMetadataRequest, ServerMetadataResponse,
@@ -73,13 +75,18 @@ struct Measured {
 }
 
 impl Measured {
-    fn to_config(&self, fingerprint: Option<String>) -> ProfileConfig {
+    fn to_config(
+        &self,
+        fingerprint: Option<String>,
+        manifest: Option<ProfileManifest>,
+    ) -> ProfileConfig {
         ProfileConfig {
             p50_us: self.p50_us,
             p95_us: self.p95_us,
             p99_us: self.p99_us,
             samples: self.samples,
             fingerprint,
+            manifest,
         }
     }
 }
@@ -160,6 +167,8 @@ struct VariantMeasurement {
     solo: Measured,
     under_load: Vec<Measured>,
     fingerprint: String,
+    /// Woher diese Zahlen stammen und wofuer sie gelten (NV-03).
+    manifest: ProfileManifest,
     request: ModelInferRequest,
 }
 
@@ -172,6 +181,7 @@ pub(crate) async fn run(
     path: &Path,
     samples: usize,
     out: Option<&Path>,
+    identity: &IdentityArgs,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let text = std::fs::read_to_string(path)?;
     let mut config = Config::from_yaml(&text)?;
@@ -227,6 +237,30 @@ pub(crate) async fn run(
                 }
             };
             let fingerprint = vig_backend_triton::fingerprint(&server, &metadata);
+            let observation = vig_backend_triton::observe(&server, &metadata);
+            let artifact = match crate::identity::artifact_of(
+                identity,
+                backend_model,
+                &observation.versions,
+            ) {
+                crate::identity::ArtifactLookup::Found(found) => found,
+                crate::identity::ArtifactLookup::NotRequested => ArtifactIdentity::default(),
+                crate::identity::ArtifactLookup::Failed(reason) => {
+                    eprintln!("    Artefakt-Digest nicht bildbar ({reason}); Feld bleibt unknown");
+                    ArtifactIdentity::default()
+                }
+            };
+            let manifest = crate::identity::assemble(
+                &observation,
+                artifact,
+                identity,
+                crate::identity::MeasuredUnder {
+                    warmup: u32::try_from(WARMUP).unwrap_or(u32::MAX),
+                    concurrency: 1,
+                    batch_size: 1,
+                },
+                crate::identity::now_rfc3339(),
+            );
 
             for _ in 0..WARMUP {
                 let _ = client.infer(request.clone()).await;
@@ -261,6 +295,7 @@ pub(crate) async fn run(
                 solo,
                 under_load,
                 fingerprint,
+                manifest,
                 request,
             });
         }
@@ -486,8 +521,18 @@ fn apply(config: &mut Config, measurements: &[VariantMeasurement], pairs: &[Pair
             else {
                 continue;
             };
-            variant.profile = Some(m.solo.to_config(Some(m.fingerprint.clone())));
-            variant.under_load = m.under_load.iter().map(|l| l.to_config(None)).collect();
+            variant.profile = Some(
+                m.solo
+                    .to_config(Some(m.fingerprint.clone()), Some(m.manifest.clone())),
+            );
+            // Die Laststufen entstehen in derselben Umgebung wie das
+            // Sologprofil. Das Manifest ein zweites Mal danebenzuschreiben
+            // wuerde die Datei aufblaehen, ohne eine Frage zu beantworten.
+            variant.under_load = m
+                .under_load
+                .iter()
+                .map(|l| l.to_config(None, None))
+                .collect();
         }
     }
     for pair in pairs {

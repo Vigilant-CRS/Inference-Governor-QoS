@@ -23,6 +23,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 tonic = { version = "0.14.6", features = ["tls-ring"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# NV-03: der Artefakt-Digest ist das einzige Feld des Profilmanifests, das
+# ausgetauschte Gewichte unter gleicher Versionsnummer faengt. Ein selbst
+# gebauter Hash waere hier die falsche Sparsamkeit.
+sha2 = "0.10"
 
 [lints]
 workspace = true

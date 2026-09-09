@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 use vig_backend_triton::TritonClient;
+use vig_config::manifest::{ManifestComparison, ManifestVerdict, ProfileManifest};
 use vig_config::schema::Resolved;
 use vig_core::ModelIdx;
 use vig_protocol_oip::inference::{ServerMetadataRequest, ServerMetadataResponse};
@@ -41,12 +42,30 @@ pub(crate) struct Checked {
     pub physical: String,
     /// Der Befund.
     pub trust: Trust,
+    /// Der Feldvergleich des Profilmanifests, sofern eines hinterlegt ist
+    /// (NV-03).
+    ///
+    /// Ergaenzt den Fingerabdruck, ersetzt ihn nicht: der Hash sagt, *dass*
+    /// sich die Metadatenlage geaendert hat, das Manifest sagt *was* — und es
+    /// faengt zusaetzlich den Fall, den der Hash nicht sehen kann, naemlich
+    /// ausgetauschte Gewichte unter gleicher Versionsnummer.
+    pub manifest: Option<ManifestComparison>,
 }
 
 impl Checked {
     /// Ist das Profil dieser Variante nachweislich ungueltig?
-    pub(crate) const fn is_mismatch(&self) -> bool {
-        matches!(self.trust, Trust::Mismatch { .. })
+    ///
+    /// Nachweislich heisst: ein Widerspruch, keine Luecke. Ein Manifest voller
+    /// `unknown` — etwa weil das Modellrepository nicht sichtbar ist — macht
+    /// ein Profil nicht ungueltig; es macht es unbelegt, und das steht in der
+    /// Ausgabe von `doctor`.
+    pub(crate) fn is_mismatch(&self) -> bool {
+        if matches!(self.trust, Trust::Mismatch { .. }) {
+            return true;
+        }
+        self.manifest
+            .as_ref()
+            .is_some_and(|c| c.verdict() == ManifestVerdict::Invalid)
     }
 }
 
@@ -89,30 +108,56 @@ pub(crate) async fn check(resolved: &Resolved) -> Vec<Checked> {
                 .get(i)
                 .and_then(|v| v.get(j))
                 .and_then(Option::as_ref);
+            let declared_manifest = resolved
+                .profile_manifests
+                .get(i)
+                .and_then(|v| v.get(j))
+                .and_then(Option::as_ref);
 
-            let trust = match (server_meta.get(&endpoint), declared) {
-                (_, None) => Trust::Missing,
-                (None, Some(_)) => {
+            // Einmal holen, zweimal auswerten: Fingerabdruck und Manifest
+            // lesen dieselben Metadaten.
+            let metadata = match client.model_metadata(physical).await {
+                Ok(meta) => Some(meta),
+                Err(e) => {
+                    tracing::debug!(model = %physical, error = %e, "Modellmetadaten nicht abrufbar");
+                    None
+                }
+            };
+
+            let trust = match (server_meta.get(&endpoint), declared, metadata.as_ref()) {
+                (_, None, _) => Trust::Missing,
+                (None, Some(_), _) => {
                     Trust::Unavailable(format!("{endpoint}: Servermetadaten nicht abrufbar"))
                 }
-                (Some(server), Some(declared)) => match client.model_metadata(physical).await {
-                    Ok(meta) => {
-                        let actual = vig_backend_triton::fingerprint(server, &meta);
-                        if actual == *declared {
-                            Trust::Verified
-                        } else {
-                            Trust::Mismatch {
-                                declared: declared.clone(),
-                                actual,
-                            }
+                (Some(_), Some(_), None) => {
+                    Trust::Unavailable(format!("{physical}: Modellmetadaten nicht abrufbar"))
+                }
+                (Some(server), Some(declared), Some(meta)) => {
+                    let actual = vig_backend_triton::fingerprint(server, meta);
+                    if actual == *declared {
+                        Trust::Verified
+                    } else {
+                        Trust::Mismatch {
+                            declared: declared.clone(),
+                            actual,
                         }
                     }
-                    Err(e) => Trust::Unavailable(format!("{physical}: {e}")),
-                },
+                }
             };
+
+            let manifest = declared_manifest.map(|declared| {
+                let observed = observed_manifest(
+                    server_meta.get(&endpoint),
+                    metadata.as_ref(),
+                    resolved.model_repository.as_deref(),
+                    physical,
+                );
+                ManifestComparison::new(declared, &observed)
+            });
 
             results.push(Checked {
                 model,
+                manifest,
                 logical: logical.clone(),
                 physical: (*physical).clone(),
                 trust,
@@ -120,6 +165,46 @@ pub(crate) async fn check(resolved: &Resolved) -> Vec<Checked> {
         }
     }
     results
+}
+
+/// Das Manifest, wie es sich **jetzt** beobachten laesst (NV-03).
+///
+/// Was nicht beobachtbar ist, bleibt `None` und damit `unknown`. Geraet,
+/// Treiber und Aufteilung stehen bewusst nicht darin: sie sind von hier aus
+/// nicht messbar, und ein geratener Wert waere schlimmer als eine Luecke.
+/// Ihre Erfassung ist NV-04.
+fn observed_manifest(
+    server: Option<&ServerMetadataResponse>,
+    model: Option<&vig_protocol_oip::inference::ModelMetadataResponse>,
+    repository: Option<&str>,
+    backend_model: &str,
+) -> ProfileManifest {
+    let mut manifest = ProfileManifest::default();
+    if let (Some(server), Some(model)) = (server, model) {
+        let observation = vig_backend_triton::observe(server, model);
+        manifest.runtime.server = observation.server;
+        manifest.runtime.server_version = observation.server_version;
+        manifest.runtime.platform = observation.platform;
+        manifest.artifact.versions = observation.versions;
+    }
+    if let Some(repository) = repository {
+        let directory = std::path::Path::new(repository).join(backend_model);
+        match crate::artifact::digest_of(&directory) {
+            Ok(found) => {
+                manifest.artifact.digest = Some(found.digest);
+                manifest.artifact.source = Some(found.source);
+                manifest.artifact.bytes = Some(found.bytes);
+            }
+            Err(e) => {
+                tracing::debug!(
+                    path = %directory.display(),
+                    error = %e,
+                    "Artefakt-Digest nicht bildbar; Feld bleibt unknown"
+                );
+            }
+        }
+    }
+    manifest
 }
 
 /// Die I/O-Signatur einer Variante, so wie das Backend sie meldet.

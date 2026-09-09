@@ -159,10 +159,30 @@ Nothing about the hardware is guessed:
 | the online estimator | the observed p95 during operation, which overrides the offline profile whenever it is higher |
 | the margin controller | a per-model safety factor that tightens on under-prediction and relaxes when predictions hold |
 
-Every profile carries a **fingerprint** of the environment it was measured in.
+Every profile carries a **manifest** of the environment it was measured in:
+which artifact (a SHA-256 digest of the model files), which runtime, which
+device, how the device was partitioned, under which measurement conditions,
+and up to which operating point the numbers are claimed to hold.
+
 If the environment changes, the profile is not wrong — it is no longer
 authoritative, and the governor plans more conservatively until new
-measurements exist.
+measurements exist. `vig doctor` names the field that changed, not just that
+something did.
+
+Two rules keep this honest:
+
+* **A missing field is `unknown`, never `verified`.** Silence on both sides is
+  not agreement. A profile whose device was never recorded is a profile
+  without a recorded device — not a passed check.
+* **A contradiction invalidates; a gap does not.** A different driver version
+  means the numbers were measured elsewhere. A driver version nobody wrote
+  down means nobody knows. These are different states, and the governor
+  reports them differently.
+
+The artifact digest is the part that needs the model repository on disk
+(`backend.model_repository`). It is the only way to see the most common silent
+failure: a weight file replaced under the same version number. Nothing in the
+inference protocol reveals it.
 
 Contracts are never measured. What has to be fresh, which stream matters more,
 which deadline applies — these are statements about what the robot needs, and

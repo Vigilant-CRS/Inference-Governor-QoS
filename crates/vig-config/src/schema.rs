@@ -54,6 +54,18 @@ pub struct BackendConfig {
     /// Modellpaare, die nicht gleichzeitig laufen duerfen (ADR-0006).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub no_corun: Vec<[String; 2]>,
+    /// Pfad zum Modellrepository des Backends, sofern es sichtbar ist (NV-03).
+    ///
+    /// Nur dafuer da, den Artefakt-Digest eines Profils zu pruefen. Ueber das
+    /// Inferenzprotokoll ist nicht erkennbar, ob jemand die Gewichtsdatei
+    /// unter derselben Versionsnummer ausgetauscht hat; im Dateisystem schon.
+    ///
+    /// Ist der Pfad nicht gesetzt oder das Repository nicht erreichbar —
+    /// entfernter Server, Container ohne gemeinsames Volume — bleibt der
+    /// Digest `unknown`. Das ist kein Fehler, sondern eine Luecke, und
+    /// `doctor` nennt sie beim Namen, statt sie als geprueft auszugeben.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_repository: Option<String>,
     /// Sicherheitsmarge auf die Laufzeitprognose, in Prozent (Spec 13.2).
     #[serde(default = "default_margin_percent")]
     pub safety_margin_percent: u32,
@@ -534,6 +546,26 @@ fn fingerprints_of(model: &ModelConfig) -> Vec<Option<String>> {
         .collect()
 }
 
+/// Die Profilmanifeste eines Modells, in Variantenreihenfolge (NV-03).
+///
+/// Ein Profil ohne Manifestblock liefert hier ein Legacy-Manifest, kein
+/// `None` — der Unterschied zwischen "kein Profil" und "Profil ohne
+/// Herkunftsangabe" soll nicht verschwinden. Wo gar kein Profil hinterlegt
+/// ist, steht `None`.
+fn manifests_of(model: &ModelConfig) -> Vec<Option<crate::manifest::ProfileManifest>> {
+    model
+        .variants
+        .iter()
+        .map(|v| {
+            v.profile.as_ref().map(|p| {
+                p.manifest
+                    .clone()
+                    .unwrap_or_else(crate::manifest::ProfileManifest::legacy)
+            })
+        })
+        .collect()
+}
+
 /// Ein Laufzeitprofil je Belegungsgrad.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -554,6 +586,17 @@ pub struct ProfileConfig {
     /// werden — `doctor` sagt das dann auch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
+    /// Woher dieses Profil stammt und wofuer es gilt (NV-03).
+    ///
+    /// Der Fingerabdruck oben sagt, *ob sich die Metadatenlage geaendert hat*.
+    /// Das Manifest sagt, *was* gemessen wurde, *worauf* und *unter welchen
+    /// Bedingungen* — und faengt damit den Fall, den ein Hash ueber Metadaten
+    /// nicht fangen kann: dieselbe Signatur, andere Gewichte.
+    ///
+    /// Fehlt es, ist das Profil ein Legacy-Profil. Es bleibt nutzbar, gilt
+    /// aber als unbelegt, nicht als geprueft.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<crate::manifest::ProfileManifest>,
 }
 
 /// Die aufgeloeste, gepruefte Konfiguration.
@@ -574,8 +617,16 @@ pub struct Resolved {
     /// `None`, wenn das Profil vor Einfuehrung von G-010 entstanden ist oder
     /// von Hand geschrieben wurde.
     pub profile_fingerprints: Vec<Vec<Option<String>>>,
+    /// Das Profilmanifest je `[Modell][Variante]` (NV-03).
+    ///
+    /// `None`, wo kein Profil hinterlegt ist. Ein Profil ohne Manifestblock
+    /// erscheint als Legacy-Manifest (Revision 1), in dem jedes Feld
+    /// `unknown` ist.
+    pub profile_manifests: Vec<Vec<Option<crate::manifest::ProfileManifest>>>,
     /// Der Backend-Endpunkt je Modell, in Indexreihenfolge.
     pub model_endpoints: Vec<String>,
+    /// Pfad zum Modellrepository, sofern konfiguriert (NV-03).
+    pub model_repository: Option<String>,
     /// Ob das Backendmodell nur ueber den Stream-Endpunkt antwortet.
     pub model_decoupled: Vec<bool>,
     /// Die Sicherheitsmarge.
@@ -963,6 +1014,7 @@ impl Config {
         let mut contracts = ArrayVec::new();
         let mut backend_models = Vec::new();
         let mut profile_fingerprints: Vec<Vec<Option<String>>> = Vec::new();
+        let mut profile_manifests: Vec<Vec<Option<crate::manifest::ProfileManifest>>> = Vec::new();
 
         for (name, model) in &self.models {
             let path = format!("models.{name}");
@@ -980,6 +1032,7 @@ impl Config {
                     }
                     backend_models.push(physical);
                     profile_fingerprints.push(fingerprints_of(model));
+                    profile_manifests.push(manifests_of(model));
                 }
                 None => return None,
             }
@@ -1000,6 +1053,8 @@ impl Config {
             model_names,
             backend_models,
             profile_fingerprints,
+            profile_manifests,
+            model_repository: self.backend.model_repository.clone(),
             model_endpoints,
             model_decoupled,
             io_signatures,

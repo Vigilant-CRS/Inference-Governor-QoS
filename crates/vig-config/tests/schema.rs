@@ -415,3 +415,99 @@ models:
             .is_err()
     );
 }
+
+// ---------------------------------------------------------------------------
+// NV-03 — Profilmanifest v2
+// ---------------------------------------------------------------------------
+
+/// Ein Profil aus der Zeit vor NV-03: nur Quantile, kein Fingerabdruck, kein
+/// Manifest. Es muss unveraendert nutzbar bleiben.
+const LEGACY_V0: &str = include_str!("golden/profile-legacy-v0.yaml");
+/// Ein Profil aus der G-010-Zeit: mit Fingerabdruck, ohne Manifest.
+const LEGACY_V1: &str = include_str!("golden/profile-legacy-v1.yaml");
+/// Ein Profil mit vollstaendigem Manifest.
+const MANIFEST_V2: &str = include_str!("golden/profile-manifest-v2.yaml");
+
+#[test]
+fn a_profile_from_before_fingerprints_still_resolves() {
+    let resolved = Config::from_yaml(LEGACY_V0).unwrap().resolve().unwrap();
+    let detector = resolved.model_index("detector").unwrap();
+    assert_eq!(resolved.profile_fingerprints[detector.get()][0], None);
+    let manifest = resolved.profile_manifests[detector.get()][0]
+        .as_ref()
+        .unwrap();
+    assert!(
+        manifest.is_legacy(),
+        "ein Profil ohne Manifestblock ist ein Legacy-Profil"
+    );
+    assert!(manifest.is_empty());
+}
+
+#[test]
+fn a_profile_with_only_a_fingerprint_is_still_legacy() {
+    let resolved = Config::from_yaml(LEGACY_V1).unwrap().resolve().unwrap();
+    let detector = resolved.model_index("detector").unwrap();
+    assert_eq!(
+        resolved.profile_fingerprints[detector.get()][0].as_deref(),
+        Some("00112233445566aa")
+    );
+    let manifest = resolved.profile_manifests[detector.get()][0]
+        .as_ref()
+        .unwrap();
+    assert!(
+        manifest.is_legacy(),
+        "ein Hash ist keine Herkunftsangabe; er laesst sich nicht zurueckrechnen"
+    );
+}
+
+#[test]
+fn a_manifest_reaches_the_resolved_configuration() {
+    let resolved = Config::from_yaml(MANIFEST_V2).unwrap().resolve().unwrap();
+    let detector = resolved.model_index("detector").unwrap();
+    let manifest = resolved.profile_manifests[detector.get()][0]
+        .as_ref()
+        .unwrap();
+    assert!(!manifest.is_legacy());
+    assert_eq!(
+        manifest.artifact.digest.as_deref(),
+        Some("sha256:8f1c0e4b2a7d6f3e5c9b0a1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5e6f70")
+    );
+    assert_eq!(manifest.device.name.as_deref(), Some("NVIDIA RTX A2000"));
+    assert_eq!(manifest.resources.instances, Some(1));
+    assert_eq!(manifest.measurement.independent_runs, Some(3));
+    assert_eq!(manifest.validity.max_occupancy_pct, Some(92));
+    assert_eq!(resolved.model_repository.as_deref(), Some("/models"));
+}
+
+#[test]
+fn a_manifest_survives_the_full_configuration_roundtrip() {
+    // Nicht nur der Manifestblock fuer sich, sondern eingebettet in eine
+    // vollstaendige Konfiguration: `vig calibrate` schreibt genau so.
+    let before = Config::from_yaml(MANIFEST_V2).unwrap();
+    let text = serde_norway::to_string(&before).unwrap();
+    let after = Config::from_yaml(&text).unwrap();
+    let a = before.models["detector"].variants[0]
+        .profile
+        .as_ref()
+        .unwrap()
+        .manifest
+        .as_ref()
+        .unwrap();
+    let b = after.models["detector"].variants[0]
+        .profile
+        .as_ref()
+        .unwrap()
+        .manifest
+        .as_ref()
+        .unwrap();
+    assert_eq!(a, b);
+}
+
+#[test]
+fn an_unknown_manifest_key_is_rejected() {
+    // Ein Tippfehler in einem Herkunftsfeld darf nicht als `unknown`
+    // durchgehen — sonst waere das Feld still leer, und still leer ist genau
+    // das, was NV-03 verhindern soll.
+    let broken = MANIFEST_V2.replace("compute_capability:", "compute_capabilty:");
+    assert!(Config::from_yaml(&broken).is_err());
+}

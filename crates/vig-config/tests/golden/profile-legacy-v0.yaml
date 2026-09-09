@@ -1,0 +1,29 @@
+# Golden: ein Profil aus der Zeit vor G-010 — Quantile ohne Fingerabdruck.
+# Diese Datei darf sich nicht aendern; sie belegt, dass alte Konfigurationen
+# unveraendert weiterlaufen (NV-03, Rueckfall).
+version: 1
+
+backend:
+  type: triton
+  grpc_endpoint: "127.0.0.1:8001"
+  slots: 1
+  safety_margin_percent: 110
+
+models:
+  detector:
+    class: protected
+    queue:
+      policy: latest
+      capacity: 1
+      overflow: reject_new
+    contract:
+      period_ms: 33
+      deadline_ms: 33
+      max_age_ms: 66
+    variants:
+      - id: main
+        backend_model: rfdetr
+        quality:
+          value: 1.00
+          source: user_declared
+        profile: { p50_us: 10000, p95_us: 13000, p99_us: 16000, samples: 2000 }

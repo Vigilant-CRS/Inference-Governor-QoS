@@ -21,8 +21,9 @@ before trusting the governor on a device we have never seen.
 The distinction matters more than it looks: **the logic is portable, the
 numbers are not.** A profile is a measurement under conditions. Change the
 conditions and it is not wrong — it is no longer authoritative. The governor
-enforces this itself: every profile carries a fingerprint of the environment,
-and it plans more conservatively when the fingerprint no longer matches.
+enforces this itself: every profile carries a manifest of the environment —
+artifact digest, runtime, device, partitioning, measurement conditions — and it
+plans more conservatively when that manifest no longer matches what it sees.
 
 ## The procedure
 
@@ -62,7 +63,12 @@ starts nothing.
 ### 3. Measure this machine
 
 ```bash
-vig calibrate -c your.yaml -o measured.yaml --samples 200
+vig calibrate -c your.yaml -o measured.yaml --samples 200 \
+  --model-repository /models \
+  --device "NVIDIA RTX A2000" --compute-capability 8.6 \
+  --driver 560.35.03 --library-version "TensorRT 10.3.0" \
+  --partition exclusive --instances 1 --rate-limiter off \
+  --independent-runs 2 --valid-up-to-occupancy-pct 92
 ```
 
 Measures solo runtime, mutual interference between model pairs, and — for
@@ -71,8 +77,18 @@ between machines.** The one time we let a stale number stand, a generation rate
 was off by a factor of 4.4 and the look-ahead planned accordingly wrong for
 weeks.
 
+The flags after `--samples` are the part the inference protocol cannot tell us.
+The server knows its own name and version; it does not know which GPU it runs
+on, which driver, how the card is partitioned, or which bytes it loaded. What
+you do not state stays `unknown` — which is honest, and different from
+`verified`. `--model-repository` is what makes the artifact digest possible;
+without it, a weight file swapped under the same version number stays
+invisible.
+
 Run it twice. If p95 differs by more than about 10 % between runs, something
-else was using the GPU.
+else was using the GPU. When you merge two runs into one profile, say so with
+`--independent-runs 2`: two hundred samples from one process start are not the
+same evidence as two hundred from two.
 
 ### 4. Establish the baseline
 

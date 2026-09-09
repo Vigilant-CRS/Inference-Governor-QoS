@@ -224,8 +224,11 @@ usually means the backend stopped answering.
 3. Check `vig_quarantined_slots`. If it equals your slot count, the backend has
    stopped answering and nothing can start.
 4. Re-run `vig calibrate` after any driver, backend or hardware change. Profiles
-   carry a fingerprint of the environment they were measured in, and the
-   governor will tell you when it no longer matches.
+   carry a manifest of the environment they were measured in — artifact digest,
+   runtime, device, partitioning — and the governor names the field that no
+   longer matches. Set `backend.model_repository` if the model files are
+   visible to the governor; it is the only way to notice a weight file replaced
+   under the same version number.
 
 ## Still stuck?
 

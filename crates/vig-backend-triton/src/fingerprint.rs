@@ -14,12 +14,22 @@
 //! Diese Auswahl faengt die haeufigen Faelle: Serverwechsel, Backendwechsel
 //! (ONNX nach TensorRT), geaenderte Aufloesung, neue Modellversion. Sie faengt
 //! **nicht** den Fall, dass jemand die Gewichtsdatei unter derselben
-//! Versionsnummer austauscht, ohne die Signatur zu aendern — das kann von
-//! aussen niemand sehen. Dagegen hilft nur der Online Estimator, der die
-//! tatsaechlichen Laufzeiten misst und das Profil binnen Sekunden korrigiert.
+//! Versionsnummer austauscht, ohne die Signatur zu aendern — ueber das
+//! Inferenzprotokoll ist das nicht sichtbar. Dagegen helfen zwei Dinge, und
+//! beide liegen ausserhalb dieses Moduls: der Artefakt-Digest im Profilmanifest
+//! (NV-03), der das Modellrepository im Dateisystem liest, und der Online
+//! Estimator, der die tatsaechlichen Laufzeiten misst und das Profil binnen
+//! Sekunden korrigiert.
 //!
 //! Der Fingerabdruck ist also eine billige erste Verteidigung, keine Garantie.
 //! Er wird auch so behandelt (ADR-0016).
+//!
+//! ## Beobachtung statt Hash
+//!
+//! [`observe`] gibt dieselben Angaben unverdichtet zurueck. Ein Hash sagt nur
+//! "anders", eine Beobachtung sagt *was* anders ist — und nur damit laesst
+//! sich ein Betreiber sinnvoll darueber informieren, warum sein Profil nicht
+//! mehr gilt.
 
 use vig_protocol_oip::inference::{ModelMetadataResponse, ServerMetadataResponse};
 
@@ -86,6 +96,46 @@ pub fn fingerprint(server: &ServerMetadataResponse, model: &ModelMetadataRespons
         }
     }
     format!("{:016x}", hasher.finish())
+}
+
+/// Was das Backend ueber seine eigene Identitaet meldet.
+///
+/// Unverdichtet, damit ein Vergleich benennen kann, *welches* Feld sich
+/// geaendert hat. Leere Protokollfelder werden zu `None`: proto3 kann
+/// "nicht gesetzt" und "leerer String" nicht unterscheiden, und ein leerer
+/// String, der als Uebereinstimmung mit einem anderen leeren String
+/// durchgeht, waere genau der Fehler, den das Profilmanifest ausschliessen
+/// soll (NV-03).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Observation {
+    /// Servername, etwa `triton`.
+    pub server: Option<String>,
+    /// Serverversion.
+    pub server_version: Option<String>,
+    /// Die Plattform des Modells, etwa `tensorrt_plan`.
+    pub platform: Option<String>,
+    /// Die gemeldeten Modellversionen, in Meldereihenfolge.
+    pub versions: Vec<String>,
+}
+
+fn non_empty(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+/// Die beobachtbare Identitaet aus Server- und Modellmetadaten.
+#[must_use]
+pub fn observe(server: &ServerMetadataResponse, model: &ModelMetadataResponse) -> Observation {
+    Observation {
+        server: non_empty(&server.name),
+        server_version: non_empty(&server.version),
+        platform: non_empty(&model.platform),
+        versions: model
+            .versions
+            .iter()
+            .filter(|v| !v.is_empty())
+            .cloned()
+            .collect(),
+    }
 }
 
 #[cfg(test)]

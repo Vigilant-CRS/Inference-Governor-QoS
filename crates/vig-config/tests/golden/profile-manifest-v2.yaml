@@ -1,0 +1,73 @@
+# Golden: ein Profil mit vollstaendigem Manifest (NV-03, Revision 2).
+#
+# Der Fingerabdruck oben beantwortet die Frage "hat sich die Metadatenlage
+# geaendert". Das Manifest darunter beantwortet die Fragen, die er nicht
+# beantworten kann: welches Artefakt, welche Runtime, welches Geraet, welche
+# Aufteilung, unter welchen Bedingungen gemessen und wofuer beansprucht.
+version: 1
+
+backend:
+  type: triton
+  grpc_endpoint: "127.0.0.1:8001"
+  slots: 1
+  safety_margin_percent: 110
+  # Ohne diesen Pfad bleibt `artifact.digest` beim Start unpruefbar: ueber das
+  # Inferenzprotokoll ist nicht sichtbar, welche Bytes der Server geladen hat.
+  model_repository: "/models"
+
+models:
+  detector:
+    class: protected
+    queue:
+      policy: latest
+      capacity: 1
+      overflow: reject_new
+    contract:
+      period_ms: 33
+      deadline_ms: 33
+      max_age_ms: 66
+    variants:
+      - id: main
+        backend_model: rfdetr
+        quality:
+          value: 1.00
+          source: user_declared
+        profile:
+          p50_us: 10000
+          p95_us: 13000
+          p99_us: 16000
+          samples: 2000
+          fingerprint: "00112233445566aa"
+          manifest:
+            revision: 2
+            recorded_at: "2026-09-09T18:42:11Z"
+            artifact:
+              digest: "sha256:8f1c0e4b2a7d6f3e5c9b0a1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5e6f70"
+              source: directory
+              bytes: 118293504
+              versions:
+                - "1"
+            runtime:
+              server: triton
+              server_version: "2.52.0"
+              platform: tensorrt_plan
+              library_version: "TensorRT 10.3.0"
+            device:
+              name: "NVIDIA RTX A2000"
+              compute_capability: "8.6"
+              memory_mib: 12288
+              driver: "560.35.03"
+            resources:
+              partition: exclusive
+              instances: 1
+              rate_limiter: "off"
+            measurement:
+              dataset: zeros
+              batch_size: 1
+              concurrency: 1
+              warmup: 20
+              independent_runs: 3
+            validity:
+              max_concurrent_models: 4
+              max_occupancy_pct: 92
+              max_input_kib: 3072

@@ -420,6 +420,40 @@ async fn check_profiles(resolved: &Resolved, offline: bool) -> Verdict {
                 verdict = verdict.max(Verdict::ReadyWithWarnings);
             }
         }
+
+        // NV-03: der Fingerabdruck sagt "die Metadatenlage stimmt". Das
+        // Manifest sagt, ob auch das Artefakt, die Runtime und die
+        // Geraeteaufteilung noch dieselben sind — und benennt, welches Feld
+        // nicht mehr passt.
+        let Some(comparison) = entry.manifest.as_ref() else {
+            continue;
+        };
+        match comparison.verdict() {
+            vig_config::manifest::ManifestVerdict::Invalid => {
+                for field in comparison.divergences() {
+                    if let vig_config::manifest::FieldVerdict::Divergent { declared, actual } =
+                        &field.verdict
+                    {
+                        warn(&format!(
+                            "{name}: {} weicht ab (hinterlegt {declared}, beobachtet {actual}).                              Das Profil gilt fuer diese Umgebung nicht; neu messen mit                              `vig calibrate`.",
+                            field.field
+                        ));
+                    }
+                }
+                verdict = verdict.max(Verdict::ReadyWithWarnings);
+            }
+            vig_config::manifest::ManifestVerdict::Unverified => {
+                let gaps: Vec<&str> = comparison.unknowns().map(|f| f.field).collect();
+                warn(&format!(
+                    "{name}: Profilherkunft unvollstaendig belegt ({}).                      Unbekannt heisst hier unbekannt, nicht geprueft.",
+                    gaps.join(", ")
+                ));
+                verdict = verdict.max(Verdict::ReadyWithWarnings);
+            }
+            vig_config::manifest::ManifestVerdict::Verified => {
+                ok(&format!("{name}: Profilherkunft vollstaendig belegt"));
+            }
+        }
     }
     verdict
 }

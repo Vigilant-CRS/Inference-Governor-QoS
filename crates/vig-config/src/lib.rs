@@ -17,9 +17,15 @@
 //! nicht.
 
 pub mod error;
+pub mod manifest;
 pub mod schema;
 
 pub use error::{ConfigError, Located};
+pub use manifest::{
+    ArtifactIdentity, DeviceIdentity, FieldVerdict, MANIFEST_REVISION, ManifestComparison,
+    ManifestVerdict, MeasurementBounds, OperatingPoint, ProfileManifest, ResourceLayout,
+    RuntimeIdentity, ValidityDomain,
+};
 pub use schema::{
     BackendConfig, Config, ContractConfig, CooperativeConfig, ModelConfig, QualityConfig,
     QueueConfigYaml, VariantConfig,

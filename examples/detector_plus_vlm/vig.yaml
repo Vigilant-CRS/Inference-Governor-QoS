@@ -24,6 +24,13 @@ backend:
 
   safety_margin_percent: 110
 
+  # Pfad zum Modellrepository, wenn der Governor es sieht. Nur dafuer da, den
+  # Artefakt-Digest eines Profils zu pruefen: ueber das Inferenzprotokoll ist
+  # nicht erkennbar, ob jemand die Gewichtsdatei unter derselben
+  # Versionsnummer ausgetauscht hat (ADR-0019). Ohne den Pfad bleibt das Feld
+  # `unknown` — was ehrlich ist und etwas anderes heisst als `geprueft`.
+  # model_repository: "/models"
+
 models:
   detector:
     class: protected
