@@ -25,6 +25,7 @@ use tonic::Status;
 use vig_backend_triton::{BackendError, TritonClient};
 use vig_config::schema::Resolved;
 use vig_core::overload::{OverloadConfig, OverloadController};
+use vig_core::predictor::{ClockClass, StateClass, ThrottleClass};
 use vig_core::scheduler::{Action, Event, Scheduler, SchedulerError};
 use vig_core::{Instant, Metrics, RequestDescriptor, RequestId, RequestState, SlotIdx};
 use vig_protocol_oip::inference::{ModelInferRequest, ModelInferResponse};
@@ -79,6 +80,16 @@ pub enum Msg {
         request: RequestId,
         /// Die Generation, fuer die der Nachweis gilt.
         generation: u64,
+    },
+    /// Der beobachtete Hardwarezustand hat sich gemeldet (NV-04, NV-06).
+    ///
+    /// Der Kern misst nichts; er bekommt den Zustand gesagt, wie er auch die
+    /// Zeit gesagt bekommt. Bleibt die Meldung aus, bleibt der Zustand
+    /// „unbekannt" — und die zustandsabhaengige Prognose gibt dann gar keine
+    /// Aussage statt der guenstigsten.
+    HardwareState {
+        /// Die beobachtete Klasse, ohne Belegungsgrad.
+        state: StateClass,
     },
     /// Ein Backendaufruf antwortet seit dem Timeout nicht.
     ///
@@ -323,6 +334,11 @@ struct Actor {
     outstanding: u64,
     /// Gesetzt, sobald ein geordnetes Ende angefordert wurde.
     shutdown: Option<oneshot::Sender<()>>,
+    /// Die Revision der Profilidentitaet dieser Konfiguration (NV-03, NV-06).
+    ///
+    /// Wechselt nur beim Neuladen, nicht mit dem Hardwarezustand. Beides
+    /// zusammen bildet die Epoche, unter der Beobachtungen gelten.
+    profile_revision: u32,
     /// Die aktuelle Kennung eines zerlegten Auftrags, unter seiner
     /// **urspruenglichen** Kennung.
     ///
@@ -384,8 +400,14 @@ pub fn spawn(
     }
 
     let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
+    spawn_hardware_probe(&tx);
+    // Die Revision der Profilidentitaet: solange sie nicht aus dem Manifest
+    // kommt, ist sie 1 fuer eine geladene Konfiguration. Wichtig ist nicht
+    // ihr Wert, sondern dass sie sich aendert, wenn die Profile es tun.
+    let profile_revision = 1;
     let actor = Actor {
         scheduler,
+        profile_revision,
         config,
         backends,
         clock,
@@ -717,6 +739,7 @@ impl Actor {
                 // was ein geordnetes Herunterfahren vermeiden soll.
                 self.shutdown = Some(done);
             }
+            Msg::HardwareState { state } => self.on_hardware_state(state),
             Msg::Tick => {
                 self.scheduler.on_event(now, Event::Tick, &mut sink);
                 self.report_contract_mismatch(now);
@@ -1053,6 +1076,16 @@ impl Actor {
         });
     }
 
+    /// Uebernimmt den beobachteten Hardwarezustand (NV-04, NV-06).
+    ///
+    /// Die Profilrevision bleibt, was sie ist: sie wechselt nur beim Neuladen
+    /// der Konfiguration, nicht mit dem Taktzustand. Beides zusammen bildet
+    /// die Epoche, unter der gelernte Zellen gelten.
+    fn on_hardware_state(&mut self, state: StateClass) {
+        self.scheduler
+            .observe_hardware(state, self.profile_revision);
+    }
+
     /// Der Client fuer ein Backendmodell, sofern eindeutig bestimmbar.
     fn backend_for_model_name(&self, backend_model: &str) -> Option<Arc<TritonClient>> {
         let index = self
@@ -1152,6 +1185,84 @@ impl Actor {
         };
         let _ = reply.send(outcome);
     }
+}
+
+/// Wie oft der Hardwarezustand gelesen wird, in Millisekunden.
+///
+/// Zwei Sekunden: ein Taktwechsel oder ein thermisches Limit soll erkannt
+/// werden, bevor sich die Laufzeiten ueber viele Auftraege hinweg
+/// verschieben. Haeufiger zu lesen kostet einen Prozessstart je Messung fuer
+/// eine Groesse, die sich in Sekunden und nicht in Millisekunden aendert.
+const HARDWARE_PROBE_INTERVAL_MS: u64 = 2_000;
+
+/// Liest den Hardwarezustand im Hintergrund und meldet ihn dem Actor.
+///
+/// Bleibt die Meldung aus — kein `nvidia-smi`, keine Rechte, kein Geraet —
+/// bleibt der Zustand im Kern „unbekannt". Das ist der sichere Fall: die
+/// zustandsabhaengige Prognose gibt dann gar keine Aussage statt der
+/// guenstigsten.
+fn spawn_hardware_probe(tx: &mpsc::Sender<Msg>) {
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let mut collector = vig_platform::NvidiaSmi::default();
+        let mut health = vig_platform::CollectorHealth::default();
+        let interval = std::time::Duration::from_millis(HARDWARE_PROBE_INTERVAL_MS);
+        loop {
+            // Ein Unterprozess gehoert nicht auf den Actor-Thread.
+            let probe = tokio::task::spawn_blocking({
+                let mut collector = collector.clone();
+                move || {
+                    use vig_platform::Collector as _;
+                    collector.snapshot()
+                }
+            })
+            .await;
+
+            let state = match probe {
+                Ok(Ok(snapshot)) => {
+                    health.record_success(snapshot.taken_at_ms);
+                    snapshot.gpu(0).map_or_else(StateClass::default, |gpu| {
+                        StateClass {
+                            // Der Belegungsgrad kommt vom Kern, nicht von hier.
+                            occupancy: 0,
+                            throttle: if gpu.limiting_reasons().is_empty() {
+                                ThrottleClass::Nominal
+                            } else {
+                                ThrottleClass::Limited
+                            },
+                            clock: ClockClass::from_mhz(
+                                gpu.clock_sm_mhz.value().copied(),
+                                gpu.clock_sm_max_mhz.value().copied(),
+                            ),
+                        }
+                    })
+                }
+                Ok(Err(reason)) => {
+                    health.record_failure(&reason);
+                    // Erst nach der Schwelle wird der Zustand auf unbekannt
+                    // gesetzt: ein einzelner Timeout unter Last darf die
+                    // Betriebsart nicht umschalten.
+                    if health.fallback() == vig_platform::Fallback::StateAware {
+                        tokio::time::sleep(interval).await;
+                        continue;
+                    }
+                    tracing::warn!(
+                        %reason,
+                        failures = health.consecutive_failures(),
+                        "Hardwarezustand nicht lesbar; es wird ohne Geraetezustand geplant"
+                    );
+                    StateClass::default()
+                }
+                Err(_) => return,
+            };
+
+            if tx.send(Msg::HardwareState { state }).await.is_err() {
+                return;
+            }
+            let _ = &mut collector;
+            tokio::time::sleep(interval).await;
+        }
+    });
 }
 
 #[cfg(test)]

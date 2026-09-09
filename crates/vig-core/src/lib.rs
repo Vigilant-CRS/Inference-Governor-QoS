@@ -33,6 +33,7 @@ pub mod ids;
 pub mod metrics;
 pub mod model;
 pub mod overload;
+pub mod predictor;
 pub mod profile;
 pub mod queue;
 pub mod request;

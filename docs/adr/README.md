@@ -31,6 +31,7 @@ Spec-Stelle explizit.
 | [0020](0020-contract-extensions-are-additive-and-versioned.md) | Vertragszusaetze sind additiv, versioniert und vom Betreiber | NV-02 | Akzeptiert |
 | [0021](0021-hardware-is-read-never-set.md) | Die Hardware wird gelesen, nie gestellt | NV-04, ADR-0019 | Akzeptiert |
 | [0022](0022-measurement-is-a-method-not-a-loop.md) | Messen ist eine Methode, keine Schleife | NV-05, ADR-0021 | Akzeptiert |
+| [0023](0023-state-aware-prediction-runs-in-the-shadow-first.md) | Die zustandsabhaengige Prognose laeuft erst im Schatten | NV-06, ADR-0021 | Akzeptiert |
 
 ## Format
 

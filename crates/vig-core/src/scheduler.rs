@@ -30,6 +30,7 @@ use crate::ids::{MAX_MODELS, ModelIdx, RequestId, SlotIdx, VariantIdx};
 use crate::metrics::Metrics;
 use crate::model::{ContractError, ModelContract};
 use crate::overload::{OverloadController, OverloadState, PressureSample};
+use crate::predictor::{Mode, Predictor, ShadowLedger, StateClass};
 use crate::profile::SafetyMargin;
 use crate::queue::{DropReason, MAX_QUEUE_CAPACITY, ModelQueue, QueueConfigError};
 use crate::request::{Criticality, RequestDescriptor, RequestState};
@@ -237,6 +238,20 @@ pub struct Scheduler {
     last_valid: [Option<Instant>; MAX_MODELS],
     /// Aufeinanderfolgende Requests ohne gueltiges Ergebnis je Modell.
     consecutive_misses: [u32; MAX_MODELS],
+    /// Die zustandsabhaengige Prognose (NV-06).
+    ///
+    /// Laeuft per Voreinstellung im Schatten: sie wird gefuettert und
+    /// verglichen, entscheidet aber nichts. Erst wenn der Vergleich zeigt,
+    /// dass sie besser plant und nicht nur mehr ablehnt, ist eine Umstellung
+    /// vertretbar.
+    predictor: Predictor,
+    /// Der zuletzt beobachtete Hardwarezustand (NV-04).
+    ///
+    /// Der Kern misst ihn nicht — er hat keine Uhr und kein I/O. Er bekommt
+    /// ihn gesagt, wie er auch die Zeit gesagt bekommt.
+    hardware_state: StateClass,
+    /// Die Revision der Profilidentitaet, unter der gerade geplant wird.
+    profile_revision: u32,
     /// Der Weakly-hard-Monitor je Modell, falls einer vereinbart ist (NV-02).
     ///
     /// `None`, wo kein Missbudget im Vertrag steht. Ein Monitor beobachtet;
@@ -302,6 +317,17 @@ impl Scheduler {
             }
         }
 
+        // Die Prognosetabelle bekommt die Form der Konfiguration, nicht die
+        // des Maximums: vier Modelle mit je einer Variante brauchen 24 Zellen
+        // und nicht zwoelftausend.
+        let models = contracts.len();
+        let variants = contracts
+            .iter()
+            .map(|c| c.variants.len())
+            .max()
+            .unwrap_or(1);
+        let slot_count = slots.len();
+
         Ok(Self {
             contracts,
             queues,
@@ -311,6 +337,9 @@ impl Scheduler {
             last_valid: [None; MAX_MODELS],
             consecutive_misses: [0; MAX_MODELS],
             miss_windows,
+            predictor: Predictor::with_shape(models, variants, slot_count),
+            hardware_state: StateClass::default(),
+            profile_revision: 0,
             slots,
             overload,
             margin,
@@ -509,6 +538,7 @@ impl Scheduler {
             entry.occupancy,
             compute,
         );
+        self.observe_for_predictor(&entry, compute);
         sink.emit(Action::ObservedRuntime {
             model: entry.descriptor.logical_model,
             variant: entry.variant,
@@ -592,6 +622,85 @@ impl Scheduler {
             request,
             state: RequestState::Failed,
         });
+    }
+
+    /// Meldet dem Kern den beobachteten Hardwarezustand (NV-04, NV-06).
+    ///
+    /// Der Kern misst nichts; er bekommt den Zustand gesagt, wie er auch die
+    /// Zeit gesagt bekommt. Aendert sich die Klasse, gelten die bisher
+    /// gesammelten Zellen nicht mehr — sie werden bei der naechsten
+    /// Beobachtung geleert, nicht fortgeschrieben.
+    pub const fn observe_hardware(&mut self, state: StateClass, profile_revision: u32) {
+        self.hardware_state = state;
+        self.profile_revision = profile_revision;
+    }
+
+    /// Die Betriebsart der zustandsabhaengigen Prognose.
+    #[must_use]
+    pub const fn predictor_mode(&self) -> Mode {
+        self.predictor.mode()
+    }
+
+    /// Schaltet die zustandsabhaengige Prognose scharf oder in den Schatten.
+    ///
+    /// Bewusst eine ausdrueckliche Handlung des Betreibers: eine Policy, die
+    /// sich selbst scharfschaltet, sobald sie genug Daten hat, entzieht
+    /// genau die Entscheidung, um die es geht.
+    pub const fn set_predictor_mode(&mut self, mode: Mode) {
+        self.predictor.set_mode(mode);
+    }
+
+    /// Der Schattenvergleich der Prognose (NV-06).
+    #[must_use]
+    pub const fn predictor_ledger(&self) -> &ShadowLedger {
+        self.predictor.ledger()
+    }
+
+    /// Fuettert die Prognose und vergleicht sie mit dem bisherigen Weg.
+    ///
+    /// Der Vergleich laeuft auf der Schreibseite, nicht im
+    /// Entscheidungspfad: gelesen wird bei jeder Planungsentscheidung,
+    /// geschrieben nur bei jeder Fertigstellung.
+    fn observe_for_predictor(&mut self, entry: &Dispatched, compute: Duration) {
+        let model = entry.descriptor.logical_model;
+        let variant = entry.variant;
+        let mut state = self.hardware_state;
+        state.occupancy = u8::try_from(entry.occupancy).unwrap_or(u8::MAX);
+        let revision = self.profile_revision;
+
+        self.predictor
+            .record(model, variant, state, revision, compute);
+
+        // Was der bisherige Weg zu diesem Betriebspunkt gesagt haette.
+        let Some(contract) = self.contracts.get(model.get()) else {
+            return;
+        };
+        let Some(profile) = contract.variant(variant).map(|v| &v.profile) else {
+            return;
+        };
+        let margin = self
+            .margins
+            .get(model.get())
+            .map_or(self.margin, MarginController::margin);
+        let Some(legacy) =
+            self.estimator
+                .conservative(model, variant, entry.occupancy, profile, margin)
+        else {
+            return;
+        };
+        let prediction = self.predictor.predict(model, variant, state, revision);
+        self.predictor.ledger_mut().compare(legacy, &prediction);
+        self.publish_predictor();
+    }
+
+    /// Schreibt den Schattenvergleich in den Metrikabzug (NV-06).
+    fn publish_predictor(&mut self) {
+        let ledger = *self.predictor.ledger();
+        self.metrics.predictor_comparisons = ledger.comparisons;
+        self.metrics.predictor_fallbacks = ledger.fallbacks;
+        self.metrics.predictor_more_conservative = ledger.more_conservative;
+        self.metrics.predictor_more_optimistic = ledger.more_optimistic;
+        self.metrics.predictor_active = u64::from(self.predictor.mode() == Mode::Active);
     }
 
     /// Traegt die seit dem letzten Ereignis vergangenen Verbraucherzyklen ein.
@@ -1130,6 +1239,9 @@ impl Scheduler {
             &PlanningContext {
                 slots: &self.slots,
                 estimator: &self.estimator,
+                predictor: &self.predictor,
+                state: self.hardware_state,
+                profile_revision: self.profile_revision,
                 margin: self.margin_of(model),
                 now,
                 degrade: self.overload.state().forces_degradation(),

@@ -731,3 +731,114 @@ fn a_still_fresh_result_supplies_a_quiet_cycle() {
         "M=0 haelt nur, wenn ruhige Zyklen aus dem Bestand versorgt zaehlen"
     );
 }
+
+// ---------------------------------------------------------------------------
+// NV-06 — zustandsabhaengige Prognose
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_predictor_starts_in_the_shadow_and_changes_nothing() {
+    use vig_core::predictor::Mode;
+
+    let detector = contract(
+        Criticality::Protected,
+        QueuePolicy::Latest,
+        Some(33),
+        33,
+        66,
+        &[5],
+    );
+    let mut scheduler = build(vec![detector.clone()], 1);
+    assert_eq!(scheduler.predictor_mode(), Mode::Shadow);
+    // Ohne beobachteten Zustand gibt es gar keine Prognose — die
+    // Voreinstellung ist „Takt unbekannt", nicht „Takt voll".
+    scheduler.observe_hardware(
+        vig_core::predictor::StateClass {
+            occupancy: 0,
+            throttle: vig_core::predictor::ThrottleClass::Nominal,
+            clock: vig_core::predictor::ClockClass::Full,
+        },
+        1,
+    );
+
+    let mut backend = Backend::default();
+    let mut next_id = 0_u64;
+    run(&mut scheduler, &mut backend, 3_000, |t| {
+        if t % 33 == 0 {
+            next_id = next_id.saturating_add(1);
+            vec![frame(next_id, 0, t, &detector)]
+        } else {
+            Vec::new()
+        }
+    });
+
+    let ledger = scheduler.predictor_ledger();
+    assert!(
+        ledger.comparisons > 0,
+        "der Schatten muss ueberhaupt vergleichen"
+    );
+    assert!(
+        ledger.decisive() > 0,
+        "und irgendwann eine belegte Zelle haben: {ledger:?}"
+    );
+}
+
+#[test]
+fn a_hardware_state_change_invalidates_the_learned_cells() {
+    use vig_core::predictor::{ClockClass, StateClass, ThrottleClass};
+
+    let detector = contract(
+        Criticality::Protected,
+        QueuePolicy::Latest,
+        Some(33),
+        33,
+        66,
+        &[5],
+    );
+    let mut scheduler = build(vec![detector.clone()], 1);
+    scheduler.observe_hardware(
+        StateClass {
+            occupancy: 0,
+            throttle: ThrottleClass::Nominal,
+            clock: ClockClass::Full,
+        },
+        1,
+    );
+
+    let mut backend = Backend::default();
+    let mut next_id = 0_u64;
+    run(&mut scheduler, &mut backend, 3_000, |t| {
+        if t % 33 == 0 {
+            next_id = next_id.saturating_add(1);
+            vec![frame(next_id, 0, t, &detector)]
+        } else {
+            Vec::new()
+        }
+    });
+    let before = scheduler.predictor_ledger().decisive();
+    assert!(before > 0);
+
+    // Die Karte laeuft in eine Drosselung: die gelernten Zellen gelten nicht
+    // mehr, und der naechste Vergleich faellt zurueck.
+    scheduler.observe_hardware(
+        StateClass {
+            occupancy: 0,
+            throttle: ThrottleClass::Limited,
+            clock: ClockClass::Reduced,
+        },
+        1,
+    );
+    let fallbacks_before = scheduler.predictor_ledger().fallbacks;
+    run(&mut scheduler, &mut backend, 200, |t| {
+        if t % 33 == 0 {
+            next_id = next_id.saturating_add(1);
+            vec![frame(next_id, 0, t, &detector)]
+        } else {
+            Vec::new()
+        }
+    });
+    assert!(
+        scheduler.predictor_ledger().fallbacks > fallbacks_before,
+        "nach dem Zustandswechsel gibt es zunaechst keine belegte Zelle mehr"
+    );
+}

@@ -97,6 +97,21 @@ pub struct PlanningContext<'a> {
     /// auf die Offline-Profile zurueck — die Variantenwahl funktioniert also
     /// von der ersten Sekunde an.
     pub estimator: &'a RuntimeEstimator,
+    /// Die zustandsabhaengige Prognose (NV-06).
+    ///
+    /// Im Schattenbetrieb aendert sie nichts. Scharf geschaltet ersetzt sie
+    /// die konservative Schaetzung dort, wo eine belegte Zelle vorliegt —
+    /// auch nach unten. Genau das ist der Gewinn: ein Profil, das unter einem
+    /// Leistungslimit gemessen wurde, ist ohne dieses Limit dauerhaft zu
+    /// pessimistisch.
+    pub predictor: &'a crate::predictor::Predictor,
+    /// Der beobachtete Hardwarezustand, ohne Belegungsgrad.
+    ///
+    /// Den Belegungsgrad ergaenzt [`resolve`] selbst — er gehoert zum
+    /// geplanten Dispatch und nicht zur Beobachtung.
+    pub state: crate::predictor::StateClass,
+    /// Die Revision der Profilidentitaet.
+    pub profile_revision: u32,
     /// Die aktuell wirksame Sicherheitsmarge.
     pub margin: SafetyMargin,
     /// Die aktuelle Zeit.
@@ -181,9 +196,22 @@ pub fn resolve(
 
         // Der Online-Schaetzer darf die Planung verschaerfen, aber nie
         // optimistischer machen als das Profil (Spec 13.2).
-        let Some(runtime) = estimator.conservative(model, idx, occupancy, &variant.profile, margin)
+        let Some(legacy) = estimator.conservative(model, idx, occupancy, &variant.profile, margin)
         else {
             continue;
+        };
+        // NV-06: scharf geschaltet gilt eine belegte Zelle, auch wenn sie
+        // kuerzer ist. Im Schatten bleibt es beim bisherigen Weg.
+        let runtime = match ctx.predictor.mode() {
+            crate::predictor::Mode::Shadow => legacy,
+            crate::predictor::Mode::Active => {
+                let mut state = ctx.state;
+                state.occupancy = u8::try_from(occupancy).unwrap_or(u8::MAX);
+                ctx.predictor
+                    .predict(model, idx, state, ctx.profile_revision)
+                    .runtime()
+                    .unwrap_or(legacy)
+            }
         };
         let Some(feasibility) = evaluate(slots, model, now, runtime, deadline) else {
             continue;

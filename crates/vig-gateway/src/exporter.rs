@@ -192,6 +192,42 @@ fn render_derived(out: &mut String, metrics: &Metrics) {
         ratio(u64::from(metrics.stale_compute_permille()))
     );
 
+    // NV-06: die Frage vor jeder Umstellung — schlaegt die
+    // zustandsabhaengige Prognose den alten Weg, oder lehnt sie nur mehr ab?
+    for (name, help, value) in [
+        (
+            "vig_predictor_comparisons_total",
+            "Wie oft die zustandsabhaengige Prognose verglichen wurde.",
+            metrics.predictor_comparisons,
+        ),
+        (
+            "vig_predictor_fallbacks_total",
+            "Wie oft sie keine Aussage hatte und der bisherige Weg galt.",
+            metrics.predictor_fallbacks,
+        ),
+        (
+            "vig_predictor_more_conservative_total",
+            "Wie oft sie mehr Zeit veranschlagte als der bisherige Weg.",
+            metrics.predictor_more_conservative,
+        ),
+        (
+            "vig_predictor_more_optimistic_total",
+            "Wie oft sie weniger Zeit veranschlagte.",
+            metrics.predictor_more_optimistic,
+        ),
+    ] {
+        let _ = writeln!(out, "# HELP {name} {help}");
+        let _ = writeln!(out, "# TYPE {name} counter");
+        let _ = writeln!(out, "{name} {value}");
+    }
+    let _ = writeln!(
+        out,
+        "# HELP vig_predictor_active 1, wenn die zustandsabhaengige Prognose \
+         scharf geschaltet ist."
+    );
+    let _ = writeln!(out, "# TYPE vig_predictor_active gauge");
+    let _ = writeln!(out, "vig_predictor_active {}", metrics.predictor_active);
+
     render_per_model_series(out, metrics);
 
     for (index, count) in metrics.variant_selected.iter().enumerate() {

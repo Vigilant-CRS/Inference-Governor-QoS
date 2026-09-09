@@ -13,6 +13,7 @@ vig-core = { path = "../vig-core", version = "0.1.0" }
 vig-config = { path = "../vig-config", version = "0.1.0" }
 vig-protocol-oip = { path = "../vig-protocol-oip", version = "0.1.0" }
 vig-backend-triton = { path = "../vig-backend-triton", version = "0.1.0" }
+vig-platform = { path = "../vig-platform", version = "0.1.0" }
 tonic = { version = "0.14.6", features = ["tls-ring"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
 tracing = "0.1"

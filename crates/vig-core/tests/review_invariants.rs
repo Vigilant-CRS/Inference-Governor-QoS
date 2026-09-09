@@ -683,6 +683,9 @@ fn degradation_prefers_the_fastest_feasible_variant() {
             &PlanningContext {
                 slots: &slots,
                 estimator: &estimator,
+                predictor: &vig_core::predictor::Predictor::new(),
+                state: vig_core::predictor::StateClass::default(),
+                profile_revision: 0,
                 margin: SafetyMargin::NONE,
                 now: at(0),
                 degrade,

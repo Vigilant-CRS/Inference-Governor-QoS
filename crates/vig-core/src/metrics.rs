@@ -65,6 +65,22 @@ pub struct Metrics {
     /// beobachtet wurde — steht hier 0. Das ist keine Zusage, sondern die
     /// Aussage, dass noch nichts feststeht.
     pub weakly_hard_violated: [u32; MAX_MODELS],
+    /// Wie oft die zustandsabhaengige Prognose mit dem bisherigen Weg
+    /// verglichen wurde (NV-06).
+    pub predictor_comparisons: u64,
+    /// Wie oft sie keine Aussage hatte.
+    pub predictor_fallbacks: u64,
+    /// Wie oft sie mehr Zeit veranschlagte als der bisherige Weg.
+    ///
+    /// Zusammen mit `predictor_more_optimistic` die Antwort auf die Frage,
+    /// die vor jeder Umstellung steht: schlaegt die Prognose den alten Weg,
+    /// oder lehnt sie nur mehr ab? Eine Policy, die alles ablehnt, haelt
+    /// jede Zusage ein und ist trotzdem wertlos.
+    pub predictor_more_conservative: u64,
+    /// Wie oft sie weniger Zeit veranschlagte.
+    pub predictor_more_optimistic: u64,
+    /// 1, wenn die Prognose scharf geschaltet ist; sonst 0.
+    pub predictor_active: u64,
     /// Ausfuehrungsenden, die durch Abgleich mit dem Backend belegt wurden.
     ///
     /// Jeder davon ist ein Slotkredit, der ohne Antwort des Backends
