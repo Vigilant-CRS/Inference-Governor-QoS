@@ -143,6 +143,7 @@ The break-even is between 100 % and 110 % offered load
 |---|---|
 | [**Getting started**](docs/getting-started.md) | configure, calibrate, run, and read the metrics |
 | [**How it works**](docs/how-it-works.md) | the four decision stages, time handling, slots, decomposition, failure behaviour |
+| [**Runbook**](docs/runbook.md) | what to do when something is wrong — every symptom the system reports about itself |
 | [**Hardware qualification**](docs/hardware-qualification.md) | what is portable, what is untested, and what to run before trusting a new platform |
 | [**Releases and upgrades**](docs/releases.md) | signed artifacts, how to verify them, versioning and the upgrade path |
 | [Benchmarks](docs/benchmark/) | every measurement, method and raw output — including the runs that were wrong *(German)* |

@@ -230,6 +230,9 @@ usually means the backend stopped answering.
    visible to the governor; it is the only way to notice a weight file replaced
    under the same version number.
 
+For a symptom that is not in this list, the [runbook](runbook.md) covers every
+state the system reports about itself, and what to do about each.
+
 ## Still stuck?
 
 Open a GitHub issue for bugs and questions about the software. For a commercial
