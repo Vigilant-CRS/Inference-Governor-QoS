@@ -46,6 +46,8 @@ fn contract(class: Criticality, policy: QueuePolicy, runtimes_ms: &[u64]) -> Mod
             .push(Variant {
                 quality: QualityValue::measured(Quality::from_milli(quality).unwrap()),
                 profile: VariantProfile::solo(RuntimeProfile::exact(ms(*runtime))),
+                semantics: vig_core::semantics::VariantSemantics::default(),
+                preprocess: Duration::from_nanos_unbounded(0),
             })
             .unwrap();
     }

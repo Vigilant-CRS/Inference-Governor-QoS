@@ -6,6 +6,7 @@ use crate::ids::{MAX_VARIANTS, VariantIdx};
 use crate::profile::VariantProfile;
 use crate::queue::{QueueConfig, QueueConfigError};
 use crate::request::Criticality;
+use crate::semantics::SemanticConflict;
 use crate::time::Duration;
 
 /// Relative Qualitaet einer Variante in Tausendsteln.
@@ -95,6 +96,19 @@ pub struct Variant {
     pub quality: QualityValue,
     /// Laufzeitprofile je Belegungsgrad.
     pub profile: VariantProfile,
+    /// Was diese Variante fachlich liefert und verlangt (NV-10).
+    ///
+    /// Leer heisst „nicht beschrieben". Nicht beschrieben ist kein Beleg fuer
+    /// Austauschbarkeit: der Governor waehlt dann nicht automatisch, sondern
+    /// bleibt bei der freigegebenen festen Variante.
+    pub semantics: crate::semantics::VariantSemantics,
+    /// Die Zeit fuer Vor- und Nachverarbeitung dieser Variante.
+    ///
+    /// Eine Variante, die ein anderes Resize braucht, ist nicht nur eine
+    /// andere Bedeutung, sondern auch eine andere Rechnung. Diese Zeit
+    /// entsteht **ausserhalb** des Backends und faellt deshalb aus jedem
+    /// Backendprofil heraus — sie gehoert trotzdem in die Planung.
+    pub preprocess: Duration,
 }
 
 /// Warum ein Modellvertrag unzulaessig ist.
@@ -397,6 +411,57 @@ impl ModelContract {
                 .variants
                 .iter()
                 .all(|v| v.quality.source != QualitySource::Unknown)
+            && self.semantic_conflict().is_none()
+    }
+
+    /// Der erste fachliche Widerspruch zwischen zwei freigegebenen Varianten
+    /// (NV-10).
+    ///
+    /// `None` heisst: entweder ist keine Semantik hinterlegt — dann
+    /// entscheidet allein die I/O-Signatur wie vor NV-10 — oder alle
+    /// beschriebenen Varianten bedeuten dasselbe.
+    ///
+    /// Geprueft werden nur **freigegebene** Varianten: eine gesperrte Variante
+    /// mit abweichender Bedeutung ist kein Grund, die automatische Wahl
+    /// abzuschalten, weil sie ohnehin nie laeuft.
+    #[must_use]
+    pub fn semantic_conflict(&self) -> Option<(VariantIdx, VariantIdx, SemanticConflict)> {
+        let approved: ArrayVec<(VariantIdx, &Variant), MAX_VARIANTS> = self
+            .variants
+            .iter()
+            .enumerate()
+            .filter_map(|(i, v)| {
+                let idx = VariantIdx(u16::try_from(i).ok()?);
+                self.variant_approved(idx).then_some((idx, v))
+            })
+            .fold(ArrayVec::new(), |mut acc, entry| {
+                let _ = acc.push(entry);
+                acc
+            });
+
+        // Beschreibt keine Variante ihre Bedeutung, gilt der Zustand vor
+        // NV-10: die Signaturpruefung entscheidet. Beschreibt sie **eine**,
+        // muessen es alle tun — eine halb beschriebene Variantenreihe ist
+        // gefaehrlicher als eine gar nicht beschriebene, weil sie nach
+        // Sorgfalt aussieht.
+        if approved.iter().all(|(_, v)| !v.semantics.is_specified()) {
+            return None;
+        }
+
+        let mut first: Option<(VariantIdx, &Variant)> = None;
+        for (idx, variant) in approved.iter() {
+            match first {
+                None => first = Some((*idx, variant)),
+                Some((reference_idx, reference)) => {
+                    if let Err(conflict) =
+                        crate::semantics::interchangeable(&reference.semantics, &variant.semantics)
+                    {
+                        return Some((reference_idx, *idx, conflict));
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Die Variante an einem Index.

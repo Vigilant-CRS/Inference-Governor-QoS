@@ -202,7 +202,7 @@ pub fn resolve(
         };
         // NV-06: scharf geschaltet gilt eine belegte Zelle, auch wenn sie
         // kuerzer ist. Im Schatten bleibt es beim bisherigen Weg.
-        let runtime = match ctx.predictor.mode() {
+        let backend_runtime = match ctx.predictor.mode() {
             crate::predictor::Mode::Shadow => legacy,
             crate::predictor::Mode::Active => {
                 let mut state = ctx.state;
@@ -212,6 +212,13 @@ pub fn resolve(
                     .runtime()
                     .unwrap_or(legacy)
             }
+        };
+        // NV-10: Vor- und Nachverarbeitung entsteht ausserhalb des Backends
+        // und faellt aus jedem Backendprofil heraus. Sie gehoert trotzdem in
+        // die Planung — zwei Varianten mit verschiedener Eingabeaufloesung
+        // unterscheiden sich hier oft mehr als in der Inferenz selbst.
+        let Some(runtime) = backend_runtime.checked_add(variant.preprocess) else {
+            continue;
         };
         let Some(feasibility) = evaluate(slots, model, now, runtime, deadline) else {
             continue;

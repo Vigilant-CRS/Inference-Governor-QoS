@@ -86,6 +86,7 @@ pub(crate) async fn run(
     verdict = verdict.max(check_profiles(&resolved, offline).await);
     verdict = verdict.max(check_variant_signatures(&resolved, offline).await);
     verdict = verdict.max(check_security(&resolved));
+    verdict = verdict.max(check_semantics(&resolved));
     verdict = verdict.max(check_hardware(offline));
 
     println!("\nRESULT {}", verdict.label());
@@ -121,9 +122,20 @@ fn check_contracts(resolved: &Resolved) -> Verdict {
         }
 
         if !contract.auto_variant_selection() && contract.variants.len() > 1 {
+            // Den Grund nennen und nicht nur den Zustand: es gibt vier, und
+            // der Betreiber soll wissen, welcher zutrifft. Der fachliche
+            // Widerspruch wird weiter unten einzeln benannt.
+            let reason = if contract.stateful {
+                "stateful"
+            } else if !contract.variants_interchangeable {
+                "verschiedene I/O-Signaturen"
+            } else if contract.semantic_conflict().is_some() {
+                "fachlicher Widerspruch zwischen Varianten, siehe unten"
+            } else {
+                "quality.source: unknown"
+            };
             warn(&format!(
-                "{name}: mehrere Varianten, aber keine automatische Wahl \
-                 (quality.source: unknown oder stateful)"
+                "{name}: mehrere Varianten, aber keine automatische Wahl ({reason})"
             ));
             verdict = verdict.max(Verdict::ReadyWithWarnings);
         }
@@ -453,6 +465,56 @@ async fn check_profiles(resolved: &Resolved, offline: bool) -> Verdict {
             }
             vig_config::manifest::ManifestVerdict::Verified => {
                 ok(&format!("{name}: Profilherkunft vollstaendig belegt"));
+            }
+        }
+    }
+    verdict
+}
+
+/// Die fachliche Austauschbarkeit der Varianten (NV-10).
+///
+/// Die I/O-Signatur faengt den Fall, in dem ein Variantenwechsel den Client
+/// garantiert bricht. Sie faengt nicht den schlimmeren: gleiche Form,
+/// gleiche Namen, andere Bedeutung. Zwei Detektoren mit denselben Klassen in
+/// anderer Reihenfolge liefern Zahlen, die aussehen wie erwartet und etwas
+/// anderes heissen — und das faellt erst auf, wenn ein Roboter danach greift.
+fn check_semantics(resolved: &Resolved) -> Verdict {
+    let mut verdict = Verdict::Ready;
+    for (index, name) in resolved.model_names.iter().enumerate() {
+        let Some(contract) = resolved.contracts.get(index) else {
+            continue;
+        };
+        if contract.variants.len() < 2 {
+            continue;
+        }
+        let described = contract.variants.iter().any(|v| v.semantics.is_specified());
+        if !described {
+            warn(&format!(
+                "{name}: Varianten ohne Semantikangabe. Austauschbarkeit haengt \
+                 dann allein an der I/O-Signatur — gleiche Form bei anderer \
+                 Bedeutung faellt nicht auf. Abhilfe: `semantics` je Variante."
+            ));
+            verdict = verdict.max(Verdict::ReadyWithWarnings);
+            continue;
+        }
+        match contract.semantic_conflict() {
+            None => ok(&format!("{name}: Varianten fachlich austauschbar")),
+            Some((left, right, conflict)) => {
+                let label = |idx: vig_core::ids::VariantIdx| {
+                    resolved
+                        .backend_models
+                        .get(index)
+                        .and_then(|v| v.get(idx.get()))
+                        .map_or_else(|| idx.to_string(), Clone::clone)
+                };
+                warn(&format!(
+                    "{name}: {} und {} sind fachlich nicht austauschbar ({conflict}). \
+                     Die automatische Variantenwahl bleibt aus; es gilt die \
+                     freigegebene feste Variante.",
+                    label(left),
+                    label(right)
+                ));
+                verdict = verdict.max(Verdict::ReadyWithWarnings);
             }
         }
     }

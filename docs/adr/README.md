@@ -33,6 +33,7 @@ Spec-Stelle explizit.
 | [0022](0022-measurement-is-a-method-not-a-loop.md) | Messen ist eine Methode, keine Schleife | NV-05, ADR-0021 | Akzeptiert |
 | [0023](0023-state-aware-prediction-runs-in-the-shadow-first.md) | Die zustandsabhaengige Prognose laeuft erst im Schatten | NV-06, ADR-0021 | Akzeptiert |
 | [0024](0024-the-backend-is-a-seam-not-a-type.md) | Das Backend ist eine Naht, kein Typ | NV-07, NV-00 | Akzeptiert |
+| [0025](0025-the-same-shape-is-not-the-same-meaning.md) | Gleiche Form ist nicht gleiche Bedeutung | NV-10, NV-02, ADR-0007 | Akzeptiert |
 
 ## Format
 

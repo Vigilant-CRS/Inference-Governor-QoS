@@ -38,6 +38,7 @@ pub mod profile;
 pub mod queue;
 pub mod request;
 pub mod scheduler;
+pub mod semantics;
 pub mod slots;
 pub mod time;
 pub mod variant;

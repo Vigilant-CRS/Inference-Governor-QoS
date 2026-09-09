@@ -1,0 +1,63 @@
+# Golden: derselbe Tensor, dieselben Klassen, andere Reihenfolge (NV-10).
+#
+# Beide Varianten liefern `[1, 300, 6]` FP32 unter dem Namen `boxes`. Eine
+# Signaturpruefung sieht keinen Unterschied. Der Client bekaeme nach einem
+# Variantenwechsel Zahlen, die aussehen wie erwartet und etwas anderes
+# heissen — und das faellt erst auf, wenn ein Roboter danach greift.
+version: 1
+
+backend:
+  type: triton
+  grpc_endpoint: "127.0.0.1:8001"
+  slots: 1
+  safety_margin_percent: 110
+
+models:
+  detector:
+    class: protected
+    queue:
+      policy: latest
+      capacity: 1
+      overflow: reject_new
+    contract:
+      period_ms: 33
+      deadline_ms: 33
+      max_age_ms: 66
+    variants:
+      - id: coco_order
+        backend_model: detector_a
+        quality: { value: 1.00, source: measured, measured_on: "coco-val2017" }
+        profile: { p50_us: 10000, p95_us: 13000, p99_us: 16000, samples: 2000 }
+        preprocess_us: 900
+        semantics:
+          input:
+            layout: nchw
+            color_space: rgb
+            normalization: imagenet
+            width: 512
+            height: 512
+          outputs:
+            - kind: detections
+              labels: [person, bicycle, car]
+              coordinates: input_pixels
+              unit: probability
+              layout: xyxy
+      - id: custom_order
+        backend_model: detector_b
+        quality: { value: 0.98, source: measured, measured_on: "coco-val2017" }
+        profile: { p50_us: 9000, p95_us: 11000, p99_us: 13000, samples: 2000 }
+        preprocess_us: 900
+        semantics:
+          input:
+            layout: nchw
+            color_space: rgb
+            normalization: imagenet
+            width: 512
+            height: 512
+          outputs:
+            - kind: detections
+              # Dieselben drei Klassen, andere Reihenfolge.
+              labels: [car, person, bicycle]
+              coordinates: input_pixels
+              unit: probability
+              layout: xyxy

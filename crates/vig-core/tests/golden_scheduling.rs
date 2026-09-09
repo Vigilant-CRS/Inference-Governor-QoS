@@ -47,6 +47,8 @@ fn contract(
                 source,
             },
             profile: VariantProfile::solo(RuntimeProfile::exact(ms(*p99))),
+            semantics: vig_core::semantics::VariantSemantics::default(),
+            preprocess: Duration::from_nanos_unbounded(0),
         })
         .unwrap();
     }

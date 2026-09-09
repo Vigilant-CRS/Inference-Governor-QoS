@@ -121,6 +121,10 @@ impl StreamSpec {
                     )
                     .unwrap_or(RuntimeProfile::exact(v.p99)),
                 ),
+                // Der Simulator beschreibt Lastszenarien; fachliche
+                // Bedeutungen und Vorverarbeitungskosten hat er nicht (NV-10).
+                semantics: vig_core::semantics::VariantSemantics::default(),
+                preprocess: Duration::from_nanos_unbounded(0),
             });
         }
         ModelContract {

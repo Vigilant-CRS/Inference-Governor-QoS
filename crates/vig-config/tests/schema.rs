@@ -663,3 +663,176 @@ fn an_extension_survives_a_configuration_roundtrip() {
     assert_eq!(a.evidence_required, b.evidence_required);
     assert_eq!(a.contract_version, b.contract_version);
 }
+
+// ---------------------------------------------------------------------------
+// NV-10 — semantisch sichere Qualitaetswahl
+// ---------------------------------------------------------------------------
+
+/// Zwei Varianten mit gleicher Form und vertauschter Labelreihenfolge.
+const PERMUTED_LABELS: &str = include_str!("golden/semantics-permuted-labels.yaml");
+
+#[test]
+fn variants_without_semantics_behave_as_before() {
+    // Die Abnahme, die alles andere traegt: alte Dateien bleiben nutzbar, und
+    // ohne Semantikangabe entscheidet die I/O-Signatur wie vor NV-10.
+    let resolved = Config::from_yaml(EXAMPLE).unwrap().resolve().unwrap();
+    let detector = resolved.model_index("detector").unwrap();
+    let contract = resolved.contracts.get(detector.get()).unwrap();
+    assert!(
+        contract
+            .variants
+            .iter()
+            .all(|v| !v.semantics.is_specified())
+    );
+    assert_eq!(contract.semantic_conflict(), None);
+    assert!(
+        contract.auto_variant_selection(),
+        "ohne Semantik bleibt das Verhalten von vorher"
+    );
+}
+
+#[test]
+fn the_same_shape_with_permuted_labels_switches_off_auto_selection() {
+    let resolved = Config::from_yaml(PERMUTED_LABELS)
+        .unwrap()
+        .resolve()
+        .unwrap();
+    let detector = resolved.model_index("detector").unwrap();
+    let contract = resolved.contracts.get(detector.get()).unwrap();
+
+    let conflict = contract.semantic_conflict();
+    assert!(
+        matches!(
+            conflict,
+            Some((
+                _,
+                _,
+                vig_core::semantics::SemanticConflict::Labels { output: 0 }
+            ))
+        ),
+        "{conflict:?}"
+    );
+    assert!(
+        !contract.auto_variant_selection(),
+        "der Governor darf hier nicht selbst waehlen"
+    );
+}
+
+#[test]
+fn identical_semantics_keep_auto_selection() {
+    let text = PERMUTED_LABELS.replace(
+        "labels: [car, person, bicycle]",
+        "labels: [person, bicycle, car]",
+    );
+    let resolved = Config::from_yaml(&text).unwrap().resolve().unwrap();
+    let detector = resolved.model_index("detector").unwrap();
+    let contract = resolved.contracts.get(detector.get()).unwrap();
+    assert_eq!(contract.semantic_conflict(), None);
+    assert!(contract.auto_variant_selection());
+}
+
+#[test]
+fn a_different_input_resolution_switches_off_auto_selection() {
+    // Genau der Fall der RF-DETR-Varianten im Messaufbau.
+    let text = PERMUTED_LABELS
+        .replace(
+            "labels: [car, person, bicycle]",
+            "labels: [person, bicycle, car]",
+        )
+        .replacen("width: 512", "width: 640", 1);
+    let resolved = Config::from_yaml(&text).unwrap().resolve().unwrap();
+    let detector = resolved.model_index("detector").unwrap();
+    let contract = resolved.contracts.get(detector.get()).unwrap();
+    assert!(
+        matches!(
+            contract.semantic_conflict(),
+            Some((_, _, vig_core::semantics::SemanticConflict::Input))
+        ),
+        "{:?}",
+        contract.semantic_conflict()
+    );
+}
+
+#[test]
+fn a_half_described_variant_series_is_a_conflict_not_a_pass() {
+    // Eine halb beschriebene Reihe ist gefaehrlicher als eine gar nicht
+    // beschriebene, weil sie nach Sorgfalt aussieht.
+    let block = r"        semantics:
+          input:
+            layout: nchw
+            color_space: rgb
+            normalization: imagenet
+            width: 512
+            height: 512
+          outputs:
+            - kind: detections
+              # Dieselben drei Klassen, andere Reihenfolge.
+              labels: [car, person, bicycle]
+              coordinates: input_pixels
+              unit: probability
+              layout: xyxy
+";
+    assert!(PERMUTED_LABELS.contains(block), "Golden hat sich geaendert");
+    let text = PERMUTED_LABELS.replace(block, "");
+    let resolved = Config::from_yaml(&text).unwrap().resolve().unwrap();
+    let detector = resolved.model_index("detector").unwrap();
+    let contract = resolved.contracts.get(detector.get()).unwrap();
+    assert!(
+        matches!(
+            contract.semantic_conflict(),
+            Some((_, _, vig_core::semantics::SemanticConflict::NotDescribed))
+        ),
+        "{:?}",
+        contract.semantic_conflict()
+    );
+    assert!(!contract.auto_variant_selection());
+}
+
+#[test]
+fn an_unknown_output_kind_is_rejected() {
+    // Ein Tippfehler darf nicht als „nicht angegeben" durchgehen: nicht
+    // angegeben schaltet die automatische Wahl ab, ein Tippfehler wuerde sie
+    // stillschweigend auf eine falsche Bedeutung stellen.
+    let text = PERMUTED_LABELS.replacen("kind: detections", "kind: detektionen", 1);
+    assert!(Config::from_yaml(&text).unwrap().resolve().is_err());
+}
+
+#[test]
+fn an_unknown_coordinate_convention_is_rejected() {
+    let text = PERMUTED_LABELS.replacen("coordinates: input_pixels", "coordinates: pixel", 1);
+    assert!(Config::from_yaml(&text).unwrap().resolve().is_err());
+}
+
+#[test]
+fn an_unknown_unit_is_rejected() {
+    let text = PERMUTED_LABELS.replacen("unit: probability", "unit: prozent", 1);
+    assert!(Config::from_yaml(&text).unwrap().resolve().is_err());
+}
+
+#[test]
+fn the_preprocessing_cost_reaches_the_contract() {
+    let resolved = Config::from_yaml(PERMUTED_LABELS)
+        .unwrap()
+        .resolve()
+        .unwrap();
+    let detector = resolved.model_index("detector").unwrap();
+    let contract = resolved.contracts.get(detector.get()).unwrap();
+    assert_eq!(
+        contract.variants.get(0).unwrap().preprocess.as_micros(),
+        900,
+        "Resize und Boxdekodierung entstehen ausserhalb des Backends und \
+         fallen aus jedem Backendprofil heraus"
+    );
+}
+
+#[test]
+fn a_semantics_block_without_outputs_is_rejected() {
+    let text = PERMUTED_LABELS.replacen(
+        "          outputs:\n            - kind: detections",
+        "          outputs: []\n          # entfernt: - kind: detections",
+        1,
+    );
+    assert!(
+        Config::from_yaml(&text).is_err() || Config::from_yaml(&text).unwrap().resolve().is_err()
+    );
+}

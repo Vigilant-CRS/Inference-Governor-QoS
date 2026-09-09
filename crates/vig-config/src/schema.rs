@@ -15,6 +15,10 @@ use vig_core::model::{ModelContract, Quality, QualitySource, QualityValue, Varia
 use vig_core::profile::{RuntimeProfile, SafetyMargin, VariantProfile};
 use vig_core::queue::QueueConfig;
 use vig_core::request::{Criticality, OverflowPolicy, QueuePolicy};
+use vig_core::semantics::{
+    CoordinateConvention, InputContract, LabelSet, OutputKind, OutputSemantics, Unit,
+    VariantSemantics,
+};
 use vig_core::slots::SlotSet;
 
 /// Die einzige unterstuetzte Schemaversion.
@@ -593,6 +597,93 @@ pub struct VariantConfig {
     /// weshalb der Online Estimator es als Erstes korrigiert (ADR-0006).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub under_load: Vec<ProfileConfig>,
+    /// Was diese Variante fachlich liefert und verlangt (NV-10).
+    ///
+    /// Ohne diesen Block entscheidet allein die I/O-Signatur ueber
+    /// Austauschbarkeit — wie vor NV-10. Beschreibt **eine** Variante eines
+    /// Modells ihre Bedeutung, muessen es alle tun: eine halb beschriebene
+    /// Variantenreihe ist gefaehrlicher als eine gar nicht beschriebene, weil
+    /// sie nach Sorgfalt aussieht.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantics: Option<SemanticsConfig>,
+    /// Zeit fuer Vor- und Nachverarbeitung dieser Variante, in Mikrosekunden.
+    ///
+    /// Resize, Normierung, Boxdekodierung — Arbeit, die **ausserhalb** des
+    /// Backends entsteht und deshalb aus jedem Backendprofil herausfaellt.
+    /// Zwei Varianten mit verschiedener Eingabeaufloesung unterscheiden sich
+    /// hier oft mehr als in der Inferenz selbst.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub preprocess_us: u64,
+}
+
+// Serde verlangt eine Referenz in `skip_serializing_if`; darauf hat der
+// Aufrufer keinen Einfluss.
+#[allow(clippy::trivially_copy_pass_by_ref, reason = "Serde-Signatur")]
+const fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
+/// Die fachliche Beschreibung einer Variante (NV-10).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SemanticsConfig {
+    /// Was die Variante an ihrer Eingabe verlangt.
+    #[serde(default)]
+    pub input: InputContractConfig,
+    /// Was sie ausgibt, in Ausgabereihenfolge.
+    pub outputs: Vec<OutputSemanticsConfig>,
+}
+
+/// Der Eingabevertrag einer Variante.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct InputContractConfig {
+    /// Tensorlayout, etwa `nchw`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub layout: String,
+    /// Farbraum, etwa `rgb` oder `bgr`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub color_space: String,
+    /// Normierung, etwa `imagenet`, `zero_one` oder `none`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub normalization: String,
+    /// Erwartete Breite in Pixeln.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub width: u32,
+    /// Erwartete Hoehe in Pixeln.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub height: u32,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref, reason = "Serde-Signatur")]
+const fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
+/// Die Bedeutung einer Ausgabe.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutputSemanticsConfig {
+    /// Die fachliche Art: `detections`, `keypoints`, `depth`,
+    /// `classification`, `segmentation`, `text` oder `opaque`.
+    pub kind: String,
+    /// Die Labels, **in ihrer Reihenfolge**.
+    ///
+    /// Die Reihenfolge ist die Bedeutung: dieselben Klassen anders sortiert
+    /// ergeben dieselben Zahlen mit anderem Inhalt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    /// Das Bezugssystem: `normalized`, `input_pixels`, `source_pixels`
+    /// oder `meters`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub coordinates: String,
+    /// Die Einheit: `none`, `probability`, `logits`, `meters`,
+    /// `millimeters` oder `inverse_depth`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub unit: String,
+    /// Das Layout, etwa `xyxy` oder `cxcywh`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub layout: String,
 }
 
 /// Der Qualitaetswert einer Variante samt Herkunft.
@@ -646,6 +737,101 @@ fn build_variant_profile(
         }
     }
     VariantProfile::from_levels(levels)
+}
+
+/// Uebersetzt die fachliche Beschreibung einer Variante (NV-10).
+///
+/// # Errors
+///
+/// Wenn eine Art, ein Bezugssystem oder eine Einheit unbekannt ist. Ein
+/// Tippfehler darf nicht als „nicht angegeben" durchgehen: nicht angegeben
+/// schaltet die automatische Variantenwahl ab, ein Tippfehler wuerde sie
+/// stillschweigend auf eine falsche Bedeutung stellen.
+fn build_semantics(config: Option<&SemanticsConfig>) -> Result<VariantSemantics, ConfigError> {
+    let Some(config) = config else {
+        return Ok(VariantSemantics::default());
+    };
+    if config.outputs.is_empty() {
+        return Err(ConfigError::Missing {
+            what: "mindestens eine Ausgabe, sonst ist der Block leer und irrefuehrend",
+        });
+    }
+    if config.outputs.len() > vig_core::semantics::MAX_OUTPUTS {
+        return Err(ConfigError::OutOfRange {
+            expected: "hoechstens acht beschriebene Ausgaben",
+        });
+    }
+
+    let mut outputs = ArrayVec::new();
+    for output in &config.outputs {
+        let kind = match output.kind.as_str() {
+            "detections" => OutputKind::Detections,
+            "keypoints" => OutputKind::Keypoints,
+            "depth" => OutputKind::Depth,
+            "classification" => OutputKind::Classification,
+            "segmentation" => OutputKind::Segmentation,
+            "text" => OutputKind::Text,
+            "opaque" => OutputKind::Opaque,
+            other => {
+                return Err(ConfigError::UnknownValue {
+                    found: other.to_owned(),
+                    allowed: "detections, keypoints, depth, classification, \
+                              segmentation, text, opaque",
+                });
+            }
+        };
+        let coordinates = match output.coordinates.as_str() {
+            "" => CoordinateConvention::Unspecified,
+            "normalized" => CoordinateConvention::Normalized,
+            "input_pixels" => CoordinateConvention::InputPixels,
+            "source_pixels" => CoordinateConvention::SourcePixels,
+            "meters" => CoordinateConvention::Meters,
+            other => {
+                return Err(ConfigError::UnknownValue {
+                    found: other.to_owned(),
+                    allowed: "normalized, input_pixels, source_pixels, meters",
+                });
+            }
+        };
+        let unit = match output.unit.as_str() {
+            "" => Unit::Unspecified,
+            "none" => Unit::None,
+            "probability" => Unit::Probability,
+            "logits" => Unit::Logits,
+            "meters" => Unit::Meters,
+            "millimeters" => Unit::Millimeters,
+            "inverse_depth" => Unit::InverseDepth,
+            other => {
+                return Err(ConfigError::UnknownValue {
+                    found: other.to_owned(),
+                    allowed: "none, probability, logits, meters, millimeters, inverse_depth",
+                });
+            }
+        };
+        let semantics = OutputSemantics {
+            kind,
+            labels: LabelSet::of(output.labels.iter().map(String::as_str)),
+            coordinates,
+            unit,
+            layout: vig_core::semantics::tag(&output.layout),
+        };
+        if outputs.push(semantics).is_err() {
+            return Err(ConfigError::OutOfRange {
+                expected: "hoechstens acht beschriebene Ausgaben",
+            });
+        }
+    }
+
+    Ok(VariantSemantics {
+        input: InputContract {
+            layout: vig_core::semantics::tag(&config.input.layout),
+            color_space: vig_core::semantics::tag(&config.input.color_space),
+            normalization: vig_core::semantics::tag(&config.input.normalization),
+            width: config.input.width,
+            height: config.input.height,
+        },
+        outputs,
+    })
 }
 
 /// Die Profil-Fingerabdruecke eines Modells, in Variantenreihenfolge (G-010).
@@ -1263,12 +1449,21 @@ impl ModelConfig {
                     return None;
                 }
             };
+            let semantics = match build_semantics(v.semantics.as_ref()) {
+                Ok(sem) => sem,
+                Err(e) => {
+                    findings.push(e.at(format!("{sub}.semantics")));
+                    return None;
+                }
+            };
             let _ = variants.push(Variant {
                 quality: QualityValue {
                     value: quality,
                     source,
                 },
                 profile: variant_profile,
+                semantics,
+                preprocess: Duration::from_nanos_unbounded(v.preprocess_us.saturating_mul(1_000)),
             });
             physical.push(v.backend_model.clone());
         }
