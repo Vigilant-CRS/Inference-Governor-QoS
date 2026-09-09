@@ -57,13 +57,19 @@ fn as_factor(percent: u64) -> String {
     format!("{whole}.{rest:02}x")
 }
 
-/// Ab diesem Verhaeltnis lohnt Nebenlaeufigkeit nicht mehr, in Prozent.
+/// Ab diesem Verhaeltnis wird `no_corun` vorgeschlagen, in Prozent.
 ///
-/// Bremst ein Modell ein anderes auf die doppelte Laufzeit, bringt paralleles
-/// Ausfuehren keinen Durchsatz mehr — zwei Auftraege brauchen nebeneinander
-/// genauso lange wie nacheinander — und kostet nur Latenz. Der Wert ist damit
-/// keine Geschmacksfrage, sondern der Punkt, an dem sich das Vorzeichen des
-/// Nutzens umdreht.
+/// **Eine Heuristik mit einer Annahme, keine allgemeine Durchsatzaussage**
+/// (NV-11). Sie stimmt fuer zwei Auftraege aehnlicher Laenge: bremst der
+/// Nachbar auf die doppelte Laufzeit, brauchen zwei Auftraege nebeneinander
+/// genauso lange wie nacheinander, und die Latenz ist obendrein schlechter.
+///
+/// Sie stimmt **nicht** allgemein. Bei sehr unterschiedlichen Laufzeiten kann
+/// Nebenlaeufigkeit den Durchsatz erhoehen, obwohl der kurze Auftrag stark
+/// leidet — ob das gut ist, entscheidet der Vertrag und nicht diese Zahl. Der
+/// Kalibrator schlaegt deshalb vor und traegt nicht ungefragt fest ein; die
+/// Ausgabe nennt beide Richtungen samt absoluter Zusatzzeit, damit der
+/// Betreiber die Annahme pruefen kann.
 const NO_CORUN_SLOWDOWN_PERCENT: u64 = 200;
 
 /// Eine Messreihe.
@@ -330,12 +336,30 @@ pub(crate) async fn run(
     Ok(ExitCode::SUCCESS)
 }
 
-/// Ein Paar, das sich gegenseitig zu stark bremst.
+/// Eine gerichtete Paarmessung (NV-11).
+///
+/// `victim` leidet, `co_tenant` stoert. Die Umkehrung ist eine eigene
+/// Messung und kann sehr andere Zahlen ergeben: ein 95-ms-VLM verlaengert
+/// einen 5-ms-Detektor um ein Vielfaches seiner eigenen Laufzeit, der
+/// Detektor den VLM um wenige Prozent.
+struct Directed {
+    victim: String,
+    co_tenant: String,
+    /// Verlangsamung in Prozent; 200 bedeutet die doppelte Laufzeit.
+    slowdown: u64,
+    /// Die zusaetzliche Laufzeit in Mikrosekunden.
+    ///
+    /// Die Groesse, mit der geplant wird. Ein Verhaeltnis heisst bei 5 ms
+    /// etwas anderes als bei 95 ms.
+    added_us: u64,
+}
+
+/// Ein Paar, fuer das `no_corun` vorgeschlagen wird.
 struct Pair {
     a: String,
     b: String,
-    /// Verlangsamung in Prozent; 200 bedeutet die doppelte Laufzeit.
-    slowdown: u64,
+    /// Die staerker leidende Richtung.
+    worst: Directed,
 }
 
 /// Misst fuer jedes Modellpaar, wie stark das eine das andere bremst.
@@ -344,35 +368,112 @@ async fn measure_pairs(
     measurements: &[VariantMeasurement],
     samples: usize,
 ) -> Vec<Pair> {
-    let mut pairs = Vec::new();
-    eprintln!("\nPaarmessung:");
-    for (i, a) in measurements.iter().enumerate() {
-        for b in measurements.iter().skip(i.saturating_add(1)) {
-            if a.logical == b.logical {
+    // Beide Richtungen, und zwar getrennt (NV-11). Bis hierhin wurde nur eine
+    // gemessen und das Ergebnis symmetrisch angewandt — genau der Fehler, um
+    // den es geht.
+    let mut directed: Vec<Directed> = Vec::new();
+    eprintln!("\nPaarmessung (gerichtet, beide Richtungen):");
+    for victim in measurements {
+        for co_tenant in measurements {
+            if victim.logical == co_tenant.logical {
                 continue;
             }
             let stop = Arc::new(AtomicBool::new(false));
-            let tasks = spawn_load(client, &b.request, 1, &stop);
-            let under = quantiles(Box::pin(measure(client, &a.request, samples)).await);
+            let tasks = spawn_load(client, &co_tenant.request, 1, &stop);
+            let under = quantiles(Box::pin(measure(client, &victim.request, samples)).await);
             stop_load(&stop, tasks).await;
 
-            let slowdown = slowdown_percent(under.p50_us, a.solo.p50_us);
+            let slowdown = slowdown_percent(under.p50_us, victim.solo.p50_us);
+            let added_us = under.p50_us.saturating_sub(victim.solo.p50_us);
             eprintln!(
-                "  {:<10} neben {:<10} {}",
-                a.logical,
-                b.logical,
-                as_factor(slowdown)
+                "  {:<10} neben {:<10} {:>8}  +{} us",
+                victim.logical,
+                co_tenant.logical,
+                as_factor(slowdown),
+                added_us
             );
-            if slowdown >= NO_CORUN_SLOWDOWN_PERCENT {
-                pairs.push(Pair {
-                    a: a.logical.clone(),
-                    b: b.logical.clone(),
-                    slowdown,
-                });
-            }
+            directed.push(Directed {
+                victim: victim.logical.clone(),
+                co_tenant: co_tenant.logical.clone(),
+                slowdown,
+                added_us,
+            });
         }
     }
+
+    // `no_corun` ist symmetrisch — der Slot verbietet das gleichzeitige
+    // Laufen, nicht eine Richtung. Vorgeschlagen wird ein Paar deshalb, wenn
+    // **eine** Richtung die Heuristik reisst; genannt wird, welche.
+    let mut pairs: Vec<Pair> = Vec::new();
+    for entry in &directed {
+        if entry.slowdown < NO_CORUN_SLOWDOWN_PERCENT {
+            continue;
+        }
+        let already = pairs.iter().any(|p| {
+            (p.a == entry.victim && p.b == entry.co_tenant)
+                || (p.a == entry.co_tenant && p.b == entry.victim)
+        });
+        if already {
+            continue;
+        }
+        pairs.push(Pair {
+            a: entry.victim.clone(),
+            b: entry.co_tenant.clone(),
+            worst: Directed {
+                victim: entry.victim.clone(),
+                co_tenant: entry.co_tenant.clone(),
+                slowdown: entry.slowdown,
+                added_us: entry.added_us,
+            },
+        });
+    }
+    report_asymmetry(&directed);
     pairs
+}
+
+/// Nennt die Paare, deren Richtungen deutlich auseinanderliegen (NV-11).
+///
+/// Der Betreiber soll sehen, dass `no_corun` eine symmetrische Regel auf eine
+/// unsymmetrische Wirklichkeit legt. Wo die beiden Richtungen weit
+/// auseinanderliegen, ist die Serialisierung eine Entscheidung und keine
+/// Ableitung.
+fn report_asymmetry(directed: &[Directed]) {
+    let mut named: Vec<(String, String)> = Vec::new();
+    for forward in directed {
+        let Some(backward) = directed
+            .iter()
+            .find(|d| d.victim == forward.co_tenant && d.co_tenant == forward.victim)
+        else {
+            continue;
+        };
+        let (high, low) = (
+            forward.slowdown.max(backward.slowdown),
+            forward.slowdown.min(backward.slowdown),
+        );
+        // Faktor zwei zwischen den Richtungen: darunter ist der Unterschied
+        // Messrauschen, darueber eine Eigenschaft der Paarung.
+        if high < low.saturating_mul(2) {
+            continue;
+        }
+        let key = if forward.victim < forward.co_tenant {
+            (forward.victim.clone(), forward.co_tenant.clone())
+        } else {
+            (forward.co_tenant.clone(), forward.victim.clone())
+        };
+        if named.contains(&key) {
+            continue;
+        }
+        named.push(key);
+        eprintln!(
+            "  HINWEIS {} leidet {} unter {}, umgekehrt nur {}. \n\
+             \x20        `no_corun` ist symmetrisch; ob die Serialisierung den \n\
+             \x20        Durchsatzverlust wert ist, entscheidet der Vertrag.",
+            forward.victim,
+            as_factor(forward.slowdown),
+            forward.co_tenant,
+            as_factor(backward.slowdown),
+        );
+    }
 }
 
 /// Traegt die Messungen in die Konfiguration ein.
@@ -548,15 +649,20 @@ fn report(pairs: &[Pair]) {
     if pairs.is_empty() {
         return;
     }
-    eprintln!("\nAls `no_corun` eingetragen:");
+    eprintln!("\nAls `no_corun` vorgeschlagen:");
     for pair in pairs {
         eprintln!(
-            "  [{}, {}] — {} Verlangsamung. Ab dem Doppelten bringt \
-             Nebenlaeufigkeit
-    keinen Durchsatz mehr und kostet nur Latenz.",
+            "  [{}, {}] — {} leidet {} unter {} (+{} us). \n\
+             \x20   Heuristik: ab der doppelten Laufzeit brauchen zwei \n\
+             \x20   Auftraege **aehnlicher Laenge** nebeneinander so lange wie \n\
+             \x20   nacheinander. Bei ungleichen Laengen kann Nebenlaeufigkeit \n\
+             \x20   trotzdem Durchsatz bringen — das entscheidet der Vertrag.",
             pair.a,
             pair.b,
-            as_factor(pair.slowdown),
+            pair.worst.victim,
+            as_factor(pair.worst.slowdown),
+            pair.worst.co_tenant,
+            pair.worst.added_us,
         );
     }
 }

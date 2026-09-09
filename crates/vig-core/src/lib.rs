@@ -30,6 +30,7 @@ pub mod contract_ext;
 pub mod estimator;
 pub mod feasibility;
 pub mod ids;
+pub mod interference;
 pub mod metrics;
 pub mod model;
 pub mod overload;
