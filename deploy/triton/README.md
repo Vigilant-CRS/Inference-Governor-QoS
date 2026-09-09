@@ -1,7 +1,7 @@
 # Triton-Referenzumgebung für Gate M3
 
-Diese Anleitung baut die Umgebung, gegen die OneTimer gemessen wird. Sie
-beschreibt **nicht**, wie OneTimer ausgeliefert wird — das NVIDIA-Image wird
+Diese Anleitung baut die Umgebung, gegen die Vigilant gemessen wird. Sie
+beschreibt **nicht**, wie Vigilant ausgeliefert wird — das NVIDIA-Image wird
 nicht redistribuiert, sondern von der offiziellen Registry bezogen (Spec 20.3,
 6.4).
 
@@ -53,7 +53,7 @@ Jedes Verzeichnis braucht eine `config.pbtxt`. Die wesentlichen Punkte:
 ```protobuf
 # Kein dynamisches Batching. Die Warteschlange gehört vor den Governor, nicht
 # dahinter (ADR-0002) - sonst entsteht eine zweite, unsichtbare Queue, die
-# OneTimers Entscheidungen neu ordnet.
+# Vigilants Entscheidungen neu ordnet.
 max_batch_size: 0
 instance_group [ { count: 1, kind: KIND_GPU } ]
 ```

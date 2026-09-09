@@ -17,7 +17,7 @@ services:
       --allow-client-shm=true
       --rate-limit=execution_count
     volumes:
-      - ${ONETIMER_MODELS:?Pfad zum Triton-Modellrepository setzen}:/models:ro
+      - ${VIG_MODELS:?Pfad zum Triton-Modellrepository setzen}:/models:ro
     devices:
       - nvidia.com/gpu=all
     # Nicht optional: der Datenpfad läuft über System Shared Memory, und ein
@@ -50,6 +50,11 @@ services:
       - "0.0.0.0:9090"
     volumes:
       - ${VIG_CONFIG:?Pfad zur vig.yaml setzen}:/etc/vig/vig.yaml:ro
+      # Nur lesend, und nur fuer den Artefakt-Digest des Profilmanifests
+      # (ADR-0019): ueber das Inferenzprotokoll ist nicht erkennbar, ob jemand
+      # eine Gewichtsdatei unter derselben Versionsnummer ausgetauscht hat.
+      # Ohne den Mount bleibt das Feld `unknown` — ehrlich, aber blind.
+      - ${VIG_MODELS}:/models:ro
     # Dieselbe IPC-Sicht wie Triton: der Governor reicht Shm-Referenzen durch
     # und muss dieselben Regionen sehen können wie der Client.
     ipc: host
@@ -59,5 +64,17 @@ services:
     depends_on:
       triton:
         condition: service_healthy
+    # `/readyz` und nicht `/healthz`: der Prozess kann leben und trotzdem
+    # nichts ausrichten, etwa wenn das Backend verschwunden ist. Ein Restart
+    # darf **nicht** daran haengen — er bringt das Backend nicht zurueck und
+    # wirft den Leasezustand weg, den die Erholung braucht. Deshalb steht hier
+    # ein Healthcheck fuer die Rollout-Entscheidung und keine
+    # `restart`-Direktive.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9090/readyz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 20s
     environment:
       RUST_LOG: "${RUST_LOG:-info}"

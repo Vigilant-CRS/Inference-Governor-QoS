@@ -16,8 +16,11 @@ COPY . .
 RUN cargo build --release -p vig-cli
 
 FROM debian:bookworm-slim
+# `curl` ist fuer den Healthcheck da und fuer nichts anderes. Ein Image ohne
+# jede Moeglichkeit, seinen eigenen Bereitschaftsendpunkt abzufragen, laesst
+# sich in einem Rollout nicht sinnvoll pruefen.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
 
 # Kein root: der Governor braucht keine Rechte über das hinaus, was ein
@@ -26,6 +29,7 @@ RUN useradd --system --create-home --uid 10001 vig
 USER vig
 
 COPY --from=build /src/target/release/vig /usr/local/bin/vig
-EXPOSE 9001
+# 9001 nimmt Inferenzanfragen, 9090 traegt /metrics, /healthz und /readyz.
+EXPOSE 9001 9090
 ENTRYPOINT ["vig"]
 CMD ["--help"]
