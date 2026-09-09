@@ -3,6 +3,12 @@
 Stand: 2026-09-09. Ausgangscode: `fa4c909339e5cc6851b309c0ea8e8d451c6fab34`.
 Status: ausgearbeiteter Architektur- und Umsetzungsentwurf, **nicht implementierte Produktversion**.
 
+> **Dieser Ordner ist der Plan, nicht der Stand.** Er wird nicht
+> fortgeschrieben — sonst waere hinterher nicht mehr zu erkennen, was am
+> 09.09.2026 geplant und was spaeter entschieden wurde. Was heute umgesetzt
+> ist, steht in [docs/STATUS.md](../../STATUS.md); warum es so umgesetzt
+> wurde, in den ADRs ab [0019](../../adr/0019-profile-identity-beyond-a-metadata-hash.md).
+
 ## Entscheidung in einem Absatz
 
 Vigilant weiterentwickeln, den deterministischen Rust-Kern und die Triton-Anbindung
