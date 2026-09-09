@@ -82,6 +82,16 @@ pub enum Msg {
         /// Die Generation, fuer die der Nachweis gilt.
         generation: u64,
     },
+    /// Die Abgleichs-Basislinie eines Backendmodells ist eingetroffen.
+    ///
+    /// Einmal beim Start. Bis sie da ist, laufen Auslieferungen dieses Modells
+    /// ohne zaehlerbasierten Nachweis — vorsichtig und nicht falsch.
+    ReconcileBaseline {
+        /// Das Backendmodell.
+        model: String,
+        /// Der Statistikzaehler zum Startzeitpunkt.
+        completed: u64,
+    },
     /// Der beobachtete Hardwarezustand hat sich gemeldet (NV-04, NV-06).
     ///
     /// Der Kern misst nichts; er bekommt den Zustand gesagt, wie er auch die
@@ -137,10 +147,13 @@ struct Lease {
     /// Wie viele Inferenzen dieser Governor diesem Modell bis hier
     /// ausgeliefert hat, diese eingeschlossen.
     ///
-    /// Meldet das Backend mindestens so viele abgeschlossene Inferenzen, ist
-    /// von unserer Arbeit nichts mehr offen. Das ist der Nachweis, und er
-    /// braucht keine vorher abgefragte Basislinie — die waere ein Rennen
-    /// gegen ein Backend, das inzwischen fertig geworden sein kann.
+    /// Das Ziel des Abgleichs ist **Basislinie plus dieser Wert**, gerechnet
+    /// erst beim Abgleich. Die Basislinie ist der Punkt: Tritons
+    /// Statistikzaehler laeuft ueber die Lebensdauer des Triton-Prozesses, und
+    /// der ueberlebt den Governor gewoehnlich. Ohne sie waere „Backend meldet
+    /// mindestens so viele Abschluesse wie wir ausgeliefert haben" nach einem
+    /// Governor-Neustart beim ersten Request sofort wahr — und der Abgleich
+    /// gaebe einen Kredit frei, waehrend die Recheneinheit noch rechnet.
     dispatched_total: u64,
     /// Wie der Anspruch derzeit steht.
     state: LeaseState,
@@ -161,6 +174,14 @@ enum LeaseState {
     /// Es wird nie mehr eine Antwort kommen. Der Nachweis muss deshalb beim
     /// Backend geholt werden.
     Reconciling,
+    /// Der Aufruf brach ab, und der Abgleich konnte noch nicht anlaufen.
+    ///
+    /// Es fehlt die Basislinie des Statistikzaehlers; sie wird beim Start
+    /// geholt und ist gewoehnlich binnen Millisekunden da. Ein Aufruf, der
+    /// genau davor abbricht, haelt seinen Kredit — und der naechste Tick
+    /// versucht den Abgleich erneut. Ein Ziel ohne Basislinie waere im Zweifel
+    /// zu klein und gaebe den Kredit frei, der gehalten gehoert.
+    AwaitingBaseline,
 }
 
 /// Meldet dem Actor, dass niemand mehr auf einen Request wartet.
@@ -323,12 +344,14 @@ struct Actor {
     /// Wie oft ein Ausfuehrungsende durch Abgleich belegt wurde.
     reconciled: u64,
     /// Wie viele Inferenzen dieser Governor je Backendmodell ausgeliefert hat.
-    ///
-    /// Die Bezugsgroesse des Abgleichs. Sie ist der Grund, warum kein
-    /// Basiswert vom Backend geholt werden muss: was wir gestartet haben,
-    /// wissen wir selbst — und eine Basislinie, die erst der Abgleich abfragt,
-    /// kaeme zu spaet, wenn das Backend inzwischen fertig geworden ist.
     dispatched_per_model: HashMap<String, u64>,
+    /// Der Statistikzaehler je Backendmodell zum Startzeitpunkt.
+    ///
+    /// Einmal beim Start geholt, nicht beim Abgleich: eine Basislinie, die
+    /// erst der Abgleich abfragt, kaeme zu spaet — das Backend kann inzwischen
+    /// fertig geworden sein. Fehlt ein Eintrag, gibt es fuer dieses Modell
+    /// keinen zaehlerbasierten Nachweis.
+    reconcile_baseline: HashMap<String, u64>,
     /// Requests, die wegen vollstaendiger Quarantaene abgewiesen wurden.
     metrics_rejected_quarantined: u64,
     /// Backendaufrufe, die noch offen sind.
@@ -432,6 +455,7 @@ fn spawn_owned(
 
     let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
     spawn_hardware_probe(&tx);
+    spawn_baseline_probe(&tx, &config, &backends);
     // Die Revision der Profilidentitaet: solange sie nicht aus dem Manifest
     // kommt, ist sie 1 fuer eine geladene Konfiguration. Wichtig ist nicht
     // ihr Wert, sondern dass sie sich aendert, wenn die Profile es tun.
@@ -455,6 +479,7 @@ fn spawn_owned(
         consecutive_transport_failures: 0,
         reconciled: 0,
         dispatched_per_model: HashMap::new(),
+        reconcile_baseline: HashMap::new(),
         metrics_rejected_quarantined: 0,
         outstanding: 0,
         shutdown: None,
@@ -652,10 +677,17 @@ impl Actor {
             // Es kommt nie mehr eine Antwort. Der Nachweis muss vom Backend
             // geholt werden — eine Frist waere hier eine Behauptung, keine
             // Feststellung. Bis der Nachweis vorliegt, bleibt der Kredit.
+            // Der Kredit wird in jedem Fall gehalten. Konnte der Abgleich
+            // nicht anlaufen — die Basislinie fehlt noch —, merkt sich der
+            // Anspruch das und der naechste Tick versucht es erneut.
+            let started = self.start_reconciliation(&lease, request);
             if let Some(entry) = self.leases.get_mut(&request) {
-                entry.state = LeaseState::Reconciling;
+                entry.state = if started {
+                    LeaseState::Reconciling
+                } else {
+                    LeaseState::AwaitingBaseline
+                };
             }
-            self.start_reconciliation(&lease, request);
             tracing::warn!(
                 %request,
                 "Backendaufruf abgebrochen; Ausfuehrungsende unbekannt. Der \
@@ -770,37 +802,22 @@ impl Actor {
                 // was ein geordnetes Herunterfahren vermeiden soll.
                 self.shutdown = Some(done);
             }
+            Msg::ReconcileBaseline { model, completed } => {
+                self.on_baseline(model, completed);
+                // Und sofort die Anspruechen nachziehen, die auf sie gewartet
+                // haben. Nicht erst beim naechsten Tick: in einem leeren
+                // System gibt es keinen — der Actor schlaeft dann, bis wieder
+                // Arbeit kommt, und ein gehaltener Kredit waere bis dahin
+                // unversorgt.
+                self.retry_pending_reconciliation();
+            }
             Msg::HardwareState { state } => self.on_hardware_state(state),
             Msg::Tick => {
                 self.scheduler.on_event(now, Event::Tick, &mut sink);
                 self.report_contract_mismatch(now);
+                self.retry_pending_reconciliation();
             }
-            Msg::Snapshot(tx) => {
-                // Die Margen liegen nicht im Zaehlerblock, sondern in den
-                // Reglern. Sie gehoeren trotzdem in den Snapshot: ueber Stunden
-                // gelesen zeigen sie, ob das System zur Ruhe kommt.
-                let mut metrics = *self.scheduler.metrics();
-                metrics.models = self.config.model_names.len();
-                // Timeout und Quarantaene kennt nur das Gateway: der Kern hat
-                // keine Uhr und keinen Backendaufruf.
-                metrics.slots = self.config.slots.len() as u64;
-                metrics.backend_timeouts = self.backend_timeouts;
-                metrics.quarantined = self.held_credits();
-                metrics.consecutive_transport_failures = self.consecutive_transport_failures;
-                metrics.rejected_quarantined = self.metrics_rejected_quarantined;
-                metrics.reconciled = self.reconciled;
-                metrics.outstanding_backend_calls = self.outstanding;
-                for (index, slot) in metrics.margin_percent.iter_mut().enumerate() {
-                    if let Ok(model) = u16::try_from(index) {
-                        *slot = self
-                            .scheduler
-                            .margin_of(vig_core::ModelIdx(model))
-                            .as_percent();
-                    }
-                }
-                let _ = tx.send(metrics);
-                return;
-            }
+            Msg::Snapshot(tx) => self.on_snapshot(tx),
         }
 
         for action in actions {
@@ -938,19 +955,18 @@ impl Actor {
         // und endet erst mit einem Nachweis. Die Wanduhrzeit dient
         // ausschliesslich dem spaeteren Abgleich gegen Tritons `last_inference`.
         self.next_generation = self.next_generation.saturating_add(1);
-        let dispatched_total = self
+        let dispatched_total = *self
             .dispatched_per_model
             .entry(oip.model_name.clone())
             .and_modify(|n| *n = n.saturating_add(1))
             .or_insert(1);
-        let target = *dispatched_total;
         self.leases.insert(
             request,
             Lease {
                 generation: self.next_generation,
                 slot,
                 backend_model: oip.model_name.clone(),
-                dispatched_total: target,
+                dispatched_total,
                 state: LeaseState::Running,
             },
         );
@@ -1064,18 +1080,33 @@ impl Actor {
     /// strict` setzt es auf unserer Seite durch. Teilt sich ein fremder Client
     /// dasselbe Modell, zaehlt Triton dessen Arbeit mit, und der Nachweis wird
     /// zum Indiz. Das steht so in `docs/how-it-works.md`.
-    fn start_reconciliation(&self, lease: &Lease, request: RequestId) {
+    fn start_reconciliation(&self, lease: &Lease, request: RequestId) -> bool {
         let Some(backend) = self.backend_for_model_name(&lease.backend_model) else {
             tracing::warn!(
                 model = %lease.backend_model,
                 "kein Backendclient fuer den Abgleich; der Slotkredit bleibt gehalten"
             );
-            return;
+            return false;
+        };
+        // Basislinie plus eigene Auslieferungen — in der Zaehldomaene des
+        // Backends. Ist die Basislinie noch nicht da (sie wird beim Start
+        // geholt), wird der Abgleich nicht gestartet und beim naechsten Tick
+        // erneut versucht. Ein Ziel ohne Basislinie waere im Zweifel zu klein
+        // und gaebe einen Kredit frei, der gehalten gehoert.
+        let Some(target) = self
+            .reconcile_baseline
+            .get(&lease.backend_model)
+            .map(|base| base.saturating_add(lease.dispatched_total))
+        else {
+            tracing::debug!(
+                model = %lease.backend_model,
+                "Abgleich wartet auf die Basislinie; der Slotkredit bleibt gehalten"
+            );
+            return false;
         };
         let tx = self.tx.clone();
         let model = lease.backend_model.clone();
         let generation = lease.generation;
-        let target = lease.dispatched_total;
         let interval = std::time::Duration::from_millis(RECONCILE_INTERVAL_MS);
 
         tokio::spawn(async move {
@@ -1083,6 +1114,10 @@ impl Actor {
             loop {
                 match backend.completion_evidence(&model).await {
                     Ok(evidence) => {
+                        // Ein rueckwaerts laufender Zaehler heisst: das Backend
+                        // ist neu gestartet. Dann ist unsere Ausfuehrung
+                        // sicher beendet — der Prozess, der sie hielt, gibt es
+                        // nicht mehr.
                         let restarted = evidence.completed < highest;
                         highest = highest.max(evidence.completed);
                         if evidence.completed >= target || restarted {
@@ -1104,6 +1139,101 @@ impl Actor {
                 tokio::time::sleep(interval).await;
             }
         });
+        true
+    }
+
+    /// Beantwortet eine Metrikabfrage.
+    ///
+    /// Ausgelagert, weil der Abzug mit jedem Paket waechst und `handle` ein
+    /// Verteiler bleiben soll.
+    fn on_snapshot(&self, tx: oneshot::Sender<Metrics>) {
+        // Die Margen liegen nicht im Zaehlerblock, sondern in den
+        // Reglern. Sie gehoeren trotzdem in den Snapshot: ueber Stunden
+        // gelesen zeigen sie, ob das System zur Ruhe kommt.
+        let mut metrics = *self.scheduler.metrics();
+        metrics.models = self.config.model_names.len();
+        // Timeout und Quarantaene kennt nur das Gateway: der Kern hat
+        // keine Uhr und keinen Backendaufruf.
+        metrics.slots = self.config.slots.len() as u64;
+        metrics.backend_timeouts = self.backend_timeouts;
+        metrics.quarantined = self.held_credits();
+        metrics.consecutive_transport_failures = self.consecutive_transport_failures;
+        metrics.rejected_quarantined = self.metrics_rejected_quarantined;
+        metrics.reconciled = self.reconciled;
+        metrics.reconcile_baseline_missing = self.baselines_missing();
+        metrics.outstanding_backend_calls = self.outstanding;
+        for (index, slot) in metrics.margin_percent.iter_mut().enumerate() {
+            if let Ok(model) = u16::try_from(index) {
+                *slot = self
+                    .scheduler
+                    .margin_of(vig_core::ModelIdx(model))
+                    .as_percent();
+            }
+        }
+        let _ = tx.send(metrics);
+    }
+
+    /// Uebernimmt die Abgleichs-Basislinie eines Backendmodells (NV-20).
+    ///
+    /// Angenommen wird sie nur, **solange dem Modell noch nichts ausgeliefert
+    /// wurde**. Danach koennte der Zaehler eigene, schon abgeschlossene
+    /// Inferenzen enthalten; die Basislinie waere dann zu hoch, das Ziel
+    /// unerreichbar und der Kredit dauerhaft gehalten. Eine zu hohe Basislinie
+    /// ist nicht die sichere Seite, sondern eine andere Art, kaputt zu sein.
+    fn on_baseline(&mut self, model: String, completed: u64) {
+        if self.reconcile_baseline.contains_key(&model) {
+            // Eine zweite Meldung ist eine spaetere Momentaufnahme und als
+            // Basislinie falsch.
+            return;
+        }
+        if self
+            .dispatched_per_model
+            .get(&model)
+            .is_some_and(|n| *n > 0)
+        {
+            tracing::warn!(
+                %model,
+                "Basislinie kaeme nach der ersten Auslieferung und waere \
+                 womoeglich zu hoch; fuer dieses Modell gibt es keinen \
+                 zaehlerbasierten Endnachweis. Governor bei erreichbarem \
+                 Backend neu starten."
+            );
+            return;
+        }
+        self.reconcile_baseline.insert(model, completed);
+        // Und sofort die Anspruechen nachziehen, die auf sie gewartet haben.
+        // Nicht erst beim naechsten Tick: in einem leeren System gibt es
+        // keinen — der Actor schlaeft dann, bis wieder Arbeit kommt, und ein
+        // gehaltener Kredit waere bis dahin unversorgt.
+        self.retry_pending_reconciliation();
+    }
+
+    /// Wie viele Backendmodelle keine Abgleichs-Basislinie haben.
+    fn baselines_missing(&self) -> u64 {
+        let total: usize = self.config.backend_models.iter().map(Vec::len).sum();
+        u64::try_from(total.saturating_sub(self.reconcile_baseline.len())).unwrap_or(u64::MAX)
+    }
+
+    /// Versucht ausstehende Abgleiche erneut zu starten.
+    ///
+    /// Ein Abgleich kommt nicht zustande, solange die Basislinie fehlt. Sie
+    /// wird beim Start geholt und ist gewoehnlich binnen Millisekunden da —
+    /// ein Aufruf, der genau davor abbricht, soll deshalb nicht dauerhaft
+    /// unversorgt bleiben.
+    fn retry_pending_reconciliation(&mut self) {
+        let waiting: Vec<(RequestId, Lease)> = self
+            .leases
+            .iter()
+            .filter(|(_, lease)| lease.state == LeaseState::AwaitingBaseline)
+            .map(|(id, lease)| (*id, lease.clone()))
+            .collect();
+        for (request, lease) in waiting {
+            if self.start_reconciliation(&lease, request)
+                && let Some(entry) = self.leases.get_mut(&request)
+            {
+                entry.state = LeaseState::Reconciling;
+            }
+        }
     }
 
     /// Uebernimmt den beobachteten Hardwarezustand (NV-04, NV-06).
@@ -1215,6 +1345,86 @@ impl Actor {
         };
         let _ = reply.send(outcome);
     }
+}
+
+/// Holt einmal beim Start den Statistikzaehler je Backendmodell.
+///
+/// Die Basislinie des Abgleichs. Tritons Zaehler laeuft ueber die Lebensdauer
+/// des Triton-Prozesses, und der ueberlebt den Governor gewoehnlich: nach
+/// einem Governor-Neustart steht er schon bei tausenden Abschluessen. Ohne
+/// Basislinie waere „das Backend meldet mindestens so viele Abschluesse wie
+/// wir ausgeliefert haben" beim ersten Request sofort wahr — und der Abgleich
+/// gaebe einen Slotkredit frei, waehrend die Recheneinheit noch rechnet.
+///
+/// Einmal beim Start und nicht beim Abgleich: eine Basislinie, die erst der
+/// Abgleich abfragt, kaeme zu spaet.
+fn spawn_baseline_probe(
+    tx: &mpsc::Sender<Msg>,
+    config: &Arc<Resolved>,
+    backends: &HashMap<String, Arc<dyn Executor>>,
+) {
+    // Je Backendmodell den Client seines Endpunkts.
+    let mut targets: Vec<(String, Arc<dyn Executor>)> = Vec::new();
+    for (index, variants) in config.backend_models.iter().enumerate() {
+        let Ok(model_index) = u16::try_from(index) else {
+            continue;
+        };
+        let endpoint = config.endpoint_of(vig_core::ModelIdx(model_index));
+        let Some(backend) = backends.get(endpoint) else {
+            continue;
+        };
+        for name in variants {
+            targets.push((name.clone(), Arc::clone(backend)));
+        }
+    }
+
+    let tx = tx.clone();
+    let interval = std::time::Duration::from_millis(RECONCILE_INTERVAL_MS);
+    tokio::spawn(async move {
+        // Je Modell wiederholen, bis eine Antwort kommt. Ein Backend, das beim
+        // Start gerade hochfaehrt, soll nicht dauerhaft ohne Basislinie
+        // bleiben — nach der ersten Auslieferung wird sie aber nicht mehr
+        // angenommen, und das ist der Grund fuer die Eile.
+        let mut open = targets;
+        while !open.is_empty() {
+            let mut still_open = Vec::new();
+            for (model, backend) in open {
+                match backend.completion_evidence(&model).await {
+                    Ok(evidence) => {
+                        tracing::debug!(
+                            %model,
+                            completed = evidence.completed,
+                            "Abgleichs-Basislinie geholt"
+                        );
+                        if tx
+                            .send(Msg::ReconcileBaseline {
+                                model,
+                                completed: evidence.completed,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %model, %error,
+                            "noch keine Abgleichs-Basislinie vom Backend; \
+                             bis dahin haelt ein abgebrochener Aufruf seinen \
+                             Slotkredit"
+                        );
+                        still_open.push((model, backend));
+                    }
+                }
+            }
+            if still_open.is_empty() {
+                return;
+            }
+            open = still_open;
+            tokio::time::sleep(interval).await;
+        }
+    });
 }
 
 /// Wie oft der Hardwarezustand gelesen wird, in Millisekunden.

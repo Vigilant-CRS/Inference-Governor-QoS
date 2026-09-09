@@ -235,6 +235,13 @@ fn render_derived(out: &mut String, metrics: &Metrics) {
     let _ = writeln!(out, "# TYPE vig_predictor_active gauge");
     let _ = writeln!(out, "vig_predictor_active {}", metrics.predictor_active);
 
+    render_scalar(
+        out,
+        "vig_reconcile_baseline_missing",
+        "Backendmodelle ohne Abgleichs-Basislinie.",
+        metrics.reconcile_baseline_missing,
+    );
+
     render_per_model_series(out, metrics);
 
     for (index, count) in metrics.variant_selected.iter().enumerate() {
@@ -251,6 +258,13 @@ fn render_derived(out: &mut String, metrics: &Metrics) {
             "vig_variant_selected_total{{variant=\"{index}\"}} {count}"
         );
     }
+}
+
+/// Eine einzelne Messgroesse mit HELP und TYPE.
+fn render_scalar(out: &mut String, name: &str, help: &str, value: u64) {
+    let _ = writeln!(out, "# HELP {name} {help}");
+    let _ = writeln!(out, "# TYPE {name} gauge");
+    let _ = writeln!(out, "{name} {value}");
 }
 
 /// Die Reihen, die je Modell einen Wert haben.

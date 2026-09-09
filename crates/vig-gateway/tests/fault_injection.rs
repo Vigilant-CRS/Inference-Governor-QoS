@@ -366,3 +366,153 @@ async fn a_late_proof_of_completion_frees_the_slot() {
     );
     assert_eq!(fake.executed(), 2);
 }
+
+/// Wartet, bis die Abgleichs-Basislinie steht.
+async fn await_baseline(handle: &vig_gateway::Handle) {
+    for _ in 0..40 {
+        if handle.metrics().await.unwrap().reconcile_baseline_missing == 0 {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("die Basislinie kam nicht");
+}
+
+/// **Fehlerbild: Governor-Neustart gegen ein lange laufendes Backend.**
+///
+/// Das ist der Normalfall bei jedem Update, und er war falsch. Tritons
+/// Statistikzaehler laeuft ueber die Lebensdauer des Triton-Prozesses, und der
+/// ueberlebt den Governor. Ohne Basislinie war „das Backend meldet mindestens
+/// so viele Abschluesse wie wir ausgeliefert haben" beim **ersten** Request
+/// sofort wahr — der Abgleich gab einen Slotkredit frei, waehrend die
+/// Recheneinheit womoeglich noch rechnete. Genau das, was NV-00 ausschliessen
+/// sollte.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_against_a_long_running_backend_does_not_free_a_credit() {
+    let fake = Arc::new(FakeExecutor::default());
+    // Das Backend laeuft seit Stunden: fuenftausend abgeschlossene Inferenzen.
+    fake.set_evidence(5_000);
+    fake.expect_error(
+        "detector_main",
+        BackendError::Rejected {
+            code: tonic::Code::Unavailable,
+            message: "transport closed mid-call".to_owned(),
+        },
+    );
+    let handle = actor_with(Arc::clone(&fake));
+    await_baseline(&handle).await;
+
+    let clock = MonotonicClock::start();
+    assert!(
+        handle
+            .submit(descriptor(1, clock.now()), request_for("detector"))
+            .await
+            .is_err()
+    );
+    assert_eq!(handle.metrics().await.unwrap().quarantined, 1);
+
+    // Der Zaehler bewegt sich nicht. Ohne Basislinie waere 5000 >= 1 sofort
+    // wahr gewesen; mit Basislinie ist das Ziel 5001.
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let metrics = handle.metrics().await.unwrap();
+    assert_eq!(
+        metrics.quarantined, 1,
+        "der Kredit gehoert gehalten, solange kein Ende belegt ist"
+    );
+    assert_eq!(metrics.reconciled, 0);
+
+    // Erst wenn das Backend eine Inferenz **mehr** meldet, ist es belegt.
+    fake.set_evidence(5_001);
+    let mut released = false;
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let m = handle.metrics().await.unwrap();
+        if m.quarantined == 0 {
+            assert_eq!(m.reconciled, 1, "genau einmal freigegeben");
+            released = true;
+            break;
+        }
+    }
+    assert!(released, "mit Nachweis endet der Anspruch");
+}
+
+/// **Fehlerbild: das Backend liefert keine Statistik.**
+///
+/// Dann gibt es keine Basislinie und damit keinen zaehlerbasierten Nachweis.
+/// Der Kredit bleibt gehalten — unbequem und richtig — und die Metrik sagt es,
+/// damit der Betreiber den Governor bei erreichbarem Backend neu starten kann.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_backend_without_statistics_reports_the_missing_baseline() {
+    let fake = Arc::new(FakeExecutor::default());
+    fake.set_capabilities(vig_gateway::Capabilities {
+        completion_evidence: false,
+        decoupled_endpoint: true,
+    });
+    fake.expect_error(
+        "detector_main",
+        BackendError::Rejected {
+            code: tonic::Code::Unavailable,
+            message: "transport closed mid-call".to_owned(),
+        },
+    );
+    let handle = actor_with(Arc::clone(&fake));
+    let clock = MonotonicClock::start();
+
+    assert!(
+        handle
+            .submit(descriptor(1, clock.now()), request_for("detector"))
+            .await
+            .is_err()
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let metrics = handle.metrics().await.unwrap();
+    assert!(
+        metrics.reconcile_baseline_missing > 0,
+        "der Betreiber soll den Grund sehen, nicht nur den gehaltenen Kredit"
+    );
+    assert_eq!(
+        metrics.quarantined, 1,
+        "ohne Nachweisweg bleibt der Kredit gehalten"
+    );
+}
+
+/// **Fehlerbild: die Basislinie kommt zu spaet.**
+///
+/// Nach der ersten Auslieferung wird sie nicht mehr angenommen: der Zaehler
+/// koennte eigene, schon abgeschlossene Inferenzen enthalten, die Basislinie
+/// waere zu hoch und das Ziel unerreichbar. Eine zu hohe Basislinie ist nicht
+/// die sichere Seite, sondern eine andere Art, kaputt zu sein.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_late_baseline_is_refused_and_reported() {
+    let fake = Arc::new(FakeExecutor::default());
+    // Erst keine Statistik — die Basislinie kommt nicht durch.
+    fake.set_capabilities(vig_gateway::Capabilities {
+        completion_evidence: false,
+        decoupled_endpoint: true,
+    });
+    fake.expect_ok("detector_main");
+    let handle = actor_with(Arc::clone(&fake));
+    let clock = MonotonicClock::start();
+
+    // Eine Auslieferung, bevor die Basislinie da ist.
+    assert!(
+        handle
+            .submit(descriptor(1, clock.now()), request_for("detector"))
+            .await
+            .is_ok()
+    );
+
+    // Jetzt liefert das Backend Statistik — zu spaet.
+    fake.set_capabilities(vig_gateway::Capabilities {
+        completion_evidence: true,
+        decoupled_endpoint: true,
+    });
+    fake.set_evidence(9_999);
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+    assert!(
+        handle.metrics().await.unwrap().reconcile_baseline_missing > 0,
+        "eine Basislinie nach der ersten Auslieferung wird nicht angenommen"
+    );
+}

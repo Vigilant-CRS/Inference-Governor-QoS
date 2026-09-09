@@ -1051,6 +1051,23 @@ async fn a_proven_execution_end_releases_the_credit_exactly_once() {
     let service = service_with(&endpoint, "  inference_timeout_ms: 100\n");
     let handle = service.scheduler_handle();
 
+    // Erst die Abgleichs-Basislinie abwarten (NV-20). Sie wird beim Start
+    // geholt und nur angenommen, solange dem Modell noch nichts ausgeliefert
+    // wurde: danach koennte sie eigene, schon abgeschlossene Inferenzen
+    // enthalten und waere zu hoch.
+    let mut ready = false;
+    for _ in 0..40 {
+        if handle.metrics().await.unwrap().reconcile_baseline_missing == 0 {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        ready,
+        "ohne Basislinie gibt es keinen zaehlerbasierten Nachweis"
+    );
+
     backend_impl
         .fail_with
         .lock()

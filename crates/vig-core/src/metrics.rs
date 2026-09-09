@@ -118,6 +118,20 @@ pub struct Metrics {
     /// noch antwortet. Erreicht er die Slotzahl, kann nichts mehr starten —
     /// das ist der Zustand, den die Bereitschaftspruefung melden muss.
     pub quarantined: u64,
+    /// Backendmodelle ohne Abgleichs-Basislinie (NV-20).
+    ///
+    /// Die Basislinie ist der Statistikzaehler des Backends zum Startzeitpunkt
+    /// des Governors. Ohne sie ist kein zaehlerbasierter Endnachweis moeglich:
+    /// Tritons Zaehler laeuft ueber die Lebensdauer des Triton-Prozesses, und
+    /// der ueberlebt den Governor gewoehnlich — „Backend meldet mindestens so
+    /// viele Abschluesse wie wir ausgeliefert haben" waere nach einem Neustart
+    /// sofort wahr.
+    ///
+    /// Ist dieser Wert dauerhaft groesser als null, haelt ein abgebrochener
+    /// Aufruf seinen Slotkredit, bis das Backend nachweislich neu startet. Das
+    /// ist die sichere Antwort und ein Grund, den Governor bei erreichbarem
+    /// Backend neu zu starten.
+    pub reconcile_baseline_missing: u64,
     /// Vom Client zurueckgezogene Requests, die noch warteten.
     ///
     /// Eine Gesundheitsgroesse, keine Fehlerzahl: steigt sie, laufen Clients

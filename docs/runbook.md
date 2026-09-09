@@ -49,6 +49,30 @@ the case above, no slot is stuck — the calls return immediately with an error.
 endpoint, or a network policy. `vig doctor -c your.yaml` names which. One
 successful call resets the counter and the endpoint goes green again.
 
+### `vig_reconcile_baseline_missing` above zero
+
+**What happened.** The governor could not read the backend's completion
+counter at startup. Without that baseline there is no counter-based proof of
+completion, so an aborted call holds its slot credit until the backend
+demonstrably restarts.
+
+Why a baseline is needed at all: Triton's statistics counter runs for the
+lifetime of the *Triton* process, and that process normally outlives the
+governor. After a governor restart the counter already stands at thousands of
+completions — "the backend reports at least as many completions as we
+dispatched" would be true on the very first request, and the reconciliation
+would free a credit while the compute unit is still busy.
+
+**What to do.** Restart the governor while the backend is reachable. The
+baseline is only accepted before the first dispatch to a model: a baseline read
+later could already include our own completed inferences, which would make it
+too high and the target unreachable — a credit held forever is not the safe
+side, it is a different way of being broken.
+
+**Why this is not automatic.** The governor cannot tell whether a counter it
+reads late already contains its own work. Refusing the late baseline and saying
+so is the only honest option.
+
 ### `vig_best_effort_starved_total` climbing
 
 **What happened.** Protected streams leave no headroom. Background work never
@@ -118,6 +142,11 @@ The shutdown deadline is bounded. A drain that never ends is not a drain.
 1. **Read the current lease state** before stopping: `curl -s
    localhost:9090/metrics | grep vig_quarantined_slots`. Non-zero means a
    compute unit may be busy; wait for it.
+1. **Start the new process while the backend is reachable.** It reads the
+   backend's completion counter once at startup as the reconciliation baseline,
+   and it only accepts that baseline before the first dispatch. Check
+   `vig_reconcile_baseline_missing 0` before sending traffic — otherwise an
+   aborted call will hold its slot credit for the life of the process.
 2. **Drain, then stop.** Never `SIGKILL` a governor with held credits — the
    next process cannot know what the previous one was holding.
 3. **Start the new version and check `/readyz`** before sending traffic.
