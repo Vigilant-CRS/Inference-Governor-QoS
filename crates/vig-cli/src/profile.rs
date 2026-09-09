@@ -59,6 +59,7 @@ pub(crate) async fn run(
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let text = std::fs::read_to_string(path)?;
     let config = Config::from_yaml(&text)?;
+    let identity = &probe_hardware(identity.clone());
     // Bewusst ohne `resolve()`: das Werkzeug soll die Profile erst erzeugen
     // und darf sie deshalb nicht voraussetzen.
     let (endpoint, models) = config.profiling_targets();
@@ -162,6 +163,23 @@ pub(crate) async fn run(
         return Ok(ExitCode::FAILURE);
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Belegt fehlende Geraetefelder aus der Hardwarebeobachtung vor (NV-04).
+///
+/// Was der Betreiber angegeben hat, bleibt stehen. Was er nicht angegeben hat
+/// und was sich beobachten laesst, wird ergaenzt und genannt. Was sich nicht
+/// beobachten laesst, bleibt `unknown`.
+pub(crate) fn probe_hardware(mut identity: IdentityArgs) -> IdentityArgs {
+    if identity.no_hardware_probe {
+        return identity;
+    }
+    let gpu_index = identity.gpu_index;
+    let filled = crate::identity::prefill_from_hardware(&mut identity, gpu_index);
+    if !filled.is_empty() {
+        println!("# Aus der Hardware ergaenzt: {}", filled.join(", "));
+    }
+    identity
 }
 
 /// Das Messergebnis einer Variante.

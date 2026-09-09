@@ -86,6 +86,7 @@ pub(crate) async fn run(
     verdict = verdict.max(check_profiles(&resolved, offline).await);
     verdict = verdict.max(check_variant_signatures(&resolved, offline).await);
     verdict = verdict.max(check_security(&resolved));
+    verdict = verdict.max(check_hardware(offline));
 
     println!("\nRESULT {}", verdict.label());
     Ok(match verdict {
@@ -453,6 +454,68 @@ async fn check_profiles(resolved: &Resolved, offline: bool) -> Verdict {
             vig_config::manifest::ManifestVerdict::Verified => {
                 ok(&format!("{name}: Profilherkunft vollstaendig belegt"));
             }
+        }
+    }
+    verdict
+}
+
+/// Der beobachtbare Hardwarezustand (NV-04).
+///
+/// Lesend und ohne Root. Ein Befund hier verhindert keinen Start — die
+/// Hardware ist, wie sie ist. Er sagt dem Betreiber aber vor der Messung,
+/// was seine Zahlen spaeter bedeuten werden: ein Profil, das unter einem
+/// Leistungslimit entstand, beschreibt nicht die Karte, sondern die Karte
+/// unter diesem Limit.
+fn check_hardware(offline: bool) -> Verdict {
+    use vig_platform::Collector as _;
+
+    if offline {
+        warn("Hardware nicht gelesen (--offline)");
+        return Verdict::ReadyWithWarnings;
+    }
+
+    let mut collector = vig_platform::NvidiaSmi::default();
+    let snapshot = match collector.snapshot() {
+        Ok(s) => s,
+        Err(reason) => {
+            // Kein Fehler: der Governor braucht die Beobachtung nicht zum
+            // Laufen. Ohne sie plant er nur nicht zustandsabhaengig.
+            warn(&format!(
+                "Hardwarezustand nicht lesbar ({reason}). \
+                 Der Governor laeuft, plant aber ohne Geraetezustand."
+            ));
+            return Verdict::ReadyWithWarnings;
+        }
+    };
+
+    if snapshot.gpus.is_empty() {
+        warn("nvidia-smi meldet keine GPU");
+        return Verdict::ReadyWithWarnings;
+    }
+
+    let mut verdict = Verdict::Ready;
+    for gpu in &snapshot.gpus {
+        let name = gpu.name.value().map_or("?", String::as_str);
+        let driver = gpu.driver.value().map_or("?", String::as_str);
+        let cc = gpu.compute_capability.value().map_or("?", String::as_str);
+        let mib = gpu.memory_total_mib.value().copied().unwrap_or(0);
+        ok(&format!(
+            "GPU {}: {name}, Treiber {driver}, CC {cc}, {mib} MiB",
+            gpu.index
+        ));
+
+        let limiting = gpu.limiting_reasons();
+        if !limiting.is_empty() {
+            let clocks = match (gpu.clock_sm_mhz.value(), gpu.clock_sm_max_mhz.value()) {
+                (Some(current), Some(max)) => format!(" ({current} von {max} MHz)"),
+                _ => String::new(),
+            };
+            warn(&format!(
+                "GPU {}: gedrosselt{clocks}, Grund {limiting:?}. Ein hier gemessenes \
+                 Profil gilt nur fuer diesen Zustand.",
+                gpu.index
+            ));
+            verdict = verdict.max(Verdict::ReadyWithWarnings);
         }
     }
     verdict

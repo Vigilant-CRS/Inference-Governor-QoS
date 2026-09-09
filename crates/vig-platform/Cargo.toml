@@ -1,0 +1,18 @@
+[package]
+name = "vig-platform"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "BUSL-1.1"
+description = "Lesende Hardwarebeobachtung fuer den Vigilant Inference Governor"
+repository = "https://github.com/Vigilant-CRS/Inference-QoS"
+publish = false
+
+[dependencies]
+# Fuer Aufzeichnung und Replay von Snapshots. Sonst nichts: dieses Crate
+# liest Text und Dateien, es spricht mit keiner Bibliothek des Herstellers.
+serde = { version = "1.0.229", features = ["derive"] }
+serde_norway = "0.9.42"
+
+[lints]
+workspace = true

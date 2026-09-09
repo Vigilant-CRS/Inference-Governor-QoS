@@ -18,6 +18,7 @@ vig-config = { path = "../vig-config", version = "0.1.0" }
 vig-protocol-oip = { path = "../vig-protocol-oip", version = "0.1.0" }
 vig-backend-triton = { path = "../vig-backend-triton", version = "0.1.0" }
 vig-gateway = { path = "../vig-gateway", version = "0.1.0" }
+vig-platform = { path = "../vig-platform", version = "0.1.0" }
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 tonic = { version = "0.14.6", features = ["tls-ring"] }

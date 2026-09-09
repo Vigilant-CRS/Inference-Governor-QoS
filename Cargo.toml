@@ -7,6 +7,7 @@ members = [
     "crates/vig-cli",
     "crates/vig-config",
     "crates/vig-gateway",
+    "crates/vig-platform",
     "crates/vig-protocol-oip",
     "crates/vig-sim",
 ]

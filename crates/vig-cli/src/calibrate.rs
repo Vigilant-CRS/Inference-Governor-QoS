@@ -185,6 +185,7 @@ pub(crate) async fn run(
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let text = std::fs::read_to_string(path)?;
     let mut config = Config::from_yaml(&text)?;
+    let identity = &crate::profile::probe_hardware(identity.clone());
     let (endpoint, models) = config.profiling_targets();
     let slots = config.backend.slots.max(1);
     let client = Arc::new(TritonClient::new(&endpoint));

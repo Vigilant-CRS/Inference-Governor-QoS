@@ -39,6 +39,19 @@ uname -a
 docker inspect <triton> --format '{{.Config.Image}}'
 ```
 
+`vig doctor` reads the same things and adds the one that is easy to miss —
+whether the card is throttled right now, and why:
+
+```
+OK   GPU 0: NVIDIA GeForce RTX 3070 Laptop GPU, Treiber 580.173.02, CC 8.6, 8192 MiB
+WARN GPU 0: gedrosselt (1830 von 2100 MHz), Grund [SwPowerCap].
+     Ein hier gemessenes Profil gilt nur fuer diesen Zustand.
+```
+
+It only ever reads. The governor never sets clocks, persistence mode, power
+limits or `nvpmodel`, and none of this needs root. A tool that changes the
+conditions it measures under is not measuring.
+
 Power mode matters on Jetson and is easy to forget:
 
 ```bash
@@ -84,6 +97,13 @@ you do not state stays `unknown` — which is honest, and different from
 `verified`. `--model-repository` is what makes the artifact digest possible;
 without it, a weight file swapped under the same version number stays
 invisible.
+
+Device name, compute capability, driver and memory are filled in from
+`nvidia-smi` where you did not state them, and the tool says what it filled in.
+What you state always wins: the probe does not know which card you meant if
+several are installed. `--no-hardware-probe` turns it off. If the card is
+throttled during the measurement, you get a warning before the numbers — a
+profile measured under a power cap describes the card under that power cap.
 
 Run it twice. If p95 differs by more than about 10 % between runs, something
 else was using the GPU. When you merge two runs into one profile, say so with

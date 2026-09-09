@@ -62,6 +62,16 @@ pub(crate) struct IdentityArgs {
     /// How many independent runs were merged into this profile.
     #[arg(long, value_name = "N", default_value_t = 1)]
     pub independent_runs: u32,
+    /// Which GPU to read device identity from when it is not given explicitly.
+    #[arg(long, value_name = "INDEX", default_value_t = 0)]
+    pub gpu_index: u32,
+    /// Do not read device identity from the hardware.
+    ///
+    /// Without this, `vig` fills in GPU name, compute capability, driver and
+    /// memory from `nvidia-smi` where you did not state them. What you state
+    /// always wins.
+    #[arg(long)]
+    pub no_hardware_probe: bool,
     /// Up to how many concurrently active models the numbers are claimed valid.
     #[arg(long, value_name = "N")]
     pub valid_up_to_models: Option<u32>,
@@ -84,6 +94,8 @@ impl Default for IdentityArgs {
             rate_limiter: None,
             dataset: None,
             independent_runs: 1,
+            gpu_index: 0,
+            no_hardware_probe: true,
             valid_up_to_models: None,
             valid_up_to_occupancy_pct: None,
         }
@@ -112,6 +124,72 @@ pub(crate) enum ArtifactLookup {
     NotRequested,
     /// Es wurde gesucht und nicht gefunden.
     Failed(String),
+}
+
+/// Belegt die Geraetefelder aus der Hardwarebeobachtung vor (NV-04).
+///
+/// Was der Betreiber ausdruecklich angegeben hat, bleibt stehen: eine
+/// Beobachtung ist eine Beobachtung, aber sie weiss nicht, welche Karte
+/// gemeint war, wenn mehrere im Rechner stecken. Eine ausdrueckliche Angabe
+/// zu ueberschreiben waere deshalb genau der falsche Vorrang.
+///
+/// Gibt zurueck, was ergaenzt wurde — der Betreiber soll sehen, was das
+/// Werkzeug fuer ihn ausgefuellt hat, statt es spaeter in der Datei zu
+/// entdecken.
+pub(crate) fn prefill_from_hardware(args: &mut IdentityArgs, gpu_index: u32) -> Vec<String> {
+    use vig_platform::Collector as _;
+
+    let mut filled = Vec::new();
+    let mut collector = vig_platform::NvidiaSmi::default();
+    let snapshot = match collector.snapshot() {
+        Ok(s) => s,
+        Err(reason) => {
+            // Kein Abbruch und kein Rateschluss: ohne Beobachtung bleiben die
+            // Felder `unknown`, und das ist eine ehrliche Aussage.
+            eprintln!("    Hardware nicht beobachtbar ({reason}); Geraetefelder bleiben unknown");
+            return filled;
+        }
+    };
+    let Some(gpu) = snapshot.gpu(gpu_index) else {
+        eprintln!("    Keine GPU mit Index {gpu_index}; Geraetefelder bleiben unknown");
+        return filled;
+    };
+
+    let mut take = |target: &mut Option<String>, value: Option<&String>, name: &str| {
+        if target.is_none()
+            && let Some(value) = value
+        {
+            *target = Some(value.clone());
+            filled.push(format!("{name}={value}"));
+        }
+    };
+    take(&mut args.device, gpu.name.value(), "device");
+    take(
+        &mut args.compute_capability,
+        gpu.compute_capability.value(),
+        "compute_capability",
+    );
+    take(&mut args.driver, gpu.driver.value(), "driver");
+    if args.device_memory_mib.is_none()
+        && let Some(mib) = gpu.memory_total_mib.value()
+    {
+        args.device_memory_mib = Some(*mib);
+        filled.push(format!("device_memory_mib={mib}"));
+    }
+
+    // Ein gedrosselter Zustand waehrend der Messung gehoert nicht ins
+    // Manifest — er gehoert dem Betreiber gesagt, **bevor** er misst. Ein
+    // Profil, das unter einem Leistungslimit entstand, beschreibt nicht die
+    // Karte, sondern die Karte unter diesem Limit.
+    let limiting = gpu.limiting_reasons();
+    if !limiting.is_empty() {
+        eprintln!(
+            "    WARNUNG Die Karte ist waehrend der Messung gedrosselt: {limiting:?}. \n\
+             \x20   Das gemessene Profil gilt dann nur fuer diesen Zustand."
+        );
+    }
+
+    filled
 }
 
 /// Bestimmt den Artefakt-Digest eines Backendmodells.
