@@ -129,6 +129,47 @@ mistakes included — that is what makes the rest of it credible.
 Until those five exist for a platform, that platform is untested — and we will
 say so rather than extrapolate.
 
+## Before you configure variants: check they are interchangeable
+
+The governor picks the variant per request and does not tell the client. That
+freedom requires every variant to serve the same interface. Check before you
+configure, not after a switch breaks a client in the field:
+
+```bash
+tools/onnx-signature.py model_a.onnx model_b.onnx
+```
+
+It reads the ONNX graph directly — no `onnx` or `onnxruntime` needed, and the
+weights are never read, so a 133 MB model costs milliseconds. Exit code 0 means
+the signatures match, 1 means they do not.
+
+Two real examples from our own model sets, both of which would have silently
+broken a client:
+
+```
+detector_large/1/model.onnx   out  resnetv17_dense0_fwd:FP32[?,1000]
+detector_small/1/model.onnx   out  resnetv15_dense0_fwd:FP32[?,1000]
+```
+
+Identical shape, different output name — a client that asks for the large
+variant's output by name gets a backend error after a switch.
+
+```
+rfdetr.onnx            in input:FP32[1,3,512,512]   out labels:FP32[1,300,10]
+rfdetr_768.onnx        in input:FP32[1,3,768,768]   out labels:FP32[1,300,10]
+detector_23cls.onnx   in input:FP32[1,3,768,768]   out labels:FP32[1,300,24]
+rfdetr_28cls_4_large.onnx in input:FP32[1,3,768,768]   out labels:FP32[1,300,29]
+```
+
+Four generations of the same detector: different input resolutions and 10, 24
+and 29 classes. None of them are interchangeable, and the governor switches
+automatic selection off for such a set — correctly.
+
+Note what the tool **cannot** tell you. If two of those models had the same
+class count in a different order, the shapes would match and the meaning would
+not. That gap closes only with a declared `io_signature` and your own
+statement that the variants mean the same thing.
+
 ## Known model limits
 
 - **The slot set models one execution unit.** MIG instances and multiple GPUs
