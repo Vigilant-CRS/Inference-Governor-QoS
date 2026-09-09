@@ -105,14 +105,21 @@ hier, weil „umgesetzt" und „wirksam" verschiedene Aussagen sind:
   zu erledigen ist, und die Voraussetzung fuer NV-08, NV-18 und NV-20. Ohne
   einen benannten Lastfall und eine benannte Hardware ist jeder weitere Ausbau
   eine Vermutung.
-- **NV-20 — Releasequalifikation.** Feature- und Hardwarematrix, Update und
-  Rollback ohne verlorene Lease-Generation, Runbook, Supportgrenzen.
-  SBOM, signierbare Artefakte und `cargo auditable` sind da; das
-  [Runbook](runbook.md), die [Supportmatrix](support-matrix.md) und die
-  Fehlerinjektion ohne GPU (`crates/vig-gateway/tests/fault_injection.rs`)
-  ebenfalls. Der Update- und Rollback-Pfad ist geprueft — und hat dabei einen
-  echten Fehler zutage gebracht (Abgleichs-Basislinie, Commit `b6f0777`).
-  Offen bleibt die Freigabe durch einen Pilotverantwortlichen.
+- **NV-20 — Releasequalifikation.** Fertig bis auf das, was eine Person oder
+  eine Messung braucht:
+
+  | | |
+  |---|---|
+  | Feature- und Hardwarematrix | [support-matrix.md](support-matrix.md) |
+  | Runbook, Recovery- und Supportgrenzen | [runbook.md](runbook.md) |
+  | Fehlerinjektion, 11 Fehlerbilder ohne GPU | `crates/vig-gateway/tests/fault_injection.rs` |
+  | Update und Rollback | geprueft; brachte einen echten Fehler zutage (`b6f0777`) |
+  | Rechteliste, Modellverwaltung, Offlinebetrieb | [support-matrix.md](support-matrix.md) |
+  | Installationspfad mit Bereitschaftspruefung | `deploy/docker-compose/` |
+  | SBOM, signierbare Artefakte, `cargo auditable` | `.github/workflows/release.yml` |
+  | Dauerlauf auf dem freizugebenden Stand | laeuft |
+  | Datenpfadbudgets | offen, braucht eine Messung |
+  | Freigabe durch Pilotverantwortliche | offen, braucht NV-19 |
 - **Zweite Hardware.** Die Logik ist portabel, die Zahlen sind es nicht. Auf
   `aarch64` ist der Kern unter Emulation gebaut und getestet; ueber Laufzeit,
   Durchsatz und Interferenz auf Jetson sagt das nichts
