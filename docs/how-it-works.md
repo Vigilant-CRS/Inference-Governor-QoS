@@ -218,10 +218,25 @@ the scheduling.
 | Situation | Behaviour |
 |---|---|
 | Backend returns an error | Counted as a failure, not a completion. The margin controller is not trained on it. |
-| Backend does not answer within `inference_timeout_ms` | The **client** is released with `DeadlineExceeded`; the **slot credit is not**. The GPU may still be busy, and returning the credit would schedule a second execution onto it. The slot stays quarantined until the backend actually answers. |
+| Backend does not answer within `inference_timeout_ms` | The **client** is released; the **slot credit is not**. The GPU may still be busy, and returning the credit would schedule a second execution onto it. The credit is held until the backend actually answers. |
+| The call itself is aborted mid-flight (connection dropped) | Same: the client is released with reason `execution_unknown`, the credit is held. An abort tells you nothing about whether the GPU stopped — and unlike a timeout, no answer will ever arrive. The credit is released only against **evidence** from the backend's own statistics: either the model reports at least as many completed inferences as we dispatched to it, or its counter has dropped, which only happens on a reload. A connection that never opened is different — nothing was dispatched, so the credit returns immediately. |
 | Every slot quarantined | `/readyz` reports unavailable. `/healthz` stays green — restarting the governor does not restart the backend. |
 | SIGTERM | New traffic stops; accepted work is answered; running inferences run to completion, up to a 20 s drain deadline. |
 | Client disconnects | The request is removed from the queue. A decomposed job stops at its next quantum boundary. |
+
+### The one assumption behind reconciliation
+
+Releasing a held credit against Triton's completion counter is sound **as long
+as this governor is the only caller of that model**. That is the documented
+deployment, and `trust: strict` enforces our side of it. If another client
+shares the same model, Triton counts its work too, and the counter becomes
+evidence rather than proof — a foreign completion could release our credit
+early.
+
+We state this rather than hide it because the alternative is worse: without
+reconciliation the only options are a blind timer, which releases the credit
+on no evidence at all, or holding forever, which turns a single dropped
+connection into a permanently unusable slot.
 
 ## The core has no clock
 

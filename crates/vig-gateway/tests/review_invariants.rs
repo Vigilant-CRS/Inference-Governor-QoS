@@ -968,3 +968,118 @@ async fn an_aborted_call_holds_the_credit_a_refused_connection_does_not() {
     );
     assert_eq!(metrics.outstanding_backend_calls, 0);
 }
+
+// ---------------------------------------------------------------------------
+// NV-00: Ressourcen nur mit Endnachweis freigeben
+// ---------------------------------------------------------------------------
+
+/// Rechnet das Backend nach einem Abbruch weiter, entsteht kein neuer Kredit.
+///
+/// Das war vorher ein Timer: nach Ablauf einer Frist wurde der Slotkredit
+/// zurückgegeben. Eine verstrichene Frist beweist aber nicht, dass die GPU
+/// fertig ist — sie sagt nur, dass wir nicht länger warten wollten.
+///
+/// Hier meldet die Backendstatistik über mehrere Timeoutlängen hinweg
+/// unverändert *nichts abgeschlossen*. Der Kredit bleibt gehalten.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_credit_is_returned_while_the_backend_may_still_compute() {
+    use std::sync::atomic::Ordering;
+
+    let backend_impl = Arc::new(mock_backend::MockBackend::new(
+        std::time::Duration::from_millis(1),
+    ));
+    // Das Backend meldet nichts als abgeschlossen: aus seiner Sicht läuft
+    // unsere Inferenz noch.
+    backend_impl.completed.store(0, Ordering::Relaxed);
+    let endpoint = mock_backend::start(backend_impl.clone()).await.to_string();
+
+    let service = service_with(&endpoint, "  inference_timeout_ms: 100\n");
+    let handle = service.scheduler_handle();
+
+    // Ein Aufruf, der mit Unavailable abbricht: Ausführungsende unbekannt.
+    backend_impl
+        .fail_with
+        .lock()
+        .unwrap()
+        .replace(tonic::Code::Unavailable);
+    let status = service
+        .model_infer(tonic::Request::new(request()))
+        .await
+        .expect_err("der Aufruf bricht ab");
+    // Der Client erfährt, was wir **nicht** wissen: ob seine Inferenz lief.
+    // Für alles, was nicht wiederholbar ist, ist genau das die Auskunft, die
+    // er braucht — „Backendfehler" wäre hier eine Behauptung zu viel.
+    assert_eq!(
+        status
+            .metadata()
+            .get("vig-reason")
+            .and_then(|v| v.to_str().ok()),
+        Some("execution_unknown")
+    );
+
+    // Über mehrere Timeoutlängen hinweg bleibt der Kredit gehalten, weil der
+    // Abschlusszähler sich nicht bewegt.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let metrics = handle.metrics().await.unwrap();
+    assert_eq!(
+        metrics.quarantined, 1,
+        "ohne Endnachweis bleibt der Kredit gehalten"
+    );
+    assert_eq!(metrics.reconciled, 0);
+
+    // Und der Drain meldet in diesem Zustand keinen Erfolg.
+    assert!(
+        !handle
+            .drain(std::time::Duration::from_millis(300))
+            .await
+            .unwrap(),
+        "ein offener Anspruch ist kein sauberes Ende"
+    );
+}
+
+/// Belegt das Backend das Ende, wird der Kredit genau einmal frei.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_proven_execution_end_releases_the_credit_exactly_once() {
+    use std::sync::atomic::Ordering;
+
+    let backend_impl = Arc::new(mock_backend::MockBackend::new(
+        std::time::Duration::from_millis(1),
+    ));
+    backend_impl.completed.store(0, Ordering::Relaxed);
+    let endpoint = mock_backend::start(backend_impl.clone()).await.to_string();
+
+    let service = service_with(&endpoint, "  inference_timeout_ms: 100\n");
+    let handle = service.scheduler_handle();
+
+    backend_impl
+        .fail_with
+        .lock()
+        .unwrap()
+        .replace(tonic::Code::Unavailable);
+    let _ = service.model_infer(tonic::Request::new(request())).await;
+    assert_eq!(handle.metrics().await.unwrap().quarantined, 1);
+
+    // Jetzt belegt das Backend, dass es so viele Inferenzen abgeschlossen hat,
+    // wie der Governor ihm ausgeliefert hat: von unserer Arbeit ist nichts
+    // mehr offen.
+    backend_impl.completed.store(1, Ordering::Relaxed);
+
+    let mut released = false;
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let m = handle.metrics().await.unwrap();
+        if m.quarantined == 0 {
+            assert_eq!(m.reconciled, 1, "genau einmal freigegeben");
+            released = true;
+            break;
+        }
+    }
+    assert!(released, "mit Nachweis endet der Anspruch");
+
+    // Danach nimmt der Governor wieder Arbeit an.
+    backend_impl.fail_with.lock().unwrap().take();
+    service
+        .model_infer(tonic::Request::new(request()))
+        .await
+        .expect("der Slot ist wieder nutzbar");
+}

@@ -7,8 +7,22 @@ use tonic::transport::{Channel, Endpoint};
 use vig_protocol_oip::inference::grpc_inference_service_client::GrpcInferenceServiceClient;
 use vig_protocol_oip::inference::{
     ModelInferRequest, ModelInferResponse, ModelMetadataRequest, ModelMetadataResponse,
-    ModelReadyRequest, ServerLiveRequest, ServerReadyRequest,
+    ModelReadyRequest, ModelStatisticsRequest, ServerLiveRequest, ServerReadyRequest,
 };
+
+/// Was das Backend ueber die abgeschlossene Arbeit eines Modells meldet.
+///
+/// Der Nachweis, mit dem ein gehaltener Slotkredit zurueckgegeben wird.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Evidence {
+    /// Erfolgreich **und** fehlgeschlagen abgeschlossene Inferenzen.
+    ///
+    /// Beides zaehlt: eine fehlgeschlagene Inferenz hat die Recheneinheit
+    /// genauso wieder freigegeben wie eine erfolgreiche.
+    pub completed: u64,
+    /// Zeitpunkt der letzten Anfrage, Millisekunden seit Epoch.
+    pub last_inference_ms: u64,
+}
 
 /// Timeout fuer Verbindungsaufbau und Gesundheitsabfragen.
 ///
@@ -314,6 +328,53 @@ impl TritonClient {
 
         payload.ok_or_else(|| BackendError::Malformed {
             detail: format!("{model}: der Stream endete ohne Antwort"),
+        })
+    }
+
+    /// Der Ausfuehrungsnachweis eines Modells: abgeschlossene Inferenzen und
+    /// der Zeitpunkt der letzten Anfrage.
+    ///
+    /// Das ist die Evidenz, mit der ein gehaltener Slotkredit zurueckgegeben
+    /// wird. Ein abgelaufener Timer beweist nicht, dass die Recheneinheit
+    /// fertig ist; ein gestiegener Abschlusszaehler tut es.
+    ///
+    /// `last_inference` ist Tritons Zeitstempel der letzten Anfrage in
+    /// Millisekunden seit Epoch — eine **Wanduhr**, nicht die monotone
+    /// Schedulingzeit. Sie wird ausschliesslich fuer diesen Abgleich benutzt
+    /// und fliesst in keine Planungsentscheidung ein.
+    ///
+    /// # Errors
+    ///
+    /// Siehe [`BackendError`]. Meldet das Backend keine Statistik zu diesem
+    /// Modell, ist das [`BackendError::UnknownModel`] — und kein Nachweis.
+    pub async fn completion_evidence(&self, model: &str) -> Result<Evidence, BackendError> {
+        let mut client = self.client(self.channel().await?);
+        let response = client
+            .model_statistics(ModelStatisticsRequest {
+                name: model.to_owned(),
+                version: String::new(),
+            })
+            .await
+            .map_err(BackendError::from)?
+            .into_inner();
+
+        let stats = response
+            .model_stats
+            .into_iter()
+            .find(|s| s.name == model)
+            .ok_or_else(|| BackendError::UnknownModel {
+                model: model.to_owned(),
+            })?;
+
+        let inference = stats.inference_stats.unwrap_or_default();
+        let completed = inference
+            .success
+            .map_or(0, |d| d.count)
+            .saturating_add(inference.fail.map_or(0, |d| d.count));
+
+        Ok(Evidence {
+            completed,
+            last_inference_ms: stats.last_inference,
         })
     }
 

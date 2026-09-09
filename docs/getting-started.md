@@ -188,7 +188,8 @@ The numbers worth watching:
 | `vig_deferred_for_protected_total` | how often the governor deliberately idled |
 | `vig_best_effort_starved_total` | background work that never ran — **watch this one** |
 | `vig_protected_deadline_misses_total` | the number that should stay at zero |
-| `vig_quarantined_slots` | slot credits held because the backend stopped answering |
+| `vig_quarantined_slots` | slot credits held because the execution end is not yet proven |
+| `vig_execution_reconciled_total` | ends the governor proved via the backend's own statistics rather than a timer |
 
 `/healthz` answers "is the process alive". `/readyz` answers "can it currently
 do anything" — they are different questions with different consequences.
@@ -204,6 +205,7 @@ metadata header:
 | `stale` | `Aborted` | Nothing. The result would have been worthless. |
 | `infeasible` | `ResourceExhausted` | Retry after load drops, or lower your requirements. |
 | `backend_timeout` | `DeadlineExceeded` | Check the backend; the governor is still holding that slot. |
+| `execution_unknown` | `Unavailable` | The call aborted mid-flight. Your request **may or may not** have run — if it is not idempotent, treat it as possibly executed. |
 | `backend_failed` | `Unavailable` | Retry may help. |
 | `cancelled` | `Cancelled` | You disconnected. |
 

@@ -68,6 +68,20 @@ pub struct MockBackend {
     /// Verbindungsfehler nachstellen: dort kommt eine Antwort, nur eine
     /// schlechte.
     pub hang: bool,
+    /// Wie viele Inferenzen die Statistik als abgeschlossen meldet.
+    ///
+    /// Der Nachweis, mit dem ein gehaltener Slotkredit endet. Getrennt von
+    /// `served`, damit ein Test „das Backend rechnet noch" darstellen kann:
+    /// angenommen ja, abgeschlossen nein.
+    pub completed: AtomicU64,
+    /// Zeitstempel der letzten Anfrage, Millisekunden seit Epoch.
+    pub last_inference_ms: AtomicU64,
+    /// Wenn gesetzt, scheitert jeder Inferenzaufruf mit diesem Code.
+    ///
+    /// Damit laesst sich ein Abbruch **waehrend** des Aufrufs nachstellen —
+    /// im Unterschied zu einem abgelehnten Verbindungsaufbau, der etwas ganz
+    /// anderes ueber die Ausfuehrung aussagt.
+    pub fail_with: std::sync::Mutex<Option<tonic::Code>>,
 }
 
 impl MockBackend {
@@ -83,6 +97,9 @@ impl MockBackend {
             stream_payloads: 1,
             stream_final_marker: false,
             hang: false,
+            completed: AtomicU64::new(0),
+            last_inference_ms: AtomicU64::new(0),
+            fail_with: std::sync::Mutex::new(None),
         }
     }
 
@@ -230,6 +247,9 @@ impl GrpcInferenceService for Service {
             .lock()
             .unwrap()
             .push(request.model_name.clone());
+        if let Some(code) = *self.inner.fail_with.lock().unwrap() {
+            return Err(Status::new(code, "mock bricht ab"));
+        }
         if self.inner.hang {
             self.inner.served.fetch_add(1, Ordering::Relaxed);
             // Laenger als jedes Testtimeout, aber endlich: ein Test darf nicht
@@ -336,9 +356,28 @@ impl GrpcInferenceService for Service {
 
     async fn model_statistics(
         &self,
-        _r: Request<ModelStatisticsRequest>,
+        r: Request<ModelStatisticsRequest>,
     ) -> Result<Response<ModelStatisticsResponse>, Status> {
-        Err(Status::unimplemented("model_statistics"))
+        let name = r.into_inner().name;
+        Ok(Response::new(ModelStatisticsResponse {
+            model_stats: vec![ModelStatistics {
+                name,
+                version: "1".to_owned(),
+                last_inference: self.inner.last_inference_ms.load(Ordering::Relaxed),
+                inference_count: 0,
+                execution_count: 0,
+                inference_stats: Some(InferStatistics {
+                    success: Some(StatisticDuration {
+                        count: self.inner.completed.load(Ordering::Relaxed),
+                        ns: 0,
+                    }),
+                    ..Default::default()
+                }),
+                batch_stats: Vec::new(),
+                memory_usage: Vec::new(),
+                response_stats: std::collections::HashMap::new(),
+            }],
+        }))
     }
 
     async fn repository_index(

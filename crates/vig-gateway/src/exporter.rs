@@ -408,6 +408,14 @@ fn render_health(out: &mut String, metrics: &Metrics) {
 
     let _ = writeln!(
         out,
+        "# HELP vig_execution_reconciled_total Ausfuehrungsenden, die durch \
+         Abgleich mit dem Backend belegt wurden."
+    );
+    let _ = writeln!(out, "# TYPE vig_execution_reconciled_total counter");
+    let _ = writeln!(out, "vig_execution_reconciled_total {}", metrics.reconciled);
+
+    let _ = writeln!(
+        out,
         "# HELP vig_outstanding_backend_calls Backendaufrufe, die noch offen sind."
     );
     let _ = writeln!(out, "# TYPE vig_outstanding_backend_calls gauge");

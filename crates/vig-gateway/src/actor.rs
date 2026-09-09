@@ -39,6 +39,13 @@ const WARN_COOLDOWN: vig_core::time::Duration =
 
 const CHANNEL_CAPACITY: usize = 1_024;
 
+/// Abstand zwischen zwei Abgleichversuchen mit der Backendstatistik.
+///
+/// Der Abgleich laeuft nur, solange ein Ausfuehrungsende unbelegt ist — also
+/// im Ausnahmefall. Haeufiger zu fragen beschleunigt die Erholung, belastet
+/// aber ein Backend, das ohnehin gerade Probleme hat.
+const RECONCILE_INTERVAL_MS: u64 = 250;
+
 /// Das Ergebnis, das ein wartender Client bekommt.
 pub type Reply = Result<ModelInferResponse, Status>;
 
@@ -63,6 +70,16 @@ pub enum Msg {
         /// Das Ergebnis.
         result: Box<Result<ModelInferResponse, BackendError>>,
     },
+    /// Der Abgleich hat belegt, dass eine Ausfuehrung beendet ist.
+    ///
+    /// Traegt die Generation mit: eine Meldung zu einem laengst abgeloesten
+    /// Anspruch darf keinen Kredit freigeben.
+    ExecutionProven {
+        /// Der betroffene Request.
+        request: RequestId,
+        /// Die Generation, fuer die der Nachweis gilt.
+        generation: u64,
+    },
     /// Ein Backendaufruf antwortet seit dem Timeout nicht.
     ///
     /// Traegt **keinen** Slot: der Kredit wird bewusst nicht zurueckgegeben.
@@ -86,21 +103,52 @@ pub enum Msg {
     Snapshot(oneshot::Sender<Metrics>),
 }
 
-/// Ein Slotkredit, der gehalten wird, weil die Recheneinheit belegt sein kann.
-#[derive(Debug, Clone, Copy)]
-struct Quarantine {
+/// Ein Anspruch auf einen Slotkredit, der **nur durch Nachweis** endet.
+///
+/// Der Kredit gehoert zur Recheneinheit, nicht zum Client. Er wird deshalb
+/// erst zurueckgegeben, wenn belegt ist, dass die Einheit wieder frei ist:
+/// durch eine Antwort des Backends oder durch einen Abgleich mit dessen
+/// Statistik. Eine abgelaufene Frist ist **kein** Beleg — ein Timeout sagt,
+/// dass wir nicht laenger warten wollen, nicht dass die GPU aufgehoert hat.
+#[derive(Debug, Clone)]
+struct Lease {
+    /// Fortlaufende Kennung dieses Anspruchs.
+    ///
+    /// Fencing: eine verspaetete Meldung zu einer aelteren Generation darf
+    /// weder diesen noch einen spaeteren Kredit freigeben. Ohne sie koennte
+    /// eine doppelte Fertigstellungsmeldung Kapazitaet erfinden.
+    generation: u64,
     /// Der Slot, dessen Kredit gehalten wird.
     slot: SlotIdx,
-    /// Wann der Kredit spaetestens zurueckgegeben wird.
+    /// Das Backendmodell, gegen dessen Statistik abgeglichen wird.
+    backend_model: String,
+    /// Wie viele Inferenzen dieser Governor diesem Modell bis hier
+    /// ausgeliefert hat, diese eingeschlossen.
     ///
-    /// `None` beim Timeout: dort laeuft der Aufruf noch, und seine Antwort
-    /// gibt den Kredit frei. Bei einem **abgebrochenen** Aufruf gibt es diese
-    /// Antwort nie mehr — dann braucht die Unsicherheit eine Frist, sonst
-    /// bliebe der Slot nach einem einzigen Netzwackler dauerhaft gesperrt.
+    /// Meldet das Backend mindestens so viele abgeschlossene Inferenzen, ist
+    /// von unserer Arbeit nichts mehr offen. Das ist der Nachweis, und er
+    /// braucht keine vorher abgefragte Basislinie — die waere ein Rennen
+    /// gegen ein Backend, das inzwischen fertig geworden sein kann.
+    dispatched_total: u64,
+    /// Wie der Anspruch derzeit steht.
+    state: LeaseState,
+}
+
+/// Der Wissensstand ueber eine ausgelieferte Inferenz.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeaseState {
+    /// Der Aufruf laeuft; seine Antwort wird den Kredit freigeben.
+    Running,
+    /// Das Timeout ist abgelaufen, der Aufruf laeuft weiter.
     ///
-    /// Die Frist ist das Inferenztimeout: nach dieser Zeit waere der Aufruf
-    /// ohnehin als haengend eingestuft worden, gleichgueltig was passiert ist.
-    release_at: Option<Instant>,
+    /// Der Client ist beantwortet. Der Kredit bleibt, bis der Aufruf
+    /// zurueckkehrt — das ist der Nachweis.
+    TimedOut,
+    /// Der Aufruf brach ab; ob die Einheit noch rechnet, ist unbekannt.
+    ///
+    /// Es wird nie mehr eine Antwort kommen. Der Nachweis muss deshalb beim
+    /// Backend geholt werden.
+    Reconciling,
 }
 
 /// Meldet dem Actor, dass niemand mehr auf einen Request wartet.
@@ -248,17 +296,27 @@ struct Actor {
     jobs: HashMap<RequestId, GenerativeJob>,
     /// Die Beschreibung eines laufenden Auftrags, fuer seine Fortsetzung.
     descriptors: HashMap<RequestId, RequestDescriptor>,
-    /// Requests, deren Backendaufruf das Timeout ueberschritten hat.
+    /// Ausgelieferte Inferenzen, deren Ende noch nicht belegt ist.
     ///
-    /// Der Client ist bereits beantwortet, der Slot bleibt belegt. Antwortet
-    /// das Backend spaeter doch, wird der Kredit frei — der Eintrag hier
-    /// verhindert, dass die verspaetete Antwort noch als gueltiges Ergebnis
-    /// gilt und den Margen-Regler mit einer Timeout-Laufzeit fuettert.
-    quarantined: HashMap<RequestId, Quarantine>,
+    /// Solange ein Eintrag hier steht, ist der Slotkredit gehalten. Er ist
+    /// die einzige Wahrheit darueber, ob die Recheneinheit belegt sein
+    /// koennte — der Scheduler kennt nur, was er selbst gestartet hat.
+    leases: HashMap<RequestId, Lease>,
+    /// Naechste Lease-Generation.
+    next_generation: u64,
     /// Wie oft ein Backendaufruf das Timeout ueberschritten hat.
     backend_timeouts: u64,
     /// Transportfehler seit dem letzten erfolgreichen Backendaufruf.
     consecutive_transport_failures: u64,
+    /// Wie oft ein Ausfuehrungsende durch Abgleich belegt wurde.
+    reconciled: u64,
+    /// Wie viele Inferenzen dieser Governor je Backendmodell ausgeliefert hat.
+    ///
+    /// Die Bezugsgroesse des Abgleichs. Sie ist der Grund, warum kein
+    /// Basiswert vom Backend geholt werden muss: was wir gestartet haben,
+    /// wissen wir selbst — und eine Basislinie, die erst der Abgleich abfragt,
+    /// kaeme zu spaet, wenn das Backend inzwischen fertig geworden ist.
+    dispatched_per_model: HashMap<String, u64>,
     /// Requests, die wegen vollstaendiger Quarantaene abgewiesen wurden.
     metrics_rejected_quarantined: u64,
     /// Backendaufrufe, die noch offen sind.
@@ -338,9 +396,12 @@ pub fn spawn(
         jobs: HashMap::new(),
         descriptors: HashMap::new(),
         continuation_of: HashMap::new(),
-        quarantined: HashMap::new(),
+        leases: HashMap::new(),
+        next_generation: 0,
         backend_timeouts: 0,
         consecutive_transport_failures: 0,
+        reconciled: 0,
+        dispatched_per_model: HashMap::new(),
         metrics_rejected_quarantined: 0,
         outstanding: 0,
         shutdown: None,
@@ -386,10 +447,16 @@ impl Actor {
             // Wer nur die Clients zaehlt, meldet ein sauberes Ende, waehrend
             // die GPU noch rechnet — und der naechste Prozess startet in eine
             // Belegung, von der er nichts weiss.
+            // Auch die offenen Anspruecke: nach einem Timeout oder einem
+            // Abbruch ist der Client beantwortet und der Aufruf womoeglich
+            // zurueck, die Recheneinheit aber weiterhin belegt. Wer nur
+            // Clients und laufende Aufrufe zaehlt, meldet ein sauberes Ende,
+            // waehrend die GPU noch rechnet.
             if self.shutdown.is_some()
                 && self.waiting.is_empty()
                 && self.responses.is_empty()
                 && self.outstanding == 0
+                && self.leases.is_empty()
             {
                 if let Some(done) = self.shutdown.take() {
                     let _ = done.send(());
@@ -437,7 +504,7 @@ impl Actor {
         // warten zu lassen und dabei Speicher fuer Arbeit zu halten, die nie
         // beginnt. Ehrlicher ist eine sofortige Absage.
         let slots = self.config.slots.len() as u64;
-        if slots > 0 && self.quarantined.len() as u64 >= slots {
+        if slots > 0 && self.held_credits() >= slots {
             self.metrics_rejected_quarantined = self.metrics_rejected_quarantined.saturating_add(1);
             let _ = reply.send(Err(Status::unavailable(format!(
                 "alle {slots} Slotkredite stehen wegen eines Backendtimeouts in \
@@ -519,27 +586,37 @@ impl Actor {
             Err(e) => e.execution_state() == vig_backend_triton::ExecutionState::Unknown,
             Ok(_) => false,
         };
-        let timed_out = self.quarantined.remove(&request).is_some();
+        // Fencing: eine Meldung ohne passenden Anspruch gehoert zu einer
+        // aelteren Generation. Sie darf keinen Kredit freigeben — sonst
+        // erfindet eine doppelte Fertigstellung Kapazitaet.
+        let Some(lease) = self.leases.get(&request).cloned() else {
+            tracing::debug!(%request, "Meldung ohne offenen Anspruch; verworfen");
+            return false;
+        };
+        let timed_out = lease.state == LeaseState::TimedOut;
 
-        if unknown_execution && !timed_out {
-            self.quarantined.insert(
-                request,
-                Quarantine {
-                    slot,
-                    release_at: now.checked_add(self.config.inference_timeout),
-                },
-            );
-            self.backend_timeouts = self.backend_timeouts.saturating_add(1);
+        if unknown_execution {
+            // Es kommt nie mehr eine Antwort. Der Nachweis muss vom Backend
+            // geholt werden — eine Frist waere hier eine Behauptung, keine
+            // Feststellung. Bis der Nachweis vorliegt, bleibt der Kredit.
+            if let Some(entry) = self.leases.get_mut(&request) {
+                entry.state = LeaseState::Reconciling;
+            }
+            self.start_reconciliation(&lease, request);
             tracing::warn!(
                 %request,
                 "Backendaufruf abgebrochen; Ausfuehrungsende unbekannt. Der \
-                 Slotkredit bleibt gehalten, bis die Unsicherheit abgelaufen ist."
+                 Slotkredit bleibt gehalten, bis das Backend das Ende belegt."
             );
-            self.responses.insert(request, *result);
-            self.finish(request, RequestState::BackendTimeout);
+            if !timed_out {
+                self.responses.insert(request, *result);
+                self.finish(request, RequestState::ExecutionUnknown);
+            }
             return false;
         }
 
+        // Antwort oder belegtes Ende: der Anspruch endet, genau einmal.
+        self.leases.remove(&request);
         let failed = timed_out || result.is_err();
         self.responses.insert(request, *result);
         let event = if failed {
@@ -575,6 +652,33 @@ impl Actor {
                     return;
                 }
             }
+            Msg::ExecutionProven {
+                request,
+                generation,
+            } => {
+                // Nur wenn der Anspruch noch derselbe ist. Ein Nachweis fuer
+                // eine alte Generation gehoert zu einem Kredit, der laengst
+                // zurueckgegeben wurde.
+                let matching = self
+                    .leases
+                    .get(&request)
+                    .is_some_and(|l| l.generation == generation);
+                if let Some(lease) = matching.then(|| self.leases.remove(&request)).flatten() {
+                    self.reconciled = self.reconciled.saturating_add(1);
+                    tracing::info!(
+                        %request,
+                        "Backend belegt das Ausfuehrungsende; Slotkredit wird zurueckgegeben"
+                    );
+                    self.scheduler.on_event(
+                        now,
+                        Event::BackendFailure {
+                            request,
+                            slot: lease.slot,
+                        },
+                        &mut sink,
+                    );
+                }
+            }
             Msg::BackendTimeout { request } => {
                 // **Nur der Client wird freigegeben, nicht der Slot.** Der
                 // Kredit gehoert zur Recheneinheit, und die ist womoeglich
@@ -584,20 +688,12 @@ impl Actor {
                 //
                 // Der Slot bleibt in Quarantaene, bis das Backend antwortet.
                 // Tut es das nie, sagt die Bereitschaftspruefung es.
-                if let Some(slot) = self.scheduler.slots().slot_of(request)
-                    && self
-                        .quarantined
-                        .insert(
-                            request,
-                            Quarantine {
-                                slot,
-                                // Der Aufruf laeuft noch; seine Antwort gibt
-                                // den Kredit frei.
-                                release_at: None,
-                            },
-                        )
-                        .is_none()
+                if let Some(lease) = self.leases.get_mut(&request)
+                    && lease.state == LeaseState::Running
                 {
+                    // Der Aufruf laeuft weiter; seine Rueckkehr ist der
+                    // Nachweis. Nur der Client wird jetzt freigegeben.
+                    lease.state = LeaseState::TimedOut;
                     self.backend_timeouts = self.backend_timeouts.saturating_add(1);
                 }
                 self.finish(request, RequestState::BackendTimeout);
@@ -622,7 +718,6 @@ impl Actor {
                 self.shutdown = Some(done);
             }
             Msg::Tick => {
-                self.release_expired_quarantine(now, &mut sink);
                 self.scheduler.on_event(now, Event::Tick, &mut sink);
                 self.report_contract_mismatch(now);
             }
@@ -636,9 +731,10 @@ impl Actor {
                 // keine Uhr und keinen Backendaufruf.
                 metrics.slots = self.config.slots.len() as u64;
                 metrics.backend_timeouts = self.backend_timeouts;
-                metrics.quarantined = self.quarantined.len() as u64;
+                metrics.quarantined = self.held_credits();
                 metrics.consecutive_transport_failures = self.consecutive_transport_failures;
                 metrics.rejected_quarantined = self.metrics_rejected_quarantined;
+                metrics.reconciled = self.reconciled;
                 metrics.outstanding_backend_calls = self.outstanding;
                 for (index, slot) in metrics.margin_percent.iter_mut().enumerate() {
                     if let Ok(model) = u16::try_from(index) {
@@ -782,6 +878,27 @@ impl Actor {
         let tx = self.tx.clone();
         let timeout = std::time::Duration::from_nanos(self.config.inference_timeout.as_nanos());
         self.outstanding = self.outstanding.saturating_add(1);
+
+        // Der Anspruch auf den Slotkredit entsteht **hier**, mit dem Dispatch,
+        // und endet erst mit einem Nachweis. Die Wanduhrzeit dient
+        // ausschliesslich dem spaeteren Abgleich gegen Tritons `last_inference`.
+        self.next_generation = self.next_generation.saturating_add(1);
+        let dispatched_total = self
+            .dispatched_per_model
+            .entry(oip.model_name.clone())
+            .and_modify(|n| *n = n.saturating_add(1))
+            .or_insert(1);
+        let target = *dispatched_total;
+        self.leases.insert(
+            request,
+            Lease {
+                generation: self.next_generation,
+                slot,
+                backend_model: oip.model_name.clone(),
+                dispatched_total: target,
+                state: LeaseState::Running,
+            },
+        );
         tokio::spawn(async move {
             let call = async move {
                 if decoupled {
@@ -864,31 +981,89 @@ impl Actor {
         }
     }
 
-    /// Gibt Slotkredite frei, deren Unsicherheit abgelaufen ist.
-    ///
-    /// Der Kredit wurde gehalten, weil die Recheneinheit nach einem
-    /// abgebrochenen Aufruf noch rechnen koennte. Dieser Grund verfaellt: nach
-    /// dem Inferenztimeout waere der Aufruf ohnehin als haengend eingestuft
-    /// worden. Ihn danach weiter zu halten sperrte den Slot nach einem
-    /// einzigen Netzwackler dauerhaft — und ein Governor, der sich nur durch
-    /// Neustart erholt, ist im Feld keiner.
-    fn release_expired_quarantine<S: FnMut(Action)>(&mut self, now: Instant, sink: &mut S) {
-        let expired: Vec<(RequestId, SlotIdx)> = self
-            .quarantined
-            .iter()
-            .filter(|(_, q)| q.release_at.is_some_and(|at| at <= now))
-            .map(|(id, q)| (*id, q.slot))
-            .collect();
+    /// Wie viele Slotkredite derzeit gehalten werden, weil ihr Ende unbelegt ist.
+    fn held_credits(&self) -> u64 {
+        self.leases
+            .values()
+            .filter(|l| l.state != LeaseState::Running)
+            .count() as u64
+    }
 
-        for (request, slot) in expired {
-            self.quarantined.remove(&request);
-            tracing::info!(
-                %request,
-                "Unsicherheit abgelaufen; Slotkredit wird zurueckgegeben"
+    /// Startet den Abgleich mit der Backendstatistik.
+    ///
+    /// Der einzige Weg, einen Anspruch ohne Antwort des Backends zu beenden.
+    /// Die Aufgabe **liest** — sie greift nicht ein: einen fremden
+    /// Serverprozess zurueckzusetzen, um die eigene Buchhaltung zu bereinigen,
+    /// waere eine Befugnis, die dieser Governor nicht hat und nicht haben
+    /// soll.
+    ///
+    /// Belegt ist das Ende auf zwei Wegen:
+    ///
+    /// * Das Modell meldet mindestens so viele abgeschlossene Inferenzen, wie
+    ///   dieser Governor ihm ausgeliefert hat. Dann ist von unserer Arbeit
+    ///   nichts mehr offen.
+    /// * Der Zaehler ist **gefallen**. Ein Zaehler faellt nur, wenn das Modell
+    ///   neu geladen oder der Server neu gestartet wurde — und dann ist alles,
+    ///   was dort lief, ohnehin verloren.
+    ///
+    /// Beides setzt voraus, dass dieser Governor der einzige Aufrufer des
+    /// Modells ist. Genau das ist der dokumentierte Aufbau, und `trust:
+    /// strict` setzt es auf unserer Seite durch. Teilt sich ein fremder Client
+    /// dasselbe Modell, zaehlt Triton dessen Arbeit mit, und der Nachweis wird
+    /// zum Indiz. Das steht so in `docs/how-it-works.md`.
+    fn start_reconciliation(&self, lease: &Lease, request: RequestId) {
+        let Some(backend) = self.backend_for_model_name(&lease.backend_model) else {
+            tracing::warn!(
+                model = %lease.backend_model,
+                "kein Backendclient fuer den Abgleich; der Slotkredit bleibt gehalten"
             );
-            self.scheduler
-                .on_event(now, Event::BackendFailure { request, slot }, sink);
-        }
+            return;
+        };
+        let tx = self.tx.clone();
+        let model = lease.backend_model.clone();
+        let generation = lease.generation;
+        let target = lease.dispatched_total;
+        let interval = std::time::Duration::from_millis(RECONCILE_INTERVAL_MS);
+
+        tokio::spawn(async move {
+            let mut highest = 0_u64;
+            loop {
+                match backend.completion_evidence(&model).await {
+                    Ok(evidence) => {
+                        let restarted = evidence.completed < highest;
+                        highest = highest.max(evidence.completed);
+                        if evidence.completed >= target || restarted {
+                            let _ = tx
+                                .send(Msg::ExecutionProven {
+                                    request,
+                                    generation,
+                                })
+                                .await;
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        // Kein Nachweis heisst: der Kredit bleibt gehalten.
+                        // Weiter fragen, bis der Actor endet.
+                        tracing::debug!(%request, %error, "Abgleich noch ohne Nachweis");
+                    }
+                }
+                tokio::time::sleep(interval).await;
+            }
+        });
+    }
+
+    /// Der Client fuer ein Backendmodell, sofern eindeutig bestimmbar.
+    fn backend_for_model_name(&self, backend_model: &str) -> Option<Arc<TritonClient>> {
+        let index = self
+            .config
+            .backend_models
+            .iter()
+            .position(|variants| variants.iter().any(|v| v == backend_model))?;
+        let model = vig_core::ModelIdx(u16::try_from(index).ok()?);
+        self.backends
+            .get(self.config.endpoint_of(model))
+            .map(Arc::clone)
     }
 
     /// Vergisst allen Zustand, den ein Request hinterlassen haben kann.
@@ -953,6 +1128,18 @@ impl Actor {
         self.forget_job(request);
 
         let payload = self.responses.remove(&request);
+        // Zustaende, in denen wir den Slotkredit halten, tragen mehr
+        // Information als der rohe Backendfehler: sie sagen, was wir **nicht**
+        // wissen. Deshalb gewinnt hier die Abbildung des Zustands.
+        if matches!(
+            state,
+            RequestState::ExecutionUnknown | RequestState::BackendTimeout
+        ) && let Some(status) = status_for(state)
+        {
+            let _ = reply.send(Err(status));
+            return;
+        }
+
         let outcome = match (state, payload) {
             (RequestState::CompletedValid, Some(Ok(response))) => Ok(response),
             (RequestState::CompletedObsolete, Some(Ok(mut response))) => {

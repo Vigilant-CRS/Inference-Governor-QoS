@@ -43,6 +43,11 @@ pub fn status_for(state: RequestState) -> Option<Status> {
             "nicht mehr rechtzeitig ausfuehrbar oder Queue erschoepft",
         ),
         RequestState::Failed => (Code::Unavailable, "backend_failed", "Backendfehler"),
+        RequestState::ExecutionUnknown => (
+            Code::Unavailable,
+            "execution_unknown",
+            "der Aufruf brach ab; ob die Inferenz ausgefuehrt wurde, ist unbekannt",
+        ),
         RequestState::BackendTimeout => (
             Code::DeadlineExceeded,
             "backend_timeout",

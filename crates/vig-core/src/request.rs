@@ -120,6 +120,13 @@ pub enum RequestState {
     CompletedObsolete,
     /// Backendfehler oder Verbindungsverlust.
     Failed,
+    /// Der Aufruf brach ab; ob die Recheneinheit gerechnet hat, ist unbekannt.
+    ///
+    /// Fachlich etwas anderes als ein Backendfehler: dort steht fest, dass
+    /// nichts herauskam. Hier steht **nichts** fest — der Request kann
+    /// ausgefuehrt worden sein. Fuer alles, was nicht wiederholbar ist, ist
+    /// genau das die Auskunft, die der Client braucht.
+    ExecutionUnknown,
     /// Das Backend hat innerhalb des Timeouts nicht geantwortet.
     ///
     /// Der Client wird freigegeben, die Recheneinheit **nicht**: sie ist
@@ -150,6 +157,7 @@ impl RequestState {
                 | Self::Failed
                 | Self::Cancelled
                 | Self::BackendTimeout
+                | Self::ExecutionUnknown
         )
     }
 

@@ -41,6 +41,12 @@ pub struct Metrics {
     /// und genau das muss die Bereitschaftspruefung sehen, auch bevor ein
     /// Timeout ueberhaupt ablaufen konnte.
     pub consecutive_transport_failures: u64,
+    /// Ausfuehrungsenden, die durch Abgleich mit dem Backend belegt wurden.
+    ///
+    /// Jeder davon ist ein Slotkredit, der ohne Antwort des Backends
+    /// zurueckgegeben werden konnte — weil dessen eigene Statistik das Ende
+    /// belegt hat, nicht weil eine Frist ablief.
+    pub reconciled: u64,
     /// Requests, die wegen vollstaendiger Quarantaene sofort abgewiesen wurden.
     ///
     /// Sie einzureihen waere die schlechtere Antwort: der Client wartete bis in

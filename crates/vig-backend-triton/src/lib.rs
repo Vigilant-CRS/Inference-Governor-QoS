@@ -29,7 +29,7 @@ pub use fingerprint::fingerprint;
 pub use request::{text_request, zero_request};
 
 pub use client::{
-    CONNECTION_WINDOW_BYTES, DEFAULT_MAX_MESSAGE_BYTES, FINAL_RESPONSE_PARAM, STREAM_WINDOW_BYTES,
-    TritonClient, TritonHealth,
+    CONNECTION_WINDOW_BYTES, DEFAULT_MAX_MESSAGE_BYTES, Evidence, FINAL_RESPONSE_PARAM,
+    STREAM_WINDOW_BYTES, TritonClient, TritonHealth,
 };
 pub use error::{BackendError, ExecutionState};
