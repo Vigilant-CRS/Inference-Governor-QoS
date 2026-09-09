@@ -36,6 +36,7 @@ Spec-Stelle explizit.
 | [0025](0025-the-same-shape-is-not-the-same-meaning.md) | Gleiche Form ist nicht gleiche Bedeutung | NV-10, NV-02, ADR-0007 | Akzeptiert |
 | [0026](0026-interference-is-directed-and-not-additive.md) | Interferenz ist gerichtet und nicht additiv | NV-11, ADR-0006 | Akzeptiert |
 | [0027](0027-a-miss-budget-that-decides-not-only-observes.md) | Ein Missbudget, das entscheidet — auf ausdrueckliche Handlung | NV-24, NV-02 | Akzeptiert |
+| [0028](0028-a-fusion-needs-a-common-capture.md) | Eine Zusammenfuehrung braucht eine gemeinsame Aufnahme | NV-17, ADR-0005 | Akzeptiert |
 
 ## Format
 
