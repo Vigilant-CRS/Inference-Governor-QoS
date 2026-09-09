@@ -1,5 +1,21 @@
 //! Fehler des Backend-Adapters.
 
+/// Was ein Fehler ueber die Ausfuehrung auf dem Backend aussagt.
+///
+/// Diese Unterscheidung entscheidet ueber den Slotkredit — und damit darueber,
+/// ob der Governor eine zweite Inferenz auf eine womoeglich noch rechnende
+/// Recheneinheit legt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionState {
+    /// Der Aufruf hat das Backend nie erreicht.
+    NotStarted,
+    /// Der Aufruf war unterwegs; ob die Recheneinheit noch arbeitet, ist
+    /// unbekannt.
+    Unknown,
+    /// Das Backend hat geantwortet; die Ausfuehrung ist beendet.
+    Finished,
+}
+
 /// Warum ein Backendaufruf fehlschlug.
 #[derive(Debug, Clone)]
 pub enum BackendError {
@@ -53,6 +69,33 @@ impl core::fmt::Display for BackendError {
 impl core::error::Error for BackendError {}
 
 impl BackendError {
+    /// Was dieser Fehler ueber die **Ausfuehrung** auf dem Backend aussagt.
+    ///
+    /// Der Unterschied entscheidet ueber den Slotkredit. Ein Fehler beim
+    /// Verbindungsaufbau heisst: der Request hat die Recheneinheit nie
+    /// erreicht, der Kredit gehoert sofort zurueck. Ein Abbruch **waehrend**
+    /// des Aufrufs heisst gar nichts — die GPU rechnet moeglicherweise
+    /// weiter, und den Kredit dann zurueckzugeben hiesse, eine zweite
+    /// Ausfuehrung auf dieselbe Einheit zu legen.
+    #[must_use]
+    pub const fn execution_state(&self) -> ExecutionState {
+        match self {
+            // `Unreachable` entsteht ausschliesslich beim Kanalaufbau.
+            Self::Unreachable { .. } => ExecutionState::NotStarted,
+            Self::Rejected { code, .. } => match code {
+                // Der Aufruf war unterwegs, als er abbrach.
+                tonic::Code::Unavailable
+                | tonic::Code::DeadlineExceeded
+                | tonic::Code::Aborted
+                | tonic::Code::Cancelled
+                | tonic::Code::Unknown => ExecutionState::Unknown,
+                // Das Backend hat geantwortet, wenn auch ablehnend.
+                _ => ExecutionState::Finished,
+            },
+            Self::UnknownModel { .. } | Self::Malformed { .. } => ExecutionState::Finished,
+        }
+    }
+
     /// Wahr, wenn ein erneuter Verbindungsaufbau sinnvoll ist.
     ///
     /// Ob ein **Request** wiederholt wird, entscheidet der Scheduler anhand

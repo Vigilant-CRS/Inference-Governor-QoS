@@ -130,21 +130,47 @@ pub(crate) async fn run(
         let _ = signalled_tx.send(std::time::Instant::now());
     };
 
-    builder
-        .initial_stream_window_size(STREAM_WINDOW_BYTES)
-        .initial_connection_window_size(CONNECTION_WINDOW_BYTES)
-        .add_service(
-            GrpcInferenceServiceServer::new(service)
-                .max_decoding_message_size(DEFAULT_MAX_MESSAGE_BYTES)
-                .max_encoding_message_size(DEFAULT_MAX_MESSAGE_BYTES),
-        )
-        .serve_with_shutdown(address, shutdown)
-        .await?;
+    // Der Server laeuft in einem eigenen Task, damit sein Ende **begrenzbar**
+    // ist. Ihn direkt abzuwarten hiesse: schliesst tonic seine Verbindungen
+    // nicht, steht davor ein unbegrenztes Warten, und die zugesagte
+    // Gesamtfrist ab SIGTERM waere keine.
+    let mut server = tokio::spawn(
+        builder
+            .initial_stream_window_size(STREAM_WINDOW_BYTES)
+            .initial_connection_window_size(CONNECTION_WINDOW_BYTES)
+            .add_service(
+                GrpcInferenceServiceServer::new(service)
+                    .max_decoding_message_size(DEFAULT_MAX_MESSAGE_BYTES)
+                    .max_encoding_message_size(DEFAULT_MAX_MESSAGE_BYTES),
+            )
+            .serve_with_shutdown(address, shutdown),
+    );
 
-    // Ab hier gilt, was von der Frist noch uebrig ist.
-    let remaining = signalled_rx.await.ok().map_or(DRAIN_DEADLINE, |at| {
-        DRAIN_DEADLINE.saturating_sub(at.elapsed())
-    });
+    // Entweder der Server endet von selbst — dann ist etwas kaputt und die
+    // Frist irrelevant — oder das Signal kommt und die Uhr laeuft.
+    let signalled = tokio::select! {
+        finished = &mut server => {
+            finished??;
+            tracing::warn!("der Server endete ohne Abbruchsignal");
+            return Ok(ExitCode::FAILURE);
+        }
+        at = signalled_rx => at.ok(),
+    };
+    let elapsed = || signalled.map_or(std::time::Duration::ZERO, |at| at.elapsed());
+
+    // Ab hier ist alles begrenzt. Zuerst der Server: laufende Anfragen sollen
+    // zu Ende gehen, aber nicht unbegrenzt.
+    let closing = DRAIN_DEADLINE.saturating_sub(elapsed());
+    if tokio::time::timeout(closing, &mut server).await.is_err() {
+        tracing::warn!(
+            "der gRPC-Server hat innerhalb der Frist nicht geschlossen; er wird \
+             abgebrochen"
+        );
+        server.abort();
+    }
+
+    // Was von der Frist uebrig ist, gehoert dem Drain.
+    let remaining = DRAIN_DEADLINE.saturating_sub(elapsed());
 
     // Der Server nimmt nichts Neues mehr an. Jetzt die angenommene Arbeit zu
     // Ende bringen: wartende Requests beantworten, laufende Backendaufrufe

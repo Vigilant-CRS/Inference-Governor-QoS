@@ -901,3 +901,70 @@ async fn the_payload_budget_also_counts_typed_tensor_contents() {
         .expect_err("2 MiB passen nicht in 1 MiB, egal in welcher Darstellung");
     assert_eq!(status.code(), tonic::Code::ResourceExhausted);
 }
+
+/// Ein abgebrochener Backendaufruf gibt den Slotkredit nicht sofort zurück.
+///
+/// Ein Verbindungsabbruch **nach** dem Dispatch beweist nicht, dass die GPU
+/// aufgehört hat. Den Kredit dann zurückzugeben ist derselbe Fehler wie beim
+/// Timeout — nur schwerer zu sehen, weil der Aufruf zurückgekehrt ist und
+/// alles beendet *aussieht*.
+///
+/// Der Unterschied zum abgelehnten Verbindungsaufbau ist entscheidend: dort
+/// hat der Request das Backend nie erreicht, und der Kredit gehört sofort
+/// zurück. Beides wird hier geprüft.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_aborted_call_holds_the_credit_a_refused_connection_does_not() {
+    use vig_backend_triton::{BackendError, ExecutionState};
+
+    // Verbindungsaufbau gescheitert: nichts wurde ausgeführt.
+    let never_sent = BackendError::Unreachable {
+        endpoint: "127.0.0.1:1".into(),
+        cause: "connection refused".into(),
+    };
+    assert_eq!(never_sent.execution_state(), ExecutionState::NotStarted);
+
+    // Aufruf war unterwegs und brach ab: Ausführungsende unbekannt.
+    for code in [
+        tonic::Code::Unavailable,
+        tonic::Code::DeadlineExceeded,
+        tonic::Code::Aborted,
+        tonic::Code::Cancelled,
+    ] {
+        let aborted = BackendError::Rejected {
+            code,
+            message: "connection reset".into(),
+        };
+        assert_eq!(
+            aborted.execution_state(),
+            ExecutionState::Unknown,
+            "{code:?} sagt nichts darueber, ob die GPU aufgehoert hat"
+        );
+    }
+
+    // Das Backend hat geantwortet, wenn auch ablehnend: fertig.
+    let answered = BackendError::Rejected {
+        code: tonic::Code::InvalidArgument,
+        message: "bad shape".into(),
+    };
+    assert_eq!(answered.execution_state(), ExecutionState::Finished);
+
+    // Und im Betrieb: ein abgelehnter Verbindungsaufbau quarantäniert nicht.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = listener.local_addr().unwrap().to_string();
+    drop(listener);
+    let service = service_with(&endpoint, "");
+    let handle = service.scheduler_handle();
+
+    assert!(
+        service
+            .model_infer(tonic::Request::new(request()))
+            .await
+            .is_err()
+    );
+    let metrics = handle.metrics().await.unwrap();
+    assert_eq!(
+        metrics.quarantined, 0,
+        "was das Backend nie erreicht hat, belegt auch keine Recheneinheit"
+    );
+    assert_eq!(metrics.outstanding_backend_calls, 0);
+}

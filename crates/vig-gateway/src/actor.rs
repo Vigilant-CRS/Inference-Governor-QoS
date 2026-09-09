@@ -86,6 +86,23 @@ pub enum Msg {
     Snapshot(oneshot::Sender<Metrics>),
 }
 
+/// Ein Slotkredit, der gehalten wird, weil die Recheneinheit belegt sein kann.
+#[derive(Debug, Clone, Copy)]
+struct Quarantine {
+    /// Der Slot, dessen Kredit gehalten wird.
+    slot: SlotIdx,
+    /// Wann der Kredit spaetestens zurueckgegeben wird.
+    ///
+    /// `None` beim Timeout: dort laeuft der Aufruf noch, und seine Antwort
+    /// gibt den Kredit frei. Bei einem **abgebrochenen** Aufruf gibt es diese
+    /// Antwort nie mehr — dann braucht die Unsicherheit eine Frist, sonst
+    /// bliebe der Slot nach einem einzigen Netzwackler dauerhaft gesperrt.
+    ///
+    /// Die Frist ist das Inferenztimeout: nach dieser Zeit waere der Aufruf
+    /// ohnehin als haengend eingestuft worden, gleichgueltig was passiert ist.
+    release_at: Option<Instant>,
+}
+
 /// Meldet dem Actor, dass niemand mehr auf einen Request wartet.
 ///
 /// Beim regulaeren Abschluss wird der Waechter mit [`Self::disarm`]
@@ -237,7 +254,7 @@ struct Actor {
     /// das Backend spaeter doch, wird der Kredit frei — der Eintrag hier
     /// verhindert, dass die verspaetete Antwort noch als gueltiges Ergebnis
     /// gilt und den Margen-Regler mit einer Timeout-Laufzeit fuettert.
-    quarantined: std::collections::HashSet<RequestId>,
+    quarantined: HashMap<RequestId, Quarantine>,
     /// Wie oft ein Backendaufruf das Timeout ueberschritten hat.
     backend_timeouts: u64,
     /// Transportfehler seit dem letzten erfolgreichen Backendaufruf.
@@ -321,7 +338,7 @@ pub fn spawn(
         jobs: HashMap::new(),
         descriptors: HashMap::new(),
         continuation_of: HashMap::new(),
-        quarantined: std::collections::HashSet::new(),
+        quarantined: HashMap::new(),
         backend_timeouts: 0,
         consecutive_transport_failures: 0,
         metrics_rejected_quarantined: 0,
@@ -453,6 +470,87 @@ impl Actor {
         true
     }
 
+    /// Verarbeitet die Rueckmeldung eines Backendaufrufs.
+    ///
+    /// Gibt `false` zurueck, wenn die Bearbeitung hier endet — der Slotkredit
+    /// bleibt dann bewusst gehalten.
+    fn on_backend_done<S: FnMut(Action)>(
+        &mut self,
+        now: Instant,
+        request: RequestId,
+        slot: SlotIdx,
+        result: Box<Result<ModelInferResponse, BackendError>>,
+        sink: &mut S,
+    ) -> bool {
+        // Ein Fehler ist keine Fertigstellung. Wuerde er als
+        // `Completion` gemeldet, zaehlte der Scheduler ihn als
+        // gueltiges Ergebnis, `backend_failures` bliebe im echten
+        // Gateway dauerhaft null — und der Margen-Regler bekaeme die
+        // Fast-Null-Laufzeit eines Verbindungsfehlers als Beleg
+        // dafuer, dass die Prognose zu konservativ war.
+        // Eine Antwort nach dem Timeout ist keine Fertigstellung:
+        // ihr Client ist laengst beantwortet, und ihre Laufzeit ist
+        // die des Timeouts, nicht die des Modells. Als `Completion`
+        // gezaehlt wuerde sie den Margen-Regler mit einer Zahl
+        // fuettern, die nichts ueber die Prognose aussagt. Der Slot
+        // wird hier aber sehr wohl frei — jetzt ist belegt, dass das
+        // Backend fertig ist.
+        self.outstanding = self.outstanding.saturating_sub(1);
+        // Nur Transportfehler sagen etwas ueber die Erreichbarkeit.
+        // Ein Modellfehler betrifft diesen Request, nicht das Backend.
+        match result.as_ref() {
+            Err(e) if e.is_transport_failure() => {
+                self.consecutive_transport_failures =
+                    self.consecutive_transport_failures.saturating_add(1);
+            }
+            _ => self.consecutive_transport_failures = 0,
+        }
+
+        // Ein **abgebrochener** Aufruf beweist nicht, dass die
+        // Recheneinheit aufgehoert hat. Den Kredit hier
+        // zurueckzugeben waere derselbe Fehler wie beim Timeout, nur
+        // schwerer zu sehen: der Aufruf ist zurueckgekehrt, also
+        // *sieht* alles beendet aus.
+        //
+        // Anders beim Verbindungsaufbau: kommt schon der Kanal nicht
+        // zustande, hat der Request das Backend nie erreicht, und der
+        // Kredit gehoert sofort zurueck.
+        let unknown_execution = match result.as_ref() {
+            Err(e) => e.execution_state() == vig_backend_triton::ExecutionState::Unknown,
+            Ok(_) => false,
+        };
+        let timed_out = self.quarantined.remove(&request).is_some();
+
+        if unknown_execution && !timed_out {
+            self.quarantined.insert(
+                request,
+                Quarantine {
+                    slot,
+                    release_at: now.checked_add(self.config.inference_timeout),
+                },
+            );
+            self.backend_timeouts = self.backend_timeouts.saturating_add(1);
+            tracing::warn!(
+                %request,
+                "Backendaufruf abgebrochen; Ausfuehrungsende unbekannt. Der \
+                 Slotkredit bleibt gehalten, bis die Unsicherheit abgelaufen ist."
+            );
+            self.responses.insert(request, *result);
+            self.finish(request, RequestState::BackendTimeout);
+            return false;
+        }
+
+        let failed = timed_out || result.is_err();
+        self.responses.insert(request, *result);
+        let event = if failed {
+            Event::BackendFailure { request, slot }
+        } else {
+            Event::Completion { request, slot }
+        };
+        self.scheduler.on_event(now, event, sink);
+        true
+    }
+
     fn handle(&mut self, msg: Msg) {
         let now = self.clock.now();
         let mut actions = Vec::new();
@@ -473,38 +571,9 @@ impl Actor {
                 slot,
                 result,
             } => {
-                // Ein Fehler ist keine Fertigstellung. Wuerde er als
-                // `Completion` gemeldet, zaehlte der Scheduler ihn als
-                // gueltiges Ergebnis, `backend_failures` bliebe im echten
-                // Gateway dauerhaft null — und der Margen-Regler bekaeme die
-                // Fast-Null-Laufzeit eines Verbindungsfehlers als Beleg
-                // dafuer, dass die Prognose zu konservativ war.
-                // Eine Antwort nach dem Timeout ist keine Fertigstellung:
-                // ihr Client ist laengst beantwortet, und ihre Laufzeit ist
-                // die des Timeouts, nicht die des Modells. Als `Completion`
-                // gezaehlt wuerde sie den Margen-Regler mit einer Zahl
-                // fuettern, die nichts ueber die Prognose aussagt. Der Slot
-                // wird hier aber sehr wohl frei — jetzt ist belegt, dass das
-                // Backend fertig ist.
-                self.outstanding = self.outstanding.saturating_sub(1);
-                // Nur Transportfehler sagen etwas ueber die Erreichbarkeit.
-                // Ein Modellfehler betrifft diesen Request, nicht das Backend.
-                match result.as_ref() {
-                    Err(e) if e.is_transport_failure() => {
-                        self.consecutive_transport_failures =
-                            self.consecutive_transport_failures.saturating_add(1);
-                    }
-                    _ => self.consecutive_transport_failures = 0,
+                if !self.on_backend_done(now, request, slot, result, &mut sink) {
+                    return;
                 }
-                let timed_out = self.quarantined.remove(&request);
-                let failed = timed_out || result.is_err();
-                self.responses.insert(request, *result);
-                let event = if failed {
-                    Event::BackendFailure { request, slot }
-                } else {
-                    Event::Completion { request, slot }
-                };
-                self.scheduler.on_event(now, event, &mut sink);
             }
             Msg::BackendTimeout { request } => {
                 // **Nur der Client wird freigegeben, nicht der Slot.** Der
@@ -515,7 +584,20 @@ impl Actor {
                 //
                 // Der Slot bleibt in Quarantaene, bis das Backend antwortet.
                 // Tut es das nie, sagt die Bereitschaftspruefung es.
-                if self.quarantined.insert(request) {
+                if let Some(slot) = self.scheduler.slots().slot_of(request)
+                    && self
+                        .quarantined
+                        .insert(
+                            request,
+                            Quarantine {
+                                slot,
+                                // Der Aufruf laeuft noch; seine Antwort gibt
+                                // den Kredit frei.
+                                release_at: None,
+                            },
+                        )
+                        .is_none()
+                {
                     self.backend_timeouts = self.backend_timeouts.saturating_add(1);
                 }
                 self.finish(request, RequestState::BackendTimeout);
@@ -540,6 +622,7 @@ impl Actor {
                 self.shutdown = Some(done);
             }
             Msg::Tick => {
+                self.release_expired_quarantine(now, &mut sink);
                 self.scheduler.on_event(now, Event::Tick, &mut sink);
                 self.report_contract_mismatch(now);
             }
@@ -778,6 +861,33 @@ impl Actor {
             });
         for action in actions {
             self.apply(now, action);
+        }
+    }
+
+    /// Gibt Slotkredite frei, deren Unsicherheit abgelaufen ist.
+    ///
+    /// Der Kredit wurde gehalten, weil die Recheneinheit nach einem
+    /// abgebrochenen Aufruf noch rechnen koennte. Dieser Grund verfaellt: nach
+    /// dem Inferenztimeout waere der Aufruf ohnehin als haengend eingestuft
+    /// worden. Ihn danach weiter zu halten sperrte den Slot nach einem
+    /// einzigen Netzwackler dauerhaft — und ein Governor, der sich nur durch
+    /// Neustart erholt, ist im Feld keiner.
+    fn release_expired_quarantine<S: FnMut(Action)>(&mut self, now: Instant, sink: &mut S) {
+        let expired: Vec<(RequestId, SlotIdx)> = self
+            .quarantined
+            .iter()
+            .filter(|(_, q)| q.release_at.is_some_and(|at| at <= now))
+            .map(|(id, q)| (*id, q.slot))
+            .collect();
+
+        for (request, slot) in expired {
+            self.quarantined.remove(&request);
+            tracing::info!(
+                %request,
+                "Unsicherheit abgelaufen; Slotkredit wird zurueckgegeben"
+            );
+            self.scheduler
+                .on_event(now, Event::BackendFailure { request, slot }, sink);
         }
     }
 
