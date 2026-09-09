@@ -147,6 +147,7 @@ The break-even is between 100 % and 110 % offered load
 | [**Support matrix**](docs/support-matrix.md) | what is qualified, what is built but unmeasured, what is not supported |
 | [**Hardware qualification**](docs/hardware-qualification.md) | what is portable, what is untested, and what to run before trusting a new platform |
 | [**Releases and upgrades**](docs/releases.md) | signed artifacts, how to verify them, versioning and the upgrade path |
+| [Variant example](examples/rfdetr_variants/) | four real RF-DETR models, and why the governor refuses to swap between them |
 | [Benchmarks](docs/benchmark/) | every measurement, method and raw output — including the runs that were wrong *(German)* |
 | [Architecture decisions](docs/adr/) | where the implementation deviates from the specification, and why *(German)* |
 | [Specification](Vigilant_Inference_Governor_Specification_v1.0.md) | the full product specification v1.0 *(German)* |

@@ -1,0 +1,311 @@
+# Vier RF-DETR-Varianten, ehrlich deklariert.
+#
+# Alle vier stammen aus einem echten Anwenderprojekt und liegen als Kopie in
+# einem eigenen Modellrepository; Herkunft, Digest und Klassenreihenfolge je
+# Modell stehen dort in `PROVENANCE.txt`.
+#
+# Der Zweck dieser Datei ist nicht, Variantenwahl vorzufuehren — sie ist hier
+# **nicht** moeglich, und das ist der Befund. Sie zeigt, woran es scheitert,
+# und dass der Governor es vor dem ersten Request sagt:
+#
+#   vig doctor -c examples/rfdetr_variants/vig.yaml
+#
+# ## Woher die Semantikangaben kommen
+#
+# Nichts davon ist Konvention oder Vermutung. Ein- und Ausgabeformen sind mit
+# `tools/onnx-signature.py` aus den Dateien gemessen, die Klassenlisten stammen
+# aus den `*.classmap.json` daneben, und Koordinatenkonvention, Layout und
+# Einheit sind aus dem Dekodiercode des Anwenders belegt
+# (`dem Dekodiercode des Anwenders`, Zeilen 266/267 und 301). Beim Nachlesen dort haben sich
+# zwei erste Annahmen als falsch erwiesen: die Klassenausgabe traegt **Logits**
+# und keine Wahrscheinlichkeiten, und `dets` und `labels` sind zwei Ausgaben
+# mit verschiedener Bedeutung und nicht eine.
+#
+# ## Zu den Profilen
+#
+# Sie sind **Platzhalter**, damit `doctor` ueberhaupt durchlaeuft. Sie tragen
+# absichtlich keinen Fingerabdruck und kein Manifest; ohne `--offline` meldet
+# `doctor` sie deshalb selbst als nicht pruefbar. Der einzige gemessene Wert
+# ist der von `rfdetr_512` aus dem Gate-M3-Lauf — alle anderen sind dieselbe
+# Zahl noch einmal, und die 768er brauchen mit Sicherheit mehr. Wie viel, ist
+# ungemessen. Die Auslastungsrechnung von `doctor` ist damit zu optimistisch.
+#
+# Gemessen wird so:
+#   vig calibrate -c examples/rfdetr_variants/vig.yaml -o measured.yaml \
+#     --model-repository /models --periodic-us 33000
+version: 1
+
+backend:
+  type: triton
+  # Eine zweite Triton-Instanz auf eigenen Ports, damit ein laufender
+  # Messaufbau unberuehrt bleibt. Startbefehl: siehe README.md daneben.
+  grpc_endpoint: "127.0.0.1:8101"
+  slots: 1
+  pipelining_depth: 0
+  safety_margin_percent: 110
+  # Ohne diesen Pfad bleibt der Artefakt-Digest jedes Profils `unknown`, und
+  # eine ausgetauschte Gewichtsdatei unter derselben Versionsnummer faellt
+  # nicht auf (ADR-0019).
+  model_repository: "/models"
+
+models:
+  # ---------------------------------------------------------------------
+  # Fall 1: dieselben Klassen, dieselbe Reihenfolge, andere Auflaesung.
+  #
+  # 512 gegen 768 px. Die Ausgabesemantik ist Zeichen fuer Zeichen identisch —
+  # nur die Eingabe unterscheidet sich. Das ist kein Ersatz, sondern eine
+  # andere Vorverarbeitung, und die kostet Zeit. Der gemeldete Grund ist
+  # `Input`.
+  # ---------------------------------------------------------------------
+  detector_resolution:
+    class: protected
+    queue: { policy: latest, capacity: 1, overflow: reject_new }
+    contract:
+      period_ms: 33
+      deadline_ms: 33
+      max_age_ms: 66
+      variant_dwell_ms: 200
+    variants:
+      - id: r768
+        backend_model: rfdetr_768
+        quality: { value: 1.00, source: user_declared }
+        # Platzhalter, nicht gemessen — siehe Kopf der Datei.
+        profile: { p50_us: 14916, p95_us: 17081, p99_us: 17470, samples: 120 }
+        preprocess_us: 1400
+        semantics:
+          input:
+            layout: nchw
+            color_space: rgb
+            # Die ganze Vorverarbeitungsvorschrift in einer Kennzahl:
+            # ImageNet-Normierung **nach** einem einfachen quadratischen
+            # Bilinear-Resize ohne Letterbox. Der Resize gehoert dazu — ein
+            # letterboxtes Bild an ein Plain-Resize-Modell ergibt systematisch
+            # verschobene Boxen, und das faellt an keiner Tensorform auf.
+            normalization: imagenet_after_square_bilinear_no_letterbox
+            width: 768
+            height: 768
+          outputs:
+            # Ausgabe 0 = `dets`. Belegt in dem Dekodiercode des Anwenders:267:
+            # "boxes: [Q, 4] cxcywh, normalized 0..1".
+            - kind: detections
+              coordinates: normalized
+              layout: cxcywh
+            # Ausgabe 1 = `labels`. Belegt in dem Dekodiercode des Anwenders:266 und 301:
+            # "raw class logits (pre-sigmoid)", die Sigmoid-Funktion wird erst
+            # im Client angewandt. Also `logits` und **nicht** `probability` —
+            # ein Client, der die Werte fuer Wahrscheinlichkeiten haelt,
+            # schwellt gegen die falsche Skala.
+            - kind: classification
+              unit: logits
+              labels:
+                - person
+                - civilian_vehicle
+                - military_vehicle
+                - aircraft
+                - alarm
+                - munition
+                - vessel
+                - drone
+                - benign_handheld
+      - id: r512
+        backend_model: rfdetr_512
+        quality: { value: 0.92, source: user_declared }
+        # Gemessen im Gate-M3-Lauf 2026-09-01 (RTX 3070 Laptop, Triton 2.70,
+        # onnxruntime-Backend, Karte unter SwPowerCap).
+        profile: { p50_us: 14916, p95_us: 17081, p99_us: 17470, samples: 120 }
+        preprocess_us: 900
+        semantics:
+          input:
+            layout: nchw
+            color_space: rgb
+            # Die ganze Vorverarbeitungsvorschrift in einer Kennzahl:
+            # ImageNet-Normierung **nach** einem einfachen quadratischen
+            # Bilinear-Resize ohne Letterbox. Der Resize gehoert dazu — ein
+            # letterboxtes Bild an ein Plain-Resize-Modell ergibt systematisch
+            # verschobene Boxen, und das faellt an keiner Tensorform auf.
+            normalization: imagenet_after_square_bilinear_no_letterbox
+            width: 512
+            height: 512
+          outputs:
+            # Ausgabe 0 = `dets`. Belegt in dem Dekodiercode des Anwenders:267:
+            # "boxes: [Q, 4] cxcywh, normalized 0..1".
+            - kind: detections
+              coordinates: normalized
+              layout: cxcywh
+            # Ausgabe 1 = `labels`. Belegt in dem Dekodiercode des Anwenders:266 und 301:
+            # "raw class logits (pre-sigmoid)", die Sigmoid-Funktion wird erst
+            # im Client angewandt. Also `logits` und **nicht** `probability` —
+            # ein Client, der die Werte fuer Wahrscheinlichkeiten haelt,
+            # schwellt gegen die falsche Skala.
+            - kind: classification
+              unit: logits
+              labels:
+                - person
+                - civilian_vehicle
+                - military_vehicle
+                - aircraft
+                - alarm
+                - munition
+                - vessel
+                - drone
+                - benign_handheld
+
+  # ---------------------------------------------------------------------
+  # Fall 2: dieselbe Auflaesung, eine Obermenge an Klassen.
+  #
+  # v5 kennt alle 23 Klassen von v4 in derselben Reihenfolge und fuenf weitere.
+  # Ein Ergebnis mit Klassen-ID <= 22 bedeutet in beiden dasselbe — und
+  # trotzdem sind die Varianten nicht austauschbar: der Governor waehlt je
+  # Request, und v4 statt v5 verliert fuenf Klassen, ohne dass der Client es
+  # erfaehrt. Der gemeldete Grund ist `Labels`, und zwar fuer Ausgabe 1.
+  # ---------------------------------------------------------------------
+  detector_classes:
+    class: high
+    queue: { policy: latest, capacity: 1, overflow: reject_new }
+    contract:
+      period_ms: 66
+      deadline_ms: 66
+      max_age_ms: 132
+      variant_dwell_ms: 200
+    variants:
+      - id: v5
+        backend_model: rfdetr_28cls_768
+        quality: { value: 1.00, source: user_declared }
+        # Platzhalter, nicht gemessen — siehe Kopf der Datei.
+        profile: { p50_us: 14916, p95_us: 17081, p99_us: 17470, samples: 120 }
+        preprocess_us: 1400
+        semantics:
+          input:
+            layout: nchw
+            color_space: rgb
+            # Die ganze Vorverarbeitungsvorschrift in einer Kennzahl:
+            # ImageNet-Normierung **nach** einem einfachen quadratischen
+            # Bilinear-Resize ohne Letterbox. Der Resize gehoert dazu — ein
+            # letterboxtes Bild an ein Plain-Resize-Modell ergibt systematisch
+            # verschobene Boxen, und das faellt an keiner Tensorform auf.
+            normalization: imagenet_after_square_bilinear_no_letterbox
+            width: 768
+            height: 768
+          outputs:
+            # Ausgabe 0 = `dets`. Belegt in dem Dekodiercode des Anwenders:267:
+            # "boxes: [Q, 4] cxcywh, normalized 0..1".
+            - kind: detections
+              coordinates: normalized
+              layout: cxcywh
+            # Ausgabe 1 = `labels`. Belegt in dem Dekodiercode des Anwenders:266 und 301:
+            # "raw class logits (pre-sigmoid)", die Sigmoid-Funktion wird erst
+            # im Client angewandt. Also `logits` und **nicht** `probability` —
+            # ein Client, der die Werte fuer Wahrscheinlichkeiten haelt,
+            # schwellt gegen die falsche Skala.
+            - kind: classification
+              unit: logits
+              labels:
+                - person
+                - car
+                - truck
+                - bus
+                - motorcycle
+                - bicycle
+                - military_vehicle
+                - military_tank
+                - military_truck
+                - military_artillery
+                - aircraft
+                - drone
+                - vessel
+                - alarm
+                - klasse_a
+                - klasse_b
+                - knife
+                - munition
+                - bag_package
+                - benign_handheld
+                - dog
+                - animal
+                - construction_vehicle
+                - camera
+                - phone
+                - umbrella
+                - bottle
+                - microphone
+      - id: v4
+        backend_model: rfdetr_23cls_768
+        quality: { value: 0.95, source: user_declared }
+        # Platzhalter, nicht gemessen — siehe Kopf der Datei.
+        profile: { p50_us: 14916, p95_us: 17081, p99_us: 17470, samples: 120 }
+        preprocess_us: 1400
+        semantics:
+          input:
+            layout: nchw
+            color_space: rgb
+            # Die ganze Vorverarbeitungsvorschrift in einer Kennzahl:
+            # ImageNet-Normierung **nach** einem einfachen quadratischen
+            # Bilinear-Resize ohne Letterbox. Der Resize gehoert dazu — ein
+            # letterboxtes Bild an ein Plain-Resize-Modell ergibt systematisch
+            # verschobene Boxen, und das faellt an keiner Tensorform auf.
+            normalization: imagenet_after_square_bilinear_no_letterbox
+            width: 768
+            height: 768
+          outputs:
+            # Ausgabe 0 = `dets`. Belegt in dem Dekodiercode des Anwenders:267:
+            # "boxes: [Q, 4] cxcywh, normalized 0..1".
+            - kind: detections
+              coordinates: normalized
+              layout: cxcywh
+            # Ausgabe 1 = `labels`. Belegt in dem Dekodiercode des Anwenders:266 und 301:
+            # "raw class logits (pre-sigmoid)", die Sigmoid-Funktion wird erst
+            # im Client angewandt. Also `logits` und **nicht** `probability` —
+            # ein Client, der die Werte fuer Wahrscheinlichkeiten haelt,
+            # schwellt gegen die falsche Skala.
+            - kind: classification
+              unit: logits
+              labels:
+                - person
+                - car
+                - truck
+                - bus
+                - motorcycle
+                - bicycle
+                - military_vehicle
+                - military_tank
+                - military_truck
+                - military_artillery
+                - aircraft
+                - drone
+                - vessel
+                - alarm
+                - klasse_a
+                - klasse_b
+                - knife
+                - munition
+                - bag_package
+                - benign_handheld
+                - dog
+                - animal
+                - construction_vehicle
+
+  # ---------------------------------------------------------------------
+  # Fall 3: eine Variante, deren Bedeutung niemand aufgeschrieben hat.
+  #
+  # Zu `rfdetr_nano_512` liegt in das Anwenderprojekt keine Klassenkarte. Die Klassenzahl ist
+  # aus der Logit-Breite ableitbar (8 = 7 + No-Object), die **Reihenfolge**
+  # nicht — und die Reihenfolge ist die Bedeutung. Deshalb steht hier keine
+  # Semantikangabe und keine geratene Labelliste: nicht beschrieben ist eine
+  # ehrliche Aussage, eine erfundene Liste waere keine.
+  #
+  # Ein Modell allein braucht auch keine: austauschbar ist es mit nichts.
+  # ---------------------------------------------------------------------
+  detector_nano:
+    class: normal
+    queue: { policy: latest, capacity: 1, overflow: reject_new }
+    contract:
+      period_ms: 33
+      deadline_ms: 33
+      max_age_ms: 66
+    variants:
+      - id: nano
+        backend_model: rfdetr_nano_512
+        quality: { value: 1.00, source: user_declared }
+        # Platzhalter, nicht gemessen — siehe Kopf der Datei.
+        profile: { p50_us: 14916, p95_us: 17081, p99_us: 17470, samples: 120 }
+        preprocess_us: 900

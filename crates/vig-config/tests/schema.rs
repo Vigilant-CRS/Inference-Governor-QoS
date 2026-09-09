@@ -916,3 +916,55 @@ fn what_calibrate_writes_resolve_reads_again() {
     let twice = serde_norway::to_string(&after).unwrap();
     assert_eq!(written, twice);
 }
+
+/// Die ausgelieferte RF-DETR-Variantenkonfiguration bleibt gueltig.
+///
+/// Sie beschreibt vier echte Modelle und ist die einzige Stelle, an der die
+/// Semantikangaben aus NV-10 gegen tatsaechliche Klassenlisten und tatsaechlich
+/// gemessene Tensorformen stehen. Bricht das Schema, bricht ein Beispiel, das
+/// jemand kopiert.
+#[test]
+fn the_rfdetr_variant_example_resolves_and_reports_its_conflicts() {
+    const VARIANTS: &str = include_str!("../../../examples/rfdetr_variants/vig.yaml");
+    let config = Config::from_yaml(VARIANTS).unwrap();
+    assert!(config.diagnose().is_empty(), "{:?}", config.diagnose());
+    let resolved = config.resolve().unwrap();
+
+    // Gleiche Klassen, andere Auflaesung: der Eingabevertrag unterscheidet sich.
+    let by_resolution = resolved.model_index("detector_resolution").unwrap();
+    let contract = resolved.contracts.get(by_resolution.get()).unwrap();
+    assert!(
+        matches!(
+            contract.semantic_conflict(),
+            Some((_, _, vig_core::semantics::SemanticConflict::Input))
+        ),
+        "{:?}",
+        contract.semantic_conflict()
+    );
+    assert!(!contract.auto_variant_selection());
+
+    // Gleiche Auflaesung, Obermenge an Klassen: die Labels der **zweiten**
+    // Ausgabe unterscheiden sich. `dets` ist identisch, `labels` nicht.
+    let by_classes = resolved.model_index("detector_classes").unwrap();
+    let contract = resolved.contracts.get(by_classes.get()).unwrap();
+    assert!(
+        matches!(
+            contract.semantic_conflict(),
+            Some((
+                _,
+                _,
+                vig_core::semantics::SemanticConflict::Labels { output: 1 }
+            ))
+        ),
+        "{:?}",
+        contract.semantic_conflict()
+    );
+
+    // Und das Modell ohne belegte Klassenreihenfolge traegt keine erfundene.
+    let nano = resolved.model_index("detector_nano").unwrap();
+    let contract = resolved.contracts.get(nano.get()).unwrap();
+    assert!(
+        !contract.variants.get(0).unwrap().semantics.is_specified(),
+        "nicht beschrieben ist eine ehrliche Aussage; eine geratene Labelliste waere keine"
+    );
+}
