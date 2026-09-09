@@ -39,14 +39,38 @@ def summarise(rows, label):
     for r in rows:
         by_stream[r["stream"]].append(r)
     print(f"\n  {label}")
-    print("  Strom     | unabgedeckt ‰ | Antwortalter p95 ms | geliefert | abgewiesen")
-    print("  ----------|---------------|---------------------|-----------|-----------")
+    print(
+        "  Strom     | unabgedeckt ‰ | Verbraucher ‰ | laengste Luecke ms | "
+        "mittlere AoI ms | Antwortalter p95 ms | geliefert | abgewiesen"
+    )
+    print(
+        "  ----------|---------------|---------------|--------------------|"
+        "-----------------|---------------------|-----------|-----------"
+    )
     for name, rs in sorted(by_stream.items()):
         unc = sorted(int(r["uncovered_permille"]) for r in rs)
         aoi = sorted(int(response_age_ms(r)) for r in rs)
         med = lambda v: v[len(v) // 2] if v else 0
+
+        # Die Verbrauchersicht steht daneben, nicht statt der alten Zahlen:
+        # bestehende Vergleiche bleiben so nachrechenbar. Aeltere Messreihen
+        # haben diese Spalten nicht — dann bleibt die Zelle leer statt eine
+        # Null zu behaupten, die niemand gemessen hat.
+        cons = sorted(int(r["consumer_uncovered_permille"]) for r in rs) \
+            if "consumer_uncovered_permille" in rs[0] else []
+        gap = sorted(int(r["longest_gap_ms"]) for r in rs) \
+            if "longest_gap_ms" in rs[0] else []
+        mean_aoi = sorted(int(r["mean_aoi_ms"]) for r in rs) \
+            if "mean_aoi_ms" in rs[0] else []
+        cell = lambda v: str(med(v)) if v else "—"
+
+        # Die laengste Luecke ist ein Hoechstwert, kein Median: ein einziger
+        # Ausreisser ueber acht Stunden ist genau das, was gesucht wird.
+        worst_gap = str(max(gap)) if gap else "—"
+
         print(
-            f"  {name:<9} | {med(unc):>13} | {med(aoi):>19} | "
+            f"  {name:<9} | {med(unc):>13} | {cell(cons):>13} | {worst_gap:>18} | "
+            f"{cell(mean_aoi):>15} | {med(aoi):>19} | "
             f"{sum(int(r['delivered']) for r in rs):>9} | "
             f"{sum(int(r['rejected']) for r in rs):>10}"
         )

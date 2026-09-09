@@ -232,6 +232,10 @@ pub struct Scheduler {
     estimator: RuntimeEstimator,
     /// Beobachtete Ankunftsabstaende je Modell.
     arrivals: [crate::arrival::ArrivalTracker; MAX_MODELS],
+    /// Wann zuletzt ein gueltiges Ergebnis je Modell vorlag.
+    last_valid: [Option<Instant>; MAX_MODELS],
+    /// Aufeinanderfolgende Requests ohne gueltiges Ergebnis je Modell.
+    consecutive_misses: [u32; MAX_MODELS],
     horizon: Duration,
     inflight: ArrayVec<Dispatched, MAX_INFLIGHT>,
     metrics: Metrics,
@@ -285,6 +289,8 @@ impl Scheduler {
             variant_states: [VariantState::default(); MAX_MODELS],
             next_expected: [None; MAX_MODELS],
             arrivals: [crate::arrival::ArrivalTracker::default(); MAX_MODELS],
+            last_valid: [None; MAX_MODELS],
+            consecutive_misses: [0; MAX_MODELS],
             slots,
             overload,
             margin,
@@ -506,6 +512,12 @@ impl Scheduler {
             RequestState::CompletedValid
         };
 
+        // Verbrauchersicht: wie lange war dieser Strom am Stueck ohne
+        // brauchbares Ergebnis? Eine Abdeckungszahl mittelt das weg, und
+        // gerade der zusammenhaengende Block ist das, was eine Regelung
+        // umwirft.
+        self.observe_supply(entry.descriptor.logical_model, now, state);
+
         if missed {
             self.metrics.deadline_misses = self.metrics.deadline_misses.saturating_add(1);
             if entry.descriptor.criticality.is_guarded() {
@@ -555,6 +567,45 @@ impl Scheduler {
             request,
             state: RequestState::Failed,
         });
+    }
+
+    /// Beobachtet die Versorgungslage eines Stroms.
+    ///
+    /// Ein gueltiges Ergebnis setzt die Kette zurueck und schliesst die
+    /// laufende Luecke; alles andere verlaengert sie. `last_valid` ist
+    /// `None`, solange noch nie etwas Brauchbares ankam — dann laeuft die
+    /// Luecke ab dem ersten Ereignis dieses Stroms.
+    fn observe_supply(&mut self, model: ModelIdx, now: Instant, state: RequestState) {
+        let index = model.get();
+        if state == RequestState::CompletedValid {
+            if let Some(cell) = self.consecutive_misses.get_mut(index) {
+                *cell = 0;
+            }
+            // Auch die exportierte Zahl: sonst zeigt das Dashboard eine Kette,
+            // die laengst gerissen ist — und ein Alarm, der nicht von selbst
+            // verstummt, wird abgeschaltet.
+            if let Some(slot) = self.metrics.consecutive_misses.get_mut(index) {
+                *slot = 0;
+            }
+            if let Some(cell) = self.last_valid.get_mut(index) {
+                *cell = Some(now);
+            }
+            return;
+        }
+
+        if let Some(cell) = self.consecutive_misses.get_mut(index) {
+            *cell = cell.saturating_add(1);
+            if let Some(slot) = self.metrics.consecutive_misses.get_mut(index) {
+                *slot = *cell;
+            }
+        }
+        let since = self.last_valid.get(index).copied().flatten().unwrap_or(now);
+        let gap = now.saturating_since(since);
+        if let Some(slot) = self.metrics.longest_gap_us.get_mut(index) {
+            let micros =
+                u32::try_from(gap.as_nanos().checked_div(1_000).unwrap_or(0)).unwrap_or(u32::MAX);
+            *slot = (*slot).max(micros);
+        }
     }
 
     /// Zaehlt Profile, die nicht mehr zu den Beobachtungen passen.

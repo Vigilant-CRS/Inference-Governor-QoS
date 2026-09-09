@@ -41,6 +41,17 @@ pub struct Metrics {
     /// und genau das muss die Bereitschaftspruefung sehen, auch bevor ein
     /// Timeout ueberhaupt ablaufen konnte.
     pub consecutive_transport_failures: u64,
+    /// Die laengste Zeit ohne gueltiges Ergebnis, je Modell, in Mikrosekunden.
+    ///
+    /// Die Groesse, die eine Abdeckungszahl nicht zeigt: zehn verstreute
+    /// Ausfaelle und ein Block von zehn ergeben dieselbe Rate und voellig
+    /// verschiedene Folgen fuer einen Regler. Im Betrieb ist gerade der Block
+    /// das, was auffaellt — und im Mittelwert verschwindet.
+    pub longest_gap_us: [u32; MAX_MODELS],
+    /// Aufeinanderfolgende Requests ohne gueltiges Ergebnis, je Modell.
+    ///
+    /// Faellt auf null zurueck, sobald wieder etwas Brauchbares ankommt.
+    pub consecutive_misses: [u32; MAX_MODELS],
     /// Ausfuehrungsenden, die durch Abgleich mit dem Backend belegt wurden.
     ///
     /// Jeder davon ist ein Slotkredit, der ohne Antwort des Backends

@@ -16,6 +16,16 @@
 
 use vig_core::{Duration, Instant};
 
+/// Die Zwischenergebnisse der Verbrauchersicht.
+#[derive(Debug, Default, Clone, Copy)]
+struct ConsumerView {
+    covered: u64,
+    no_result: u64,
+    longest_miss_run: u64,
+    longest_gap_ns: u64,
+    mean_aoi_ns: u64,
+}
+
 /// Zaehlt abgedeckte und unabgedeckte Perioden eines Streams.
 #[derive(Debug, Clone)]
 pub struct CoverageTracker {
@@ -41,7 +51,7 @@ pub struct CoverageTracker {
 }
 
 /// Das Ergebnis der Coverage-Messung eines Streams.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Coverage {
     /// Perioden, in denen ein hinreichend frisches Ergebnis vorlag.
     pub covered: u64,
@@ -69,6 +79,46 @@ pub struct Coverage {
     pub peak_aoi_ns: u64,
     /// Ausgelieferte Ergebnisse insgesamt.
     pub delivered: u64,
+
+    // ---------------------------------------------------------------------
+    // Verbrauchersicht (NV-01)
+    //
+    // Die Groessen darueber messen **Auslieferungen**: ein Fenster gilt als
+    // abgedeckt, wenn in ihm etwas Frisches ankam. Die Groessen hier messen,
+    // was der Regler zum Abtastzeitpunkt tatsaechlich **vorliegen** hat —
+    // auch ein Ergebnis aus dem vorigen Fenster, wenn es noch frisch genug
+    // ist. Beide stehen nebeneinander, damit vorhandene Vergleichszahlen
+    // reproduzierbar bleiben und nicht stillschweigend umgedeutet werden.
+    // ---------------------------------------------------------------------
+    /// Abtastzeitpunkte, an denen ein hinreichend frisches Ergebnis vorlag.
+    ///
+    /// Auch ein Ergebnis aus einem frueheren Fenster zaehlt, solange sein
+    /// Alter unter `max_age` liegt. Genau das ist die Frage des Reglers: nicht
+    /// „kam gerade etwas an", sondern „habe ich etwas Brauchbares".
+    pub consumer_covered: u64,
+    /// Abtastzeitpunkte, an denen ueberhaupt kein Ergebnis vorlag.
+    ///
+    /// Getrennt von „vorhanden, aber zu alt": das eine ist ein Anlaufzustand
+    /// oder ein Totalausfall, das andere ein Frischeproblem. Sie zusammen zu
+    /// zaehlen verwischt zwei verschiedene Fehlerbilder.
+    pub no_result: u64,
+    /// Die laengste Folge aufeinanderfolgender unabgedeckter Abtastzeitpunkte.
+    ///
+    /// Der Grund, warum eine Miss-Rate allein nichts taugt: zehn verstreute
+    /// Ausfaelle und ein Block von zehn haben dieselbe Rate und voellig
+    /// verschiedene Folgen fuer einen Regler.
+    pub longest_miss_run: u64,
+    /// Die laengste zusammenhaengende Zeit ohne brauchbares Ergebnis.
+    ///
+    /// Exakt aus dem Lieferprotokoll berechnet, nicht aus Fenstern gerundet:
+    /// eine Versorgungsluecke haelt sich nicht an Periodengrenzen.
+    pub longest_gap_ns: u64,
+    /// Zeitgewichtetes mittleres Informationsalter ueber das Messfenster.
+    ///
+    /// Das Integral des Alters ueber die Zeit, geteilt durch die Dauer — die
+    /// Groesse, die die Fachliteratur „Age of Information" nennt. Die
+    /// Perzentile oben sind Antwortalter und etwas anderes.
+    pub mean_aoi_ns: u64,
 }
 
 impl Coverage {
@@ -144,6 +194,7 @@ impl CoverageTracker {
     /// Schliesst die Messung ab.
     #[must_use]
     pub fn finish(&self) -> Coverage {
+        let consumer = self.consumer_view();
         let mut sorted = self.ages_ns.clone();
         sorted.sort_unstable();
         let pick = |q: usize| -> u64 {
@@ -161,7 +212,139 @@ impl CoverageTracker {
             response_age_p99_ns: pick(99),
             peak_aoi_ns: self.peak_aoi_ns(),
             delivered: self.ages_ns.len() as u64,
+            consumer_covered: consumer.covered,
+            no_result: consumer.no_result,
+            longest_miss_run: consumer.longest_miss_run,
+            longest_gap_ns: consumer.longest_gap_ns,
+            mean_aoi_ns: consumer.mean_aoi_ns,
         }
+    }
+
+    /// Der Verlauf des Informationsstands ueber das Messfenster.
+    ///
+    /// Ein Paar je Ereignis: ab welchem Zeitpunkt welche Capture-Zeit die
+    /// neueste vorliegende ist. Eine spaet gelieferte, aber aeltere Aufnahme
+    /// verjuengt nichts — deshalb steigt die zweite Komponente monoton.
+    fn timeline(&self) -> Vec<(u64, u64)> {
+        let mut sorted = self.deliveries.clone();
+        sorted.sort_unstable();
+        let mut newest = 0_u64;
+        let mut out = Vec::with_capacity(sorted.len());
+        for (completion, generation) in sorted {
+            newest = newest.max(generation);
+            out.push((completion, newest));
+        }
+        out
+    }
+
+    /// Die Verbrauchersicht: was liegt zum Abtastzeitpunkt vor?
+    ///
+    /// Abgetastet wird am **Ende** jeder Periode — das ist der Zeitpunkt, an
+    /// dem ein Regelzyklus sein Eingangsdatum braucht. Ein Ergebnis aus einem
+    /// frueheren Fenster zaehlt mit, solange es frisch genug ist.
+    fn consumer_view(&self) -> ConsumerView {
+        let timeline = self.timeline();
+        let start = self.start.as_nanos();
+        let end = self.end.as_nanos();
+        let period = self.period.as_nanos().max(1);
+        let max_age = self.max_age.as_nanos();
+
+        let mut view = ConsumerView::default();
+        let mut run = 0_u64;
+        let mut cursor = 0_usize;
+        let mut newest: Option<u64> = None;
+
+        for window in 0..self.covered.len() {
+            let sample =
+                start.saturating_add((window as u64).saturating_add(1).saturating_mul(period));
+            while let Some((completion, generation)) = timeline.get(cursor).copied() {
+                if completion > sample {
+                    break;
+                }
+                newest = Some(newest.map_or(generation, |n: u64| n.max(generation)));
+                cursor = cursor.saturating_add(1);
+            }
+
+            let covered = match newest {
+                None => {
+                    view.no_result = view.no_result.saturating_add(1);
+                    false
+                }
+                Some(generation) => sample.saturating_sub(generation) <= max_age,
+            };
+
+            if covered {
+                view.covered = view.covered.saturating_add(1);
+                run = 0;
+            } else {
+                run = run.saturating_add(1);
+                view.longest_miss_run = view.longest_miss_run.max(run);
+            }
+        }
+
+        view.longest_gap_ns = Self::longest_gap(&timeline, start, end, max_age);
+        view.mean_aoi_ns = Self::mean_aoi(&timeline, start, end);
+        view
+    }
+
+    /// Die laengste zusammenhaengende Zeit ohne brauchbares Ergebnis.
+    ///
+    /// Aus dem Lieferprotokoll, nicht aus Fenstern: eine Versorgungsluecke
+    /// haelt sich nicht an Periodengrenzen, und auf ein Vielfaches der Periode
+    /// gerundet verschwindet gerade der Fall, der weh tut.
+    fn longest_gap(timeline: &[(u64, u64)], start: u64, end: u64, max_age: u64) -> u64 {
+        // Vor der ersten Lieferung liegt nichts vor.
+        let mut usable_until = start;
+        let mut longest = 0_u64;
+
+        for (completion, generation) in timeline.iter().copied() {
+            if completion > usable_until {
+                longest = longest.max(completion.saturating_sub(usable_until));
+            }
+            usable_until = usable_until.max(generation.saturating_add(max_age));
+        }
+        if end > usable_until {
+            longest = longest.max(end.saturating_sub(usable_until));
+        }
+        longest
+    }
+
+    /// Das zeitgewichtete mittlere Informationsalter.
+    ///
+    /// Das Integral des Alters ueber die Zeit, geteilt durch die Dauer.
+    /// Zwischen zwei Ereignissen waechst das Alter linear; das Integral ueber
+    /// ein solches Stueck ist deshalb geschlossen berechenbar.
+    fn mean_aoi(timeline: &[(u64, u64)], start: u64, end: u64) -> u64 {
+        let duration = end.saturating_sub(start);
+        if duration == 0 {
+            return 0;
+        }
+        // Vor der ersten Lieferung wird das Alter ab Messbeginn gezaehlt.
+        let mut reference = start;
+        let mut at = start;
+        let mut integral = 0_u128;
+
+        let segment = |from: u64, to: u64, reference: u64| -> u128 {
+            let a = u128::from(from.saturating_sub(reference));
+            let b = u128::from(to.saturating_sub(reference));
+            b.saturating_mul(b).saturating_sub(a.saturating_mul(a)) / 2
+        };
+
+        for (completion, generation) in timeline.iter().copied() {
+            let until = completion.min(end);
+            if until > at {
+                integral = integral.saturating_add(segment(at, until, reference));
+                at = until;
+            }
+            reference = reference.max(generation);
+            if at >= end {
+                break;
+            }
+        }
+        if end > at {
+            integral = integral.saturating_add(segment(at, end, reference));
+        }
+        u64::try_from(integral / u128::from(duration)).unwrap_or(u64::MAX)
     }
 
     /// Die Peak Age of Information ueber das Messfenster.
@@ -322,6 +505,112 @@ mod tests {
         let c = t.finish();
         // Neueste vorliegende Aufnahme bleibt die von t=40.
         assert_eq!(c.peak_aoi_ns, 60_000_000);
+    }
+
+    // -----------------------------------------------------------------
+    // NV-01: Verbrauchersicht
+    // -----------------------------------------------------------------
+
+    /// Gleiche Miss-Rate, verschiedene Burststruktur — und das muss man sehen.
+    ///
+    /// Zehn verstreute Ausfaelle und ein Block von zehn haben dieselbe Rate.
+    /// Fuer einen Regler sind sie voellig verschieden: das eine faengt die
+    /// Regelung ab, das andere ist ein Blindflug ueber eine Drittelsekunde.
+    /// Eine Kennzahl, die beides gleich bewertet, verschweigt genau das.
+    #[test]
+    fn the_same_miss_rate_with_different_bursts_is_distinguished() {
+        // 20 Fenster a 10 ms. Ergebnis ist 5 ms nach der Aufnahme da und
+        // hoechstens 15 ms brauchbar.
+        let build = |deliver: &[u64]| {
+            let mut t = CoverageTracker::new(ms(10), ms(15), Instant::ZERO, ms(200));
+            for w in deliver {
+                // Aufnahme zu Fensterbeginn, Auslieferung 5 ms spaeter.
+                t.record_delivery(at(w * 10 + 5), at(w * 10));
+            }
+            t.finish()
+        };
+
+        // Verstreut: jedes zweite Fenster faellt aus.
+        let scattered = build(&[0, 2, 4, 6, 8, 10, 12, 14, 16, 18]);
+        // Am Stueck: die ersten zehn Fenster geliefert, dann Schweigen.
+        let bursty = build(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+
+        assert_eq!(
+            scattered.delivered, bursty.delivered,
+            "gleich viele Auslieferungen"
+        );
+        assert!(
+            scattered.longest_miss_run < bursty.longest_miss_run,
+            "verstreut {} gegen am Stueck {}",
+            scattered.longest_miss_run,
+            bursty.longest_miss_run
+        );
+        assert!(
+            scattered.longest_gap_ns < bursty.longest_gap_ns,
+            "und die laengste Versorgungsluecke ebenso"
+        );
+    }
+
+    /// Ein noch frisches Ergebnis aus dem vorigen Fenster zaehlt weiter.
+    ///
+    /// Die Lieferzaehlung markiert nur das Fenster, in dem etwas ankam. Der
+    /// Regler fragt anders: nicht „kam gerade etwas an", sondern „habe ich
+    /// etwas Brauchbares". Bei einem Modell, das langsamer liefert als der
+    /// Regeltakt, sind das zwei sehr verschiedene Zahlen.
+    #[test]
+    fn a_still_fresh_earlier_result_counts_in_the_next_window_too() {
+        // Regeltakt 10 ms, brauchbar bis 25 ms Alter, geliefert alle 20 ms.
+        let mut t = CoverageTracker::new(ms(10), ms(25), Instant::ZERO, ms(100));
+        for k in 0..5_u64 {
+            t.record_delivery(at(k * 20 + 5), at(k * 20));
+        }
+        let c = t.finish();
+
+        assert_eq!(c.total, 10);
+        assert!(
+            c.consumer_covered > c.covered,
+            "Verbrauchersicht {} gegen Lieferfenster {}",
+            c.consumer_covered,
+            c.covered
+        );
+        assert_eq!(c.no_result, 0, "es lag immer etwas vor");
+    }
+
+    /// „Nichts vorhanden" und „vorhanden, aber zu alt" sind zwei Fehlerbilder.
+    #[test]
+    fn nothing_available_is_counted_apart_from_too_old() {
+        // Erste Lieferung erst nach 50 ms: davor liegt gar nichts vor.
+        let mut t = CoverageTracker::new(ms(10), ms(15), Instant::ZERO, ms(100));
+        t.record_delivery(at(55), at(50));
+        let c = t.finish();
+
+        assert_eq!(c.no_result, 5, "die ersten fuenf Abtastungen ohne Ergebnis");
+        assert!(c.consumer_covered >= 1);
+    }
+
+    /// Schweigen nach der letzten Lieferung faellt in die Luecke.
+    #[test]
+    fn silence_after_the_last_delivery_counts_towards_the_gap() {
+        let mut t = CoverageTracker::new(ms(10), ms(20), Instant::ZERO, ms(500));
+        t.record_delivery(at(5), at(0));
+        let c = t.finish();
+        // Brauchbar bis 20 ms, danach 480 ms Schweigen.
+        assert_eq!(c.longest_gap_ns, 480_000_000);
+        assert!(c.mean_aoi_ns > 200_000_000, "das Alter waechst weiter");
+    }
+
+    /// Die Legacy-Zahlen bleiben unveraendert.
+    ///
+    /// Neue Metriken kommen **zusaetzlich**. Bestehende Vergleichszahlen still
+    /// umzudeuten waere schlimmer, als sie gar nicht zu verbessern.
+    #[test]
+    fn the_legacy_numbers_are_untouched() {
+        let mut t = CoverageTracker::new(ms(33), ms(66), Instant::ZERO, ms(99));
+        t.record_delivery(at(10), at(0));
+        let c = t.finish();
+        assert_eq!(c.total, 3);
+        assert_eq!(c.covered, 1, "unveraendert: ein Lieferfenster");
+        assert_eq!(c.delivered, 1);
     }
 
     #[test]

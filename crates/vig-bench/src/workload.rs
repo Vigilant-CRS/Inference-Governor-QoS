@@ -182,18 +182,10 @@ pub async fn drive(
             client_dropped: state.client_dropped.load(Ordering::Relaxed),
             delivered: state.delivered.load(Ordering::Relaxed),
             rejected: state.rejected.load(Ordering::Relaxed),
-            coverage: state.tracker.lock().map_or(
-                Coverage {
-                    covered: 0,
-                    total: 0,
-                    response_age_p50_ns: 0,
-                    response_age_p95_ns: 0,
-                    response_age_p99_ns: 0,
-                    peak_aoi_ns: 0,
-                    delivered: 0,
-                },
-                |tracker| tracker.finish(),
-            ),
+            coverage: state
+                .tracker
+                .lock()
+                .map_or(Coverage::default(), |tracker| tracker.finish()),
         })
         .collect()
 }

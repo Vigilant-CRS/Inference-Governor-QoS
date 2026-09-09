@@ -264,18 +264,9 @@ async fn measure(
     let _ = detector.await;
     let _ = generator.await;
 
-    let coverage = tracker.lock().map_or(
-        vig_sim::coverage::Coverage {
-            covered: 0,
-            total: 0,
-            response_age_p50_ns: 0,
-            response_age_p95_ns: 0,
-            response_age_p99_ns: 0,
-            peak_aoi_ns: 0,
-            delivered: 0,
-        },
-        |t| t.finish(),
-    );
+    let coverage = tracker
+        .lock()
+        .map_or(vig_sim::coverage::Coverage::default(), |t| t.finish());
 
     Outcome {
         label,

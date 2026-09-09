@@ -763,6 +763,71 @@ fn freshness_pressure_drops_work_that_would_be_stale_on_arrival() {
     );
 }
 
+/// Die längste Versorgungslücke wird je Strom festgehalten.
+///
+/// Eine Abdeckungsrate mittelt weg, was eine Regelung umwirft: zehn verstreute
+/// Ausfälle und ein Block von zehn ergeben dieselbe Rate. Im Betrieb ist
+/// gerade der Block das, was auffällt.
+#[test]
+fn the_longest_supply_gap_is_recorded_per_stream() {
+    let mut c = contract(Criticality::Protected, QueuePolicy::Fifo, &[5]);
+    c.max_age = Some(ms(10));
+    let mut s = scheduler(&[c.clone()], SlotSet::homogeneous(1, 0).unwrap());
+
+    // Ein gültiges Ergebnis setzt die Kette.
+    event(&mut s, 0, Event::Arrival(frame(1, 0, 0, &c)));
+    event(
+        &mut s,
+        5,
+        Event::Completion {
+            request: RequestId(1),
+            slot: SlotIdx(0),
+        },
+    );
+    assert_eq!(s.metrics().consecutive_misses[0], 0);
+    assert_eq!(s.metrics().longest_gap_us[0], 0);
+
+    // Danach drei Ergebnisse, die bei Fertigstellung zu alt sind.
+    for (k, id) in [(50_u64, 2_u64), (100, 3), (150, 4)] {
+        let mut d = frame(id, 0, k, &c);
+        d.max_age = Some(ms(10));
+        event(&mut s, k, Event::Arrival(d));
+        event(
+            &mut s,
+            k + 40,
+            Event::Completion {
+                request: RequestId(id),
+                slot: SlotIdx(0),
+            },
+        );
+    }
+
+    assert_eq!(
+        s.metrics().consecutive_misses[0],
+        3,
+        "drei Fehlschlaege am Stueck"
+    );
+    // Die Lücke reicht vom letzten gültigen Ergebnis bis zum letzten Miss.
+    assert_eq!(s.metrics().longest_gap_us[0], 185_000);
+
+    // Ein gültiges Ergebnis schließt sie und setzt die Kette zurück.
+    event(&mut s, 200, Event::Arrival(frame(5, 0, 198, &c)));
+    event(
+        &mut s,
+        203,
+        Event::Completion {
+            request: RequestId(5),
+            slot: SlotIdx(0),
+        },
+    );
+    assert_eq!(s.metrics().consecutive_misses[0], 0);
+    assert_eq!(
+        s.metrics().longest_gap_us[0],
+        185_000,
+        "die Hoechstmarke bleibt stehen"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Kontrollen und Gegenbeispiele
 // ---------------------------------------------------------------------------

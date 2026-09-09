@@ -292,6 +292,39 @@ async fn run() {
         );
     }
 
+    // Die Verbrauchersicht daneben: was der Regler zum Abtastzeitpunkt
+    // tatsaechlich vorliegen hatte, und wie lange er am Stueck ohne
+    // brauchbares Ergebnis war. Eine Abdeckungszahl allein unterscheidet
+    // verstreute Ausfaelle nicht von einem Block — fuer eine Regelung ist das
+    // der ganze Unterschied.
+    println!(
+        "\n  Verbrauchersicht  | Abdeckung T | O | laengste Luecke T | O | mittlere AoI T | O"
+    );
+    println!(
+        "  ------------------|-------------|------|-------------------|------|----------------|------"
+    );
+    for p in &prepared {
+        let (Some(a), Some(b)) = (baseline.get(&p.name), governed.get(&p.name)) else {
+            continue;
+        };
+        let share = |c: &vig_sim::coverage::Coverage| {
+            c.consumer_covered
+                .saturating_mul(100)
+                .checked_div(c.total)
+                .unwrap_or(0)
+        };
+        println!(
+            "  {:<17} | {:>9} % | {:>3} % | {:>14} ms | {:>3} ms | {:>11} ms | {:>3} ms",
+            p.name,
+            share(&a.coverage),
+            share(&b.coverage),
+            a.coverage.longest_gap_ns / 1_000_000,
+            b.coverage.longest_gap_ns / 1_000_000,
+            a.coverage.mean_aoi_ns / 1_000_000,
+            b.coverage.mean_aoi_ns / 1_000_000,
+        );
+    }
+
     if let Ok(m) = handle.metrics().await {
         println!(
             "\n  Governor: angenommen {} weitergereicht {} supersediert {} stale {} \

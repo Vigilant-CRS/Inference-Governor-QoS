@@ -192,6 +192,23 @@ fn render_derived(out: &mut String, metrics: &Metrics) {
         ratio(u64::from(metrics.stale_compute_permille()))
     );
 
+    // Verbrauchersicht: was eine Abdeckungszahl nicht zeigt. Zehn verstreute
+    // Ausfaelle und ein Block von zehn ergeben dieselbe Rate — fuer eine
+    // Regelung ist das der ganze Unterschied.
+    render_per_model(
+        out,
+        "vig_longest_gap_us",
+        "Laengste Zeit ohne gueltiges Ergebnis je Modell.",
+        &metrics.longest_gap_us,
+        metrics.models,
+    );
+    render_per_model(
+        out,
+        "vig_consecutive_misses",
+        "Aufeinanderfolgende Requests ohne gueltiges Ergebnis je Modell.",
+        &metrics.consecutive_misses,
+        metrics.models,
+    );
     render_per_model(
         out,
         "vig_arrival_period_us",

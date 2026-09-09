@@ -321,6 +321,7 @@ async fn run() {
     let _ = writeln!(
         streams_csv,
         "window,elapsed_s,load,stream,uncovered_permille,response_age_p95_ms,\
+         consumer_uncovered_permille,longest_gap_ms,mean_aoi_ms,longest_miss_run,\
          emitted,sent,client_dropped,delivered,rejected,rss_kb,loadavg"
     );
 
@@ -354,10 +355,19 @@ async fn run() {
             delivered_total += r.delivered;
             let _ = writeln!(
                 streams_csv,
-                "{window},{elapsed},{load},{},{},{},{},{},{},{},{},{rss},{avg}",
+                "{window},{elapsed},{load},{},{},{},{},{},{},{},{},{},{},{},{},{rss},{avg}",
                 r.name,
                 r.coverage.uncovered_permille(),
                 r.coverage.response_age_p95_ns / 1_000_000,
+                // Verbrauchersicht: was der Regler vorliegen hatte, wie lange
+                // er am Stueck nichts Brauchbares hatte, und das
+                // zeitgewichtete Alter. Ueber acht Stunden ist gerade die
+                // laengste Luecke die Zahl, die einen Ausreisser sichtbar
+                // macht, den ein Mittelwert verschluckt.
+                consumer_uncovered_permille(&r.coverage),
+                r.coverage.longest_gap_ns / 1_000_000,
+                r.coverage.mean_aoi_ns / 1_000_000,
+                r.coverage.longest_miss_run,
                 r.emitted,
                 r.sent,
                 r.client_dropped,
@@ -396,4 +406,17 @@ async fn run() {
 
     println!("\nFertig. Auswertung: {out_dir}/streams.csv");
     drop(regions);
+}
+
+/// Der Anteil unabgedeckter Abtastzeitpunkte in Promille, Verbrauchersicht.
+fn consumer_uncovered_permille(c: &vig_sim::coverage::Coverage) -> u64 {
+    if c.total == 0 {
+        return 0;
+    }
+    1_000_u64.saturating_sub(
+        c.consumer_covered
+            .saturating_mul(1_000)
+            .checked_div(c.total)
+            .unwrap_or(0),
+    )
 }
