@@ -85,7 +85,7 @@ nicht fuer die Karte. `vig doctor` sagt das jetzt vor jeder Messung (ADR-0021).
 | NV-10 Semantik der Varianten | fertig | [0025](adr/0025-the-same-shape-is-not-the-same-meaning.md) |
 | NV-11 Gerichtete Interferenz | angeschlossen: `backend.interference` geht in die Planung ein. **Auf dieser Maschine nicht messbar** — der Takt wandert waehrend jeder Reihe, alle vier Messreihen verworfen | [0026](adr/0026-interference-is-directed-and-not-additive.md), [Messung](benchmark/interference.md) |
 | NV-13 Energieregler | fertig, opt-in, beobachtet statt angenommen; auf dieser Maschine fehlen die Rechte | [0030](adr/0030-actuation-is-an-exception-and-must-be-observed.md) |
-| NV-16 Fortschrittskosten | Code fertig; der Prefill-Anteil ist auf dieser Maschine **nicht gemessen** — der `vlm` im Benchmark ist ein ResNet-Platzhalter ohne Texteingang | [0031](adr/0031-a-re-prefill-is-not-free-progress.md) |
+| NV-16 Fortschrittskosten | fertig **und gemessen**: Prefix-Cache 0–5 us, ohne ihn 35–39 us je Kontexttoken (Qwen ueber vLLM) | [0031](adr/0031-a-re-prefill-is-not-free-progress.md), [Messung](benchmark/nv16-prefill.md) |
 | NV-17 Gueltigkeitsbewusster DAG | Kern fertig; **nicht** an das Gateway angeschlossen | [0028](adr/0028-a-fusion-needs-a-common-capture.md) |
 | NV-18 Anwendungssemantik | fertig: ein Hinweis darf verschaerfen, nie lockern | [0029](adr/0029-a-hint-may-tighten-never-loosen.md) |
 | NV-24 Missbudget in Entscheidungen | fertig, Voreinstellung **aus** | [0027](adr/0027-a-miss-budget-that-decides-not-only-observes.md) |
@@ -145,13 +145,11 @@ Diese Bausteine sind weiterhin nur **gebaut** und tun im Betrieb nichts:
 - **Der Abhaengigkeitsgraph (NV-17)** braucht eine Zusage vom Client, welche
   Anfrage zu welcher Aufnahme gehoert. Das ist eine Protokollerweiterung, die
   ohne benannten Pilotfall nicht sinnvoll zu entwerfen ist.
-- **Der Kontextanteil der Zerlegung (NV-16)** ist gerechnet und getestet, aber
-  nicht gemessen: der `vlm`-Strom in den Benchmarks ist ein ResNet-50 mit
-  Batch 48 und hat keinen Texteingang. `vig calibrate` sagt das auch so und
-  laesst die vorhandenen Werte stehen. `prefill_per_token_us` steht in jeder
-  Beispielkonfiguration auf null — was hier **nicht gemessen** heisst und
-  nicht „kostenlos". Die erste Installation mit einem echten generativen
-  Backend schliesst diese Luecke in einem Kalibrierlauf.
+- ~~Der Kontextanteil der Zerlegung (NV-16) ist nicht gemessen.~~
+  **Gemessen am 10.09.** gegen ein echtes vLLM-Backend: mit Prefix-Cache 0–5,
+  ohne ihn 35–39 us je Kontexttoken, drei Laeufe je Seite. Sockel und
+  Erzeugungsrate bleiben gleich; nur der Kontextterm aendert sich, um den
+  Faktor zehn. [Messung](benchmark/nv16-prefill.md)
 
 ## Die offenen Arbeitspakete
 

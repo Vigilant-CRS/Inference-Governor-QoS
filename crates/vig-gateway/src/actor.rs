@@ -170,6 +170,23 @@ pub(crate) enum Msg {
         /// Der Hinweis in Kernform.
         hint: Box<vig_core::hints::Hint>,
     },
+    /// Ein Auftrag meldet seine Aufnahme und seine Eltern an (NV-17).
+    ///
+    /// Mit Antwort, weil eine Ablehnung den Client erreichen muss: eine
+    /// Zusammenfuehrung ueber Aufnahmegrenzen wird abgelehnt, **bevor** sie
+    /// rechnet. Danach waere es eine Feststellung ueber verbrauchte Zeit.
+    Fuse {
+        /// Der logische Modellindex.
+        model: vig_core::ModelIdx,
+        /// Die Aufnahme, zu der dieser Auftrag gehoert.
+        capture: vig_core::dag::CaptureId,
+        /// Die Kennung dieses Auftrags, wie der Client sie fuehrt.
+        id: u64,
+        /// Die Kennungen der Eltern.
+        parents: vig_protocol_oip::params::DependsOn,
+        /// Wohin die Antwort geht.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Das Ergebnis einer aktiven Erreichbarkeitsprobe (Review R11).
     Reachability {
         /// Der gepruefte Endpunkt.
@@ -398,6 +415,37 @@ impl Handle {
         });
     }
 
+    /// Meldet einen Auftrag im Abhaengigkeitsgraphen an (NV-17).
+    ///
+    /// # Errors
+    ///
+    /// Wenn die Eltern zu verschiedenen Aufnahmen gehoeren, einer unbekannt
+    /// ist oder der Graph voll ist.
+    pub async fn fuse(
+        &self,
+        model: vig_core::ModelIdx,
+        capture: vig_core::dag::CaptureId,
+        id: u64,
+        parents: vig_protocol_oip::params::DependsOn,
+    ) -> Result<(), Status> {
+        let (reply, wait) = oneshot::channel();
+        self.tx
+            .send(Msg::Fuse {
+                model,
+                capture,
+                id,
+                parents,
+                reply,
+            })
+            .await
+            .map_err(|_| Status::internal("der Scheduler ist nicht mehr aktiv"))?;
+        match wait.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(reason)) => Err(Status::failed_precondition(reason)),
+            Err(_) => Err(Status::internal("der Scheduler hat nicht geantwortet")),
+        }
+    }
+
     /// Der aktuelle Metrikabzug.
     ///
     /// # Errors
@@ -470,6 +518,14 @@ struct Actor {
     /// Token, und ihn als Fortschritt zu buchen hiesse, dieselbe Arbeit
     /// zweimal zu verkaufen.
     generative: GenerativeAccounting,
+    /// Der Abhaengigkeitsgraph, falls Clients Aufnahmen nennen (NV-17).
+    ///
+    /// Leer, solange kein Request `vig_capture_id` mitbringt. Dann plant der
+    /// Governor nach Frische allein, wie vor NV-17 — eine Zusammenfuehrung,
+    /// die niemand anmeldet, kann er nicht pruefen.
+    graph: vig_core::dag::Graph,
+    /// Welcher Requestkennung welcher Knoten gehoert.
+    nodes: HashMap<u64, vig_core::dag::NodeId>,
     /// Das jeweils letzte Ergebnis der Erreichbarkeitsprobe je Endpunkt
     /// (Review R11).
     ///
@@ -645,6 +701,8 @@ fn spawn_owned(
         generative: GenerativeAccounting::default(),
         permits: HashMap::new(),
         reachability: HashMap::new(),
+        graph: vig_core::dag::Graph::new(),
+        nodes: HashMap::new(),
         outstanding: 0,
         shutdown: None,
         // Fortsetzungen bekommen Kennungen aus einem eigenen Bereich, damit
@@ -1027,6 +1085,15 @@ impl Actor {
                     ),
                 }
             }
+            Msg::Fuse {
+                model,
+                capture,
+                id,
+                parents,
+                reply,
+            } => {
+                let _ = reply.send(self.fuse(model, capture, id, &parents));
+            }
             Msg::Reachability {
                 endpoint,
                 reachable,
@@ -1368,6 +1435,65 @@ impl Actor {
             }
         });
         true
+    }
+
+    /// Meldet einen Auftrag im Abhaengigkeitsgraphen an (NV-17, ADR-0028).
+    ///
+    /// Der Graph weiss, welches Ergebnis zu welcher Aufnahme gehoert. Eine
+    /// Zusammenfuehrung, deren Eltern zu verschiedenen Aufnahmen gehoeren,
+    /// wird hier abgelehnt — beim Anmelden und nicht erst beim Kombinieren.
+    /// Zwei Ergebnisse koennen beide frisch sein und trotzdem aus
+    /// verschiedenen Aufnahmen stammen; genau das faengt Frische allein nicht.
+    ///
+    /// Eltern, die dieser Governor nicht kennt, sind ein Fehler und keine
+    /// stille Auslassung: eine Zusammenfuehrung, von der die Haelfte fehlt,
+    /// ist keine.
+    fn fuse(
+        &mut self,
+        model: vig_core::ModelIdx,
+        capture: vig_core::dag::CaptureId,
+        id: u64,
+        parents: &vig_protocol_oip::params::DependsOn,
+    ) -> Result<(), String> {
+        // Alter Zustand raus, bevor neuer dazukommt: ohne das waechst der
+        // Graph mit der Laufzeit, und ein Graph, der waechst, ist ein
+        // unbeschraenkter Puffer (Spec L-003).
+        let collected = self.graph.collect();
+        if collected > 0 {
+            self.nodes
+                .retain(|_, node| self.graph.state(*node).is_some());
+        }
+
+        // Feste Groesse ohne Allokation, wie ueberall auf diesem Pfad.
+        let mut resolved = [vig_core::dag::NodeId(0); vig_core::dag::MAX_PARENTS];
+        let mut count = 0_usize;
+        for parent in parents.as_slice() {
+            let Some(node) = self.nodes.get(parent).copied() else {
+                return Err(format!(
+                    "vig_depends_on nennt {parent}; dieser Auftrag ist hier nicht \
+                     bekannt. Eine Zusammenfuehrung, von der die Haelfte fehlt, \
+                     ist keine."
+                ));
+            };
+            let Some(slot) = resolved.get_mut(count) else {
+                return Err("mehr Eltern als der Graph fuehrt".to_owned());
+            };
+            *slot = node;
+            count = count.saturating_add(1);
+        }
+        let parents_resolved = resolved.get(..count).unwrap_or(&[]);
+
+        // Die Epoche ist die Revision der Profilidentitaet: eine geaenderte
+        // Ausgabesemantik macht zwei Ergebnisse unvergleichbar, auch wenn sie
+        // zur selben Aufnahme gehoeren.
+        let epoch = vig_core::dag::EpochId(self.profile_revision);
+        match self.graph.insert(model, capture, epoch, parents_resolved) {
+            Ok(node) => {
+                self.nodes.insert(id, node);
+                Ok(())
+            }
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     /// Wertet einen gemeldeten Zaehlerstand aus (NV-20, Review R01).
@@ -1797,71 +1923,92 @@ const HARDWARE_PROBE_INTERVAL_MS: u64 = 2_000;
 /// guenstigsten.
 fn spawn_hardware_probe(tx: &mpsc::Sender<Msg>) {
     let tx = tx.clone();
-    tokio::spawn(async move {
-        let mut collector = vig_platform::NvidiaSmi::default();
-        let mut health = vig_platform::CollectorHealth::default();
-        let interval = std::time::Duration::from_millis(HARDWARE_PROBE_INTERVAL_MS);
-        loop {
-            // Ein Unterprozess gehoert nicht auf den Actor-Thread.
-            let probe = tokio::task::spawn_blocking({
-                let mut collector = collector.clone();
-                move || {
-                    use vig_platform::Collector as _;
-                    collector.snapshot()
-                }
-            })
-            .await;
+    // Ein **eigener Betriebssystem-Thread**, nicht `spawn_blocking`.
+    //
+    // Der Unterschied ist nicht akademisch: `Runtime::drop` wartet auf
+    // laufende Blocking-Tasks. Ein Aufruf von `nvidia-smi` dauert unter Last
+    // Sekunden — und liegen mehrere Governor-Prozesse gleichzeitig an, dann
+    // serialisiert der Treiber sie. Das Herunterfahren des Prozesses haengt
+    // dann an einer Hardwareabfrage, die niemand mehr braucht.
+    //
+    // Auf einem eigenen Thread ist es umgekehrt: die Runtime endet, der Kanal
+    // schliesst, und der Thread merkt es beim naechsten Senden. Er wird als
+    // detached gefuehrt; ein Prozess, der ohnehin endet, muss auf ihn nicht
+    // warten.
+    std::thread::Builder::new()
+        .name("vig-hardware-probe".to_owned())
+        .spawn(move || {
+            use vig_platform::Collector as _;
 
-            let state = match probe {
-                Ok(Ok(snapshot)) => {
-                    health.record_success(snapshot.taken_at_ms);
-                    snapshot.gpu(0).map_or_else(StateClass::default, |gpu| {
-                        StateClass {
-                            // Der Belegungsgrad kommt vom Kern, nicht von hier.
-                            occupancy: 0,
-                            throttle: if gpu.limiting_reasons().is_empty() {
-                                ThrottleClass::Nominal
-                            } else {
-                                ThrottleClass::Limited
-                            },
-                            // Beide Takte, nicht nur das Rechenwerk: eine
-                            // Karte, die den Speicher heruntertaktet, sah
-                            // sonst aus wie eine bei vollem Takt (R07).
-                            clock: ClockClass::from_two_clocks(
-                                gpu.clock_sm_mhz.value().copied(),
-                                gpu.clock_sm_max_mhz.value().copied(),
-                                gpu.clock_mem_mhz.value().copied(),
-                                gpu.clock_mem_max_mhz.value().copied(),
-                            ),
-                        }
-                    })
+            let mut collector = vig_platform::NvidiaSmi::default();
+            let mut health = vig_platform::CollectorHealth::default();
+            let interval = std::time::Duration::from_millis(HARDWARE_PROBE_INTERVAL_MS);
+
+            loop {
+                // Vor der Abfrage nachsehen, ob noch jemand zuhoert. Ein
+                // Unterprozess fuer einen geschlossenen Kanal ist verschwendete
+                // Zeit — und im Test verschwendete Sekunden.
+                if tx.is_closed() {
+                    return;
                 }
-                Ok(Err(reason)) => {
-                    health.record_failure(&reason);
-                    // Erst nach der Schwelle wird der Zustand auf unbekannt
-                    // gesetzt: ein einzelner Timeout unter Last darf die
-                    // Betriebsart nicht umschalten.
-                    if health.fallback() == vig_platform::Fallback::StateAware {
-                        tokio::time::sleep(interval).await;
-                        continue;
+
+                let state = match collector.snapshot() {
+                    Ok(snapshot) => {
+                        health.record_success(snapshot.taken_at_ms);
+                        snapshot.gpu(0).map_or_else(StateClass::default, |gpu| {
+                            StateClass {
+                                // Der Belegungsgrad kommt vom Kern, nicht von hier.
+                                occupancy: 0,
+                                throttle: if gpu.limiting_reasons().is_empty() {
+                                    ThrottleClass::Nominal
+                                } else {
+                                    ThrottleClass::Limited
+                                },
+                                // Beide Takte, nicht nur das Rechenwerk: eine
+                                // Karte, die den Speicher heruntertaktet, sah
+                                // sonst aus wie eine bei vollem Takt (R07).
+                                clock: ClockClass::from_two_clocks(
+                                    gpu.clock_sm_mhz.value().copied(),
+                                    gpu.clock_sm_max_mhz.value().copied(),
+                                    gpu.clock_mem_mhz.value().copied(),
+                                    gpu.clock_mem_max_mhz.value().copied(),
+                                ),
+                            }
+                        })
                     }
-                    tracing::warn!(
-                        %reason,
-                        failures = health.consecutive_failures(),
-                        "Hardwarezustand nicht lesbar; es wird ohne Geraetezustand geplant"
-                    );
-                    StateClass::default()
-                }
-                Err(_) => return,
-            };
+                    Err(reason) => {
+                        health.record_failure(&reason);
+                        // Erst nach der Schwelle wird der Zustand auf unbekannt
+                        // gesetzt: ein einzelner Timeout unter Last darf die
+                        // Betriebsart nicht umschalten.
+                        if health.fallback() == vig_platform::Fallback::StateAware {
+                            std::thread::sleep(interval);
+                            continue;
+                        }
+                        tracing::warn!(
+                            %reason,
+                            failures = health.consecutive_failures(),
+                            "Hardwarezustand nicht lesbar; es wird ohne Geraetezustand geplant"
+                        );
+                        StateClass::default()
+                    }
+                };
 
-            if tx.send(Msg::HardwareState { state }).await.is_err() {
-                return;
+                if tx.blocking_send(Msg::HardwareState { state }).is_err() {
+                    return;
+                }
+                std::thread::sleep(interval);
             }
-            let _ = &mut collector;
-            tokio::time::sleep(interval).await;
-        }
-    });
+        })
+        .map_or_else(
+            |e| {
+                tracing::warn!(
+                    error = %e,
+                    "Hardwarewaechter nicht startbar; es wird ohne Geraetezustand geplant"
+                );
+            },
+            |_handle| (),
+        );
 }
 
 /// Die Fortschrittsbuchhaltung eines Governors ueber alle zerlegten Auftraege

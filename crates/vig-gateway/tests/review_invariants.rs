@@ -1349,3 +1349,137 @@ models:
         "die erste Nutzlast steht noch — die zweite passt nicht daneben"
     );
 }
+
+/// Eine Zusammenfuehrung ueber Aufnahmegrenzen wird abgelehnt, bevor sie
+/// rechnet (NV-17, ADR-0028).
+///
+/// Der Fehler, um den es geht: eine frische Detektion neben einer alten
+/// Tiefenkarte ergibt eine Szene, die es nie gegeben hat. Frische allein
+/// faengt das nicht — **beide** Ergebnisse koennen unter ihrem Hoechstalter
+/// liegen und trotzdem aus verschiedenen Aufnahmen stammen.
+///
+/// Bis hierher war der Graph gebaut, getestet und an nichts angeschlossen. Er
+/// brauchte eine Zusage vom Client, welche Anfrage zu welcher Aufnahme
+/// gehoert; die gibt es jetzt als `vig_capture_id` und `vig_depends_on`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fusion_across_captures_is_refused_before_it_computes() {
+    let backend_impl = Arc::new(mock_backend::MockBackend::new(
+        std::time::Duration::from_millis(1),
+    ));
+    let endpoint = mock_backend::start(backend_impl.clone()).await.to_string();
+    let service = graph_service(&endpoint);
+
+    // Zwei Auftraege aus derselben Aufnahme.
+    for (id, capture) in [(1_u64, 100_u64), (2, 100)] {
+        service
+            .model_infer(tonic::Request::new(captured(id, capture, &[])))
+            .await
+            .unwrap_or_else(|e| panic!("Auftrag {id} laeuft: {e}"));
+    }
+
+    // Eine Zusammenfuehrung aus derselben Aufnahme geht durch.
+    service
+        .model_infer(tonic::Request::new(captured(3, 100, &[1, 2])))
+        .await
+        .expect("gemeinsame Aufnahme");
+
+    // Und einer aus einer spaeteren Aufnahme.
+    service
+        .model_infer(tonic::Request::new(captured(4, 200, &[])))
+        .await
+        .expect("neue Aufnahme");
+
+    // Diese Zusammenfuehrung mischt zwei Aufnahmen — und wird abgelehnt.
+    let mixed = service
+        .model_infer(tonic::Request::new(captured(5, 200, &[1, 4])))
+        .await
+        .expect_err("eine Szene, die es nie gegeben hat");
+    assert_eq!(mixed.code(), tonic::Code::FailedPrecondition, "{mixed:?}");
+
+    let before = backend_impl.served.load(Ordering::Relaxed);
+    assert_eq!(
+        before, 4,
+        "der abgelehnte Auftrag darf das Backend nie erreicht haben"
+    );
+}
+
+/// Ohne `vig_capture_id` aendert sich nichts.
+///
+/// Die Gegenprobe. Ein Governor, der ohne Zusage des Clients einen Graphen
+/// fuehrt, wuerde Aufnahmen erfinden — und ADR-0028 sagt ausdruecklich, dass
+/// er das nicht kann.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn without_a_declared_capture_nothing_changes() {
+    let backend_impl = Arc::new(mock_backend::MockBackend::new(
+        std::time::Duration::from_millis(1),
+    ));
+    let endpoint = mock_backend::start(backend_impl.clone()).await.to_string();
+    let service = graph_service(&endpoint);
+
+    for id in 1..=3_u64 {
+        let mut request = vig_gateway::testing::request_for("detector");
+        request.id = id.to_string();
+        service
+            .model_infer(tonic::Request::new(request))
+            .await
+            .unwrap_or_else(|e| panic!("Auftrag {id} laeuft: {e}"));
+    }
+    assert_eq!(backend_impl.served.load(Ordering::Relaxed), 3);
+}
+
+/// Ein Dienst mit einem Modell, das Aufnahmen kennt.
+fn graph_service(endpoint: &str) -> GatewayService {
+    let yaml = format!(
+        r"
+version: 1
+backend:
+  type: triton
+  grpc_endpoint: {endpoint}
+  slots: 2
+  pipelining_depth: 0
+models:
+  detector:
+    class: protected
+    queue: {{ policy: fifo, capacity: 64 }}
+    contract: {{ deadline_ms: 10000 }}
+    variants:
+      - id: main
+        backend_model: detector_main
+        quality: {{ value: 1.0, source: measured }}
+        profile: {{ p50_us: 1000, p95_us: 1000, p99_us: 1000, samples: 1000 }}
+"
+    );
+    let resolved = Arc::new(Config::from_yaml(&yaml).unwrap().resolve().unwrap());
+    let clock = MonotonicClock::start();
+    let backend = Arc::new(vig_backend_triton::TritonClient::new(endpoint.to_owned()));
+    let handle = actor::spawn(resolved.clone(), &backend, clock, &[]).unwrap();
+    GatewayService::new(resolved, backend, handle, clock)
+}
+
+/// Ein Request mit Aufnahmekennung und Eltern.
+fn captured(id: u64, capture: u64, parents: &[u64]) -> ModelInferRequest {
+    use vig_protocol_oip::inference::{InferParameter, infer_parameter};
+
+    let mut request = vig_gateway::testing::request_for("detector");
+    request.id = id.to_string();
+    request.parameters.insert(
+        "vig_capture_id".to_owned(),
+        InferParameter {
+            parameter_choice: Some(infer_parameter::ParameterChoice::Uint64Param(capture)),
+        },
+    );
+    if !parents.is_empty() {
+        let list = parents
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        request.parameters.insert(
+            "vig_depends_on".to_owned(),
+            InferParameter {
+                parameter_choice: Some(infer_parameter::ParameterChoice::StringParam(list)),
+            },
+        );
+    }
+    request
+}

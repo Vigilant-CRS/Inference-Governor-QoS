@@ -63,6 +63,26 @@ pub const P_HINT_ACTION_HORIZON_US: &str = "vig_hint_action_horizon_us";
 pub const P_HINT_ELEVATED_MAX_AGE_US: &str = "vig_hint_elevated_max_age_us";
 /// Ein vom Betreiber benannter Betriebsmodus (NV-18).
 pub const P_HINT_MODE: &str = "vig_hint_mode";
+/// Die Aufnahme, zu der dieser Auftrag gehoert (NV-17).
+///
+/// Der Begriff, der in einer reinen Frischebetrachtung fehlt: zwei Ergebnisse
+/// koennen beide frisch und trotzdem aus **verschiedenen** Aufnahmen sein.
+/// Wer zwei Ergebnisse zusammenfuehrt, braucht die Zusage, dass sie zur
+/// selben gehoeren (ADR-0028).
+///
+/// Ohne diesen Parameter gibt es keinen Graphen und keine Pruefung — der
+/// Governor plant dann wie bisher nach Frische allein.
+pub const P_CAPTURE_ID: &str = "vig_capture_id";
+/// Die Aufnahmen, auf denen dieser Auftrag aufbaut (NV-17).
+///
+/// Eine kommagetrennte Liste von Requestkennungen — die `id`-Felder der
+/// Auftraege, deren Ergebnisse hier zusammengefuehrt werden. Der Governor
+/// prueft, ob sie zur selben Aufnahme gehoeren, und lehnt eine Zusammenfuehrung
+/// ueber Aufnahmegrenzen ab.
+///
+/// Bewusst Text und keine wiederholten Parameter: OIP kennt je Name genau
+/// einen Wert, und eine Liste in einer Zahl unterzubringen waere schlimmer.
+pub const P_DEPENDS_ON: &str = "vig_depends_on";
 /// Wie lange ein Hinweis gilt, in Mikrosekunden (NV-18).
 ///
 /// Ohne Frist gibt es keinen Hinweis: nach ihrem Ablauf gilt der Grundvertrag
@@ -104,6 +124,72 @@ pub struct VigParams {
     pub hint: Option<HintRequest>,
     /// Die Geltungsdauer des Hinweises.
     pub hint_ttl: Option<Duration>,
+    /// Die Aufnahme, zu der dieser Auftrag gehoert (NV-17).
+    pub capture_id: Option<u64>,
+    /// Die Auftraege, deren Ergebnisse hier zusammengefuehrt werden (NV-17).
+    ///
+    /// Leer heisst: keine Zusammenfuehrung, und dann gibt es nichts zu
+    /// pruefen.
+    pub depends_on: DependsOn,
+}
+
+/// Die Kennungen, auf denen ein Auftrag aufbaut (NV-17).
+///
+/// Feste Groesse ohne Allokation, wie alles auf diesem Pfad. Mehr als acht
+/// Eltern nimmt der Graph ohnehin nicht ([`vig_core::dag::MAX_PARENTS`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DependsOn {
+    /// Die Kennungen, gueltig bis `len`.
+    ids: [u64; MAX_DEPENDS_ON],
+    /// Wie viele davon belegt sind.
+    len: usize,
+}
+
+/// Hoechstens so viele Eltern je Auftrag.
+pub const MAX_DEPENDS_ON: usize = 8;
+
+impl DependsOn {
+    /// Die Kennungen als Ausschnitt.
+    #[must_use]
+    pub fn as_slice(&self) -> &[u64] {
+        self.ids.get(..self.len).unwrap_or(&[])
+    }
+
+    /// Ob keine Abhaengigkeit genannt wurde.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Liest die kommagetrennte Liste.
+    ///
+    /// Ein unlesbarer Eintrag laesst die ganze Liste scheitern: eine halb
+    /// gelesene Abhaengigkeit waere eine andere Zusage als die gemeinte.
+    ///
+    /// # Errors
+    ///
+    /// Wenn ein Eintrag keine Zahl ist oder mehr als [`MAX_DEPENDS_ON`]
+    /// genannt werden.
+    pub fn parse(text: &str) -> Result<Self, ExtractError> {
+        let mut out = Self::default();
+        for part in text.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+            let Ok(id) = part.parse::<u64>() else {
+                return Err(ExtractError::WrongType {
+                    name: P_DEPENDS_ON.to_owned(),
+                    expected: "kommagetrennte Requestkennungen",
+                });
+            };
+            let Some(slot) = out.ids.get_mut(out.len) else {
+                return Err(ExtractError::WrongType {
+                    name: P_DEPENDS_ON.to_owned(),
+                    expected: "hoechstens acht Eltern",
+                });
+            };
+            *slot = id;
+            out.len = out.len.saturating_add(1);
+        }
+        Ok(out)
+    }
 }
 
 /// Was ein mitgegebener Hinweis aussagt (NV-18).
@@ -215,6 +301,17 @@ fn as_duration_from_micros(name: &str, p: &InferParameter) -> Result<Duration, E
     })
 }
 
+/// Liest einen Textparameter.
+fn as_text(name: &str, p: &InferParameter) -> Result<String, ExtractError> {
+    match p.parameter_choice {
+        Some(ParameterChoice::StringParam(ref s)) => Ok(s.clone()),
+        _ => Err(ExtractError::WrongType {
+            name: name.to_owned(),
+            expected: "string",
+        }),
+    }
+}
+
 fn as_class(p: &InferParameter) -> Result<Criticality, ExtractError> {
     let Some(ParameterChoice::StringParam(ref s)) = p.parameter_choice else {
         return Err(ExtractError::WrongType {
@@ -283,6 +380,8 @@ pub fn extract<S: core::hash::BuildHasher>(
                 ));
             }
             P_HINT_TTL_US => out.hint_ttl = Some(as_duration_from_micros(name, value)?),
+            P_CAPTURE_ID => out.capture_id = Some(as_u64(name, value)?),
+            P_DEPENDS_ON => out.depends_on = DependsOn::parse(&as_text(name, value)?)?,
             other => {
                 return Err(ExtractError::UnknownParameter {
                     name: other.to_owned(),

@@ -145,18 +145,31 @@ Kontext. Das erste Codereview dieses Pakets hat einen Test gefunden, der
 Nachrechnen stellte sich heraus, dass auch die Behauptung nicht stimmte. Beides
 steht jetzt richtig im Test.
 
-**Was auf dieser Maschine nicht gemessen ist.** Der `vlm`-Strom in den
-Benchmarks ist ein ResNet-50 mit Batch 48 — ein Platzhalter fuer einen langen,
-nicht unterbrechbaren Block, und er hat keinen Texteingang.
-`vig calibrate` meldet fuer ihn korrekt „Kostenmodell nicht messbar" und laesst
-die vorhandenen Werte stehen. `prefill_per_token_us` steht deshalb in jeder
-Beispielkonfiguration dieses Repos auf null, und das heisst hier ausdruecklich
-**nicht gemessen** und nicht „kostenlos".
+**Nachtrag, 10.09.2026: gemessen.** Beim Schreiben dieses ADR war die Zahl
+nicht gemessen — der `vlm`-Strom in den Benchmarks ist ein ResNet-50 mit
+Batch 48 und hat keinen Texteingang. Inzwischen ist sie es, gegen ein echtes
+vLLM-Backend (Qwen, `max_model_len: 2048`), drei Laeufe je Seite:
 
-Damit ist die Zuschneidung gegen einen echten Sprachmodell-Backend belegt durch
-Tests und Rechnung, nicht durch eine Messung. Die erste Installation mit einem
-echten generativen Backend muss `vig calibrate` laufen lassen und die Zahl
-gegen das Kostenmodell pruefen — das ist die Abnahme, die hier offen bleibt.
+| | Sockel | Rate | Kontext |
+|---|---:|---:|---:|
+| `enable_prefix_caching: true` | 6791 / 6298 / 5656 us | 258 / 255 / 255 tok/s | **0 / 3 / 5 us** |
+| `enable_prefix_caching: false` | 6747 / 6712 / 5597 us | 259 / 260 / 257 tok/s | **35 / 36 / 39 us** |
+
+Sockel und Erzeugungsrate sind auf beiden Seiten gleich; die einzige Groesse,
+die sich aendert, ist der Kontextterm, und er aendert sich um den Faktor zehn.
+Genau das behauptet dieses ADR, und genau das ist damit belegt: `0` heisst
+wirksamer Prefix-Cache, und ohne ihn kostet ein Kontexttoken 35 bis 39
+Mikrosekunden.
+
+Fuer den gemessenen Vertrag heisst das 19 % gegen 26 % Zerlegungsaufschlag —
+und das ist die Untergrenze, denn `doctor` rechnet ohne Prompt. Mit 500 Token
+Prompt kostet allein der Prefill des letzten von 16 Quanten 22,6 ms gegen
+einen Sockel von 6,7 ms. Die Einzelheiten stehen in
+[docs/benchmark/nv16-prefill.md](../benchmark/nv16-prefill.md).
+
+Was offen bleibt: die Ausgabequalitaet eines zerlegten Auftrags gegen einen
+ungeteilten. Das ist eine andere Frage als die Kosten, und sie ist hier nicht
+beantwortet.
 
 **TTFT und TBT laufen gegenlaeufig.** Kleine Quanten verkuerzen die Wartezeit
 auf das erste Token und verlaengern den Abstand zwischen den spaeteren.

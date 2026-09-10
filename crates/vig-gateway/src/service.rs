@@ -240,6 +240,52 @@ impl GatewayService {
         });
     }
 
+    /// Meldet einen Auftrag im Abhaengigkeitsgraphen an (NV-17, ADR-0028).
+    ///
+    /// Die Kennung ist das `id`-Feld des OIP-Requests, als Zahl gelesen — die
+    /// Groesse, die der Client ohnehin fuehrt und in `vig_depends_on` wieder
+    /// nennt. Ohne `vig_capture_id` gibt es nichts anzumelden.
+    ///
+    /// # Errors
+    ///
+    /// `FailedPrecondition`, wenn die Eltern zu verschiedenen Aufnahmen
+    /// gehoeren oder einer unbekannt ist. `InvalidArgument`, wenn eine
+    /// Zusammenfuehrung angemeldet wird, ohne dass der Request eine lesbare
+    /// Kennung traegt — dann koennte niemand ihn spaeter als Elternteil
+    /// nennen.
+    async fn register_in_graph(
+        &self,
+        model: vig_core::ModelIdx,
+        request: &ModelInferRequest,
+    ) -> Result<(), Status> {
+        let Ok(params): Result<VigParams, _> = params::extract(&request.parameters) else {
+            return Ok(());
+        };
+        let Some(capture) = params.capture_id else {
+            if params.depends_on.is_empty() {
+                return Ok(());
+            }
+            return Err(Status::invalid_argument(
+                "vig_depends_on ohne vig_capture_id: eine Zusammenfuehrung \
+                 braucht die Aufnahme, zu der sie gehoert",
+            ));
+        };
+        let Ok(id) = request.id.parse::<u64>() else {
+            return Err(Status::invalid_argument(
+                "vig_capture_id gesetzt, aber die Request-`id` ist keine Zahl; \
+                 ohne sie kann kein spaeterer Auftrag diesen als Elternteil nennen",
+            ));
+        };
+        self.scheduler
+            .fuse(
+                model,
+                vig_core::dag::CaptureId(capture),
+                id,
+                params.depends_on,
+            )
+            .await
+    }
+
     fn build_descriptor(
         &self,
         model: vig_core::ModelIdx,
@@ -375,6 +421,13 @@ impl GrpcInferenceService for GatewayService {
         // ist eine Betriebsfrage, und ein abgelehnter Hinweis darf den
         // Request, der ihn mitgebracht hat, nicht scheitern lassen.
         self.offer_hint_from(model, &inner, authority);
+
+        // NV-17: nennt der Client eine Aufnahme, wird der Auftrag im Graphen
+        // gefuehrt — und eine Zusammenfuehrung ueber Aufnahmegrenzen
+        // abgelehnt, **bevor** sie rechnet. Danach waere es eine Feststellung
+        // ueber verbrauchte Zeit. Ohne `vig_capture_id` passiert hier nichts,
+        // und der Governor plant nach Frische allein.
+        self.register_in_graph(model, &inner).await?;
 
         let descriptor = self.build_descriptor(model, &inner)?;
         let logical = inner.model_name.clone();
