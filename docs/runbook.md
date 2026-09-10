@@ -123,6 +123,23 @@ is planned with a raised margin (ADR-0016) — less throughput, no wrong
 promises. The governor does not refuse to start: on a robot, a refused service
 means perception falls out entirely.
 
+## Watching a long run
+
+```bash
+soak measured.yaml > run/console.log 2>&1 &
+tools/run-watch.sh run $! 480 60
+```
+
+The watcher takes a **PID**, not a process pattern. `pgrep -f` searches the
+full command line, so a pattern passed as an argument matches the watcher's own
+process — and the watcher then waits for itself forever. That failure is silent:
+a watch that says nothing looks exactly like a run still in progress. It cost us
+four hours once.
+
+It reports three terminal states, not one: finished with the run's own marker,
+gone without a marker, and error or panic lines in the log. If the run crashed
+right now, a line would come.
+
 ## Draining and restarting
 
 ```bash
