@@ -1,8 +1,8 @@
 [package]
 name = "vig-platform"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.90"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 license = "BUSL-1.1"
 description = "Lesende Hardwarebeobachtung fuer den Vigilant Inference Governor"
 repository = "https://github.com/Vigilant-CRS/Inference-QoS"

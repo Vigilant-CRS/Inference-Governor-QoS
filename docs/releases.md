@@ -2,6 +2,8 @@
 
 ## What a release is
 
+What changed in each version: [CHANGELOG.md](../CHANGELOG.md).
+
 A tagged commit, built by CI, signed with Sigstore, and shipped with a bill of
 materials. Nothing is built on a developer machine and uploaded.
 

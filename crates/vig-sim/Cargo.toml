@@ -9,7 +9,7 @@ repository.workspace = true
 description = "Discrete-event simulator and baseline schedulers"
 
 [dependencies]
-vig-core = { path = "../vig-core", version = "0.1.0" }
+vig-core = { path = "../vig-core", version = "0.2.0" }
 
 [lints]
 workspace = true
