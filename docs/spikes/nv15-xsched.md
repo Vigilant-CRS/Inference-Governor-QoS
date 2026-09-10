@@ -1,0 +1,144 @@
+# NV-15: XSched-Spike — Level 2 funktioniert auf dieser Karte, entgegen der Upstream-Tabelle
+
+Datum: 10.09.2026. Maschine: RTX 3070 Laptop (Ampere, sm86), Treiber
+580.173.02, CUDA 12.4. Upstream: `github.com/XpuOS/xsched`, Stand
+`f49289f0220931df78de948ed841ecbaf960a919` vom 19.08.2026, Apache-2.0.
+
+Ein Spike mit Abbruchgrenze, kein Portierungsauftrag. Was hier steht, ist
+gemessen; was daraus folgt, ist eine Schätzung wert und nicht Teil dieses
+Pakets.
+
+## Die Frage
+
+Vigilant hält Arbeit **vor** dem Abschicken zurück. Was einmal auf der GPU
+ist, läuft zu Ende — das ist ADR-0012, und daraus folgt die ganze
+Quantenzerlegung von ADR-0014: ein 90-ms-Block blockiert 90 ms, und man macht
+ihn kleiner, weil man ihn nicht anhalten kann.
+
+XSched verspricht, ihn anhalten zu können. Die Frage des Spikes ist, ob das
+auf **dieser** Karte stimmt.
+
+## Drei Ebenen
+
+`include/xsched/types.h`:
+
+```c
+kPreemptLevelBlock      = 1,   // nur noch nicht abgeschickte Kommandos
+kPreemptLevelDeactivate = 2,   // abgeschickte Queue stilllegen
+kPreemptLevelInterrupt  = 3,   // laufende Kernel unterbrechen
+```
+
+Level 1 ist das, was Vigilant längst tut — nur auf Kommandoebene statt auf
+Requestebene. Der Gewinn läge in Level 2.
+
+Die Upstream-Tabelle (`platforms/cuda/README.md`) sagt für **Ampere sm86**:
+
+| Platform | XPU | Shim | Level-1 | Level-2 | Level-3 |
+|---|---|---|---|---|---|
+| CUDA | NVIDIA Ampere GPUs (sm86) | ✅ | ✅ | 🚧 | 🚧 |
+
+🚧 heißt „implementation within progress". Nach dieser Tabelle wäre der Spike
+hier zu Ende.
+
+## Die API sagt nichts
+
+Eine Sonde, die alle drei Ebenen anlegt, setzt, suspendiert und fortsetzt:
+
+```
+Level 1 anlegen: Erfolg  | setzen: Erfolg  | suspend: Erfolg  | resume: Erfolg
+Level 2 anlegen: Erfolg  | setzen: Erfolg  | suspend: Erfolg  | resume: Erfolg
+Level 3 anlegen: Erfolg  | setzen: Erfolg  | suspend: Erfolg  | resume: Erfolg
+```
+
+`kXSchedErrorNotSupported` existiert im Fehlerenum und wird hier für keine
+Ebene zurückgegeben — auch nicht für die, die die Dokumentation als
+unfertig führt. **Das ist die stillschweigende API-Lücke, die die Abnahme von
+NV-15 ausschließen soll.** Wer sich auf den Rückgabewert verlässt, plant auf
+einer Ebene, die er vielleicht nicht hat.
+
+Gemessen werden muss also das Verhalten.
+
+## Restblocking, gemessen
+
+Aufbau: `examples/Linux/4_manual_sched`, zwei Ströme auf einer Karte. Der
+niedrig priorisierte läuft dauernd, der hoch priorisierte suspendiert ihn vor
+jeder eigenen Aufgabe und setzt ihn danach fort. Eine Aufgabe sind 100
+Vektoradditionen über 32 MB, rund 100 ms. 30 Aufgaben je Lauf.
+
+Das **Startfenster** (`XQueueSetLaunchConfig`) ist der Hebel: es sagt, wie
+viele Kommandos höchstens abgeschickt sind. Genau die kann Level 1 nicht mehr
+zurückholen.
+
+| | Fenster 8 | Fenster 64 |
+|---|---|---|
+| Level 1, high-prio median | 101 ms | **135 ms** |
+| Level 1, high-prio p90 | 103 ms | **154 ms** |
+| Level 2, high-prio median | 98 ms | 103 ms |
+| Level 2, high-prio p90 | 99 ms | **114 ms** |
+| Level 3, high-prio median | 99 ms | 102 ms |
+| Level 3, high-prio p90 | 100 ms | 115 ms |
+
+Zwei Wiederholungen bei Fenster 64:
+
+| | Wdh 2 | Wdh 3 |
+|---|---|---|
+| Level 1, p90 | 149 ms | 155 ms |
+| Level 2, p90 | 111 ms | 114 ms |
+
+**Level 2 wirkt.** Bei einem Startfenster von 64 Kommandos sinkt das
+Restblocking von rund 50 ms auf rund 14 ms — das Dreifache, reproduziert über
+drei Läufe. Bei einem kleinen Fenster gibt es nichts zu gewinnen, weil dann
+schon Level 1 kaum etwas abzuschicken hat.
+
+**Level 3 bringt nichts obendrauf.** Es verhält sich wie Level 2. Das passt
+zu 🚧: die Ebene wird angenommen und fällt still auf die darunter zurück.
+
+## Was das für Vigilant hieße
+
+Vigilants Restblocking ist heute **eine ganze Inferenz**: 7 ms bei `depth`,
+13 ms beim Detektor, 90 ms beim VLM (Gate-M3-Zahlen). Für das VLM ist genau
+das der Grund, warum es unter Last nie startet (ADR-0012) und warum es die
+kooperative Zerlegung gibt (ADR-0014) — mit dem Preis, den ADR-0031 beziffert.
+
+Level 2 wäre der Weg, diesen Preis nicht zu zahlen. Was er kostet:
+
+- **Ein Shim vor `libcuda`.** XSched schiebt sich zwischen Anwendung und
+  Treiber (`libshimcuda.so`). Für Vigilant hieße das, Triton unter diesem Shim
+  zu starten — nicht unmöglich, aber eine Aussage über den ganzen Stack und
+  nicht über ein Modul.
+- **Eine `unsafe`-Entscheidung.** Dieselbe wie bei NV-09 und NV-14: die
+  Anbindung ist eine C-FFI, und `Cargo.toml` setzt `unsafe_code = "forbid"`.
+- **Eine Wartungslast.** Der Upstream ist Forschungscode mit sechs Plattformen
+  und einem Submodulbaum, der beim ersten `make cuda` nicht durchläuft (drei
+  Anläufe, siehe unten).
+
+## Die Baukette, geprüft
+
+| Schritt | Ergebnis |
+|---|---|
+| `git clone --depth 1` | ok, Apache-2.0 |
+| `make cuda` | scheitert: `3rdparty/ipc`, `cuxtra`, `CLI11` fehlen |
+| gezielte Submodule | scheitert weiter: drei weitere fehlen |
+| `git submodule update --init --recursive` | ok |
+| `make cuda` | ok, `libpreempt.so`, `libhalcuda.so`, `libshimcuda.so` |
+| Beispiel linken mit `nvcc` | scheitert: `__cxa_call_terminate@CXXABI_1.3.15` |
+| dasselbe mit `-ccbin g++-13` | ok |
+
+Der Linkfehler ist ein Toolchain-Bruch: XSched baut mit dem System-GCC 15.2,
+CUDA 12.4 verlangt für den Hostcode höchstens GCC 13. Beides zusammen geht nur
+mit `-ccbin`.
+
+## Urteil
+
+**Positiver Spike, mit Vorbehalt.** Level 2 funktioniert auf sm86, entgegen
+der Upstream-Tabelle, und senkt das Restblocking messbar. Die
+Präemptionsebene ist damit erreichbar; die Controller-Zuständigkeit
+(app-managed vs. `xserver`) und der Betrieb unter Triton sind es noch nicht.
+
+Was NV-15 laut Roadmap liefert, ist damit geliefert: gepinnter Upstreamstand,
+geprüfte Lizenz- und Buildkette, die tatsächlich erreichbare Ebene, gemessenes
+Restblocking und der Nachweis, dass die API ihre Lücken **nicht** meldet.
+
+Was daraus folgt — eine Portierung, ein Shim unter Triton, die
+`unsafe`-Frage — ist ein eigener Auftrag und eine eigene Schätzung. Dieser
+Spike verspricht sie nicht.
