@@ -72,6 +72,10 @@ pub(crate) async fn run(
 
     let resolved = Arc::new(resolved);
     let handle = actor::spawn(Arc::clone(&resolved), &backend, clock, &unverified)?;
+    // NV-04: die Maschine zu beobachten ist eine Entscheidung des Betriebs und
+    // keine Eigenschaft des Schedulers — deshalb hier und nicht im Actor.
+    // Genau einmal je Prozess.
+    handle.observe_hardware();
     let mut service = GatewayService::new(Arc::clone(&resolved), backend, handle.clone(), clock);
 
     // Zugangspruefung: die Dateien werden **hier** geladen, nicht im Dienst.

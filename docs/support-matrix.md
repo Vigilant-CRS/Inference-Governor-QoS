@@ -71,7 +71,7 @@ was that no documented configuration step could reach them at all
 | State-aware runtime prediction | Built | shadow only; no configuration switches it to deciding ([ADR-0023](adr/0023-state-aware-prediction-runs-in-the-shadow-first.md)) |
 | Directed interference table | Reachable | `backend.interference:`, written by `vig calibrate`; a measured pair adds its surcharge to the planned runtime, an unmeasured one adds nothing ([ADR-0026](adr/0026-interference-is-directed-and-not-additive.md)) |
 | Validity-aware dependency graph | Built | needs a protocol extension ([ADR-0028](adr/0028-a-fusion-needs-a-common-capture.md)) |
-| Hardware observation | **Qualified** | on where `nvidia-smi` exists; read-only, no root |
+| Hardware observation | **Qualified** | started explicitly by `vig serve`, not by the scheduler; read-only, no root. Without it the governor plans without device state ([ADR-0022](adr/0022-measurement-is-a-method-not-a-loop.md)) |
 | Bearer-token authentication, mTLS | Reachable | `backend.security` |
 | `trust: strict` | Reachable | `backend.trust: strict`; the default is `open` (Spec L-002) |
 

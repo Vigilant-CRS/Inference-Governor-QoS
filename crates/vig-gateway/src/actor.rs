@@ -415,6 +415,23 @@ impl Handle {
         });
     }
 
+    /// Startet die Hardwarebeobachtung (NV-04).
+    ///
+    /// Ausdruecklich und nicht beim Anlegen des Actors: der Waechter startet
+    /// einen Unterprozess, und ein Actor entsteht auch in jedem Test. Die
+    /// Maschine zu beobachten ist eine Entscheidung des Betriebs.
+    ///
+    /// Genau **einmal** je Prozess aufrufen. Ein zweiter Waechter bringt keine
+    /// zweite Aussage, nur einen zweiten Unterprozess — und wenn der Treiber
+    /// haengt, einen zweiten, der nicht mehr zurueckkommt.
+    ///
+    /// Ohne diesen Aufruf plant der Governor ohne Geraetezustand. Das ist die
+    /// dokumentierte Rueckfallbetriebsart aus ADR-0022 und keine Notlage:
+    /// unbekannt heisst unbekannt, und die Prognose bleibt beim Profil.
+    pub fn observe_hardware(&self) {
+        spawn_hardware_probe(&self.tx);
+    }
+
     /// Meldet einen Auftrag im Abhaengigkeitsgraphen an (NV-17).
     ///
     /// # Errors
@@ -671,7 +688,17 @@ fn spawn_owned(
     }
 
     let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
-    spawn_hardware_probe(&tx);
+    // **Kein** Hardwarewaechter hier. Er gehoert nicht in jeden Actor:
+    //
+    // Er startet einen Unterprozess (`nvidia-smi`), und ein Actor entsteht
+    // auch in jedem Test. Auf dieser Maschine hat sich das geraecht — als der
+    // Grafiktreiber haengen blieb, sammelten sich 188 nicht beendbare
+    // `nvidia-smi`-Prozesse an, einer je Actor, jeder mit seinem Waechter
+    // daran. Und die Gateway-Tests brauchten 75 Sekunden statt 0,87.
+    //
+    // Die Maschine zu beobachten ist eine **Entscheidung des Betriebs**, nicht
+    // eine Eigenschaft des Schedulers. Wer sie will, sagt es:
+    // [`Handle::observe_hardware`]. `vig serve` tut das; ein Test tut es nicht.
     spawn_baseline_probe(&tx, &config, &backends);
     spawn_reachability_probe(&tx, &backends);
     // Die Revision der Profilidentitaet: solange sie nicht aus dem Manifest
@@ -1952,6 +1979,13 @@ fn spawn_hardware_probe(tx: &mpsc::Sender<Msg>) {
                     return;
                 }
 
+                // Nach Fehlversuchen langsamer fragen. Ein Treiber, der nicht
+                // antwortet, fängt nicht an zu antworten, weil man ihn oefter
+                // fragt — und jede Frage kann einen Prozess hinterlassen, der
+                // nicht mehr endet.
+                let backoff = interval
+                    .saturating_mul(1_u32.saturating_add(health.consecutive_failures().min(15)));
+
                 let state = match collector.snapshot() {
                     Ok(snapshot) => {
                         health.record_success(snapshot.taken_at_ms);
@@ -1982,7 +2016,7 @@ fn spawn_hardware_probe(tx: &mpsc::Sender<Msg>) {
                         // gesetzt: ein einzelner Timeout unter Last darf die
                         // Betriebsart nicht umschalten.
                         if health.fallback() == vig_platform::Fallback::StateAware {
-                            std::thread::sleep(interval);
+                            std::thread::sleep(backoff);
                             continue;
                         }
                         tracing::warn!(
@@ -1997,7 +2031,7 @@ fn spawn_hardware_probe(tx: &mpsc::Sender<Msg>) {
                 if tx.blocking_send(Msg::HardwareState { state }).is_err() {
                     return;
                 }
-                std::thread::sleep(interval);
+                std::thread::sleep(backoff);
             }
         })
         .map_or_else(

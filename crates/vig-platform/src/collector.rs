@@ -178,6 +178,13 @@ pub const SNAPSHOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// Wie oft waehrend des Wartens nachgesehen wird, ob der Prozess fertig ist.
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 
+/// Wie lange nach einem Abbruch auf das Ende des Kindprozesses gewartet wird.
+///
+/// Danach wird er aufgegeben. Ein Prozess im ununterbrechbaren Zustand nimmt
+/// kein Signal an; auf ihn zu warten hiesse, die Frist aufzugeben, die man
+/// gerade durchsetzen wollte.
+const KILL_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
+
 impl Collector for NvidiaSmi {
     fn snapshot(&mut self) -> Result<HardwareSnapshot, String> {
         let taken_at_ms = now_ms().ok_or_else(|| "Systemuhr vor der Epoche".to_owned())?;
@@ -229,8 +236,25 @@ fn run_with_timeout(
             Err(e) => return Err(format!("{binary}: {e}")),
         }
         if started.elapsed() >= limit {
+            // Abbrechen — und **nicht** auf das Ende warten.
+            //
+            // `kill` wirkt nur auf einen Prozess, der Signale annehmen kann.
+            // Steckt er im ununterbrechbaren Zustand (`D`), weil der
+            // Grafiktreiber nicht antwortet, nimmt er keines an, und ein
+            // `wait()` daneben wartet mit ihm — die Frist waere dann keine.
+            //
+            // Auf dieser Maschine ist genau das passiert: 188 nicht beendbare
+            // `nvidia-smi`-Prozesse, jeder mit seinem Waechter daran. Ein
+            // Zombie ist das kleinere Uebel als ein Waechter, der nie wieder
+            // etwas meldet.
             let _ = child.kill();
-            let _ = child.wait();
+            let grace = std::time::Instant::now();
+            while grace.elapsed() < KILL_GRACE {
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    break;
+                }
+                std::thread::sleep(POLL_INTERVAL);
+            }
             return Err(format!(
                 "{binary} hat nach {} ms nicht geantwortet und wurde abgebrochen",
                 limit.as_millis()
