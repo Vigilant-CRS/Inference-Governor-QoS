@@ -81,6 +81,22 @@ pub enum ActuationError {
         /// Wie lange noch, in Millisekunden.
         remaining_ms: u64,
     },
+    /// Der **beobachtete** Takt liegt unter dem zugesagten Boden.
+    ///
+    /// Die Toleranz federt ab, dass Karten auf ihre eigenen Taktstufen runden.
+    /// Sie darf keine Zusage abfedern: 1470 MHz beobachtet bei 1500 MHz
+    /// zugesagtem Boden ist innerhalb von 50 MHz Toleranz — und trotzdem ein
+    /// Betriebspunkt, fuer den kein Profil gemessen wurde (Review R07).
+    ///
+    /// Der Unterschied zu [`Self::WouldBreakPromise`]: dort war schon die
+    /// **Anforderung** unzulaessig, hier war sie in Ordnung und die Karte
+    /// liefert etwas anderes.
+    ObservedBelowPromise {
+        /// Was beobachtet wurde.
+        observed: ClockMhz,
+        /// Der niedrigste Takt, bei dem noch alle Zusagen gelten.
+        promised_floor: ClockMhz,
+    },
     /// Ein anderer Prozess haelt die Stellbefugnis.
     NotExclusive {
         /// Was beobachtet wurde.
@@ -121,6 +137,15 @@ impl core::fmt::Display for ActuationError {
                 "Zieltakt {} MHz unter dem zugesagten Boden {} MHz; erst die \
                  Zusage aufgeben, dann senken",
                 requested.0, promised_floor.0
+            ),
+            Self::ObservedBelowPromise {
+                observed,
+                promised_floor,
+            } => write!(
+                f,
+                "beobachtet {} MHz, unter dem zugesagten Boden {} MHz; die \
+                 Toleranz federt Rundung ab, keine Zusage",
+                observed.0, promised_floor.0
             ),
             Self::Dwelling { remaining_ms } => {
                 write!(f, "Verweildauer laeuft noch {remaining_ms} ms")
@@ -406,6 +431,22 @@ impl Actuation {
             return Err(ActuationError::NotObserved {
                 requested: clock,
                 observed: Some(actual),
+            });
+        }
+        // Die Toleranz gilt fuer die Rundung der Karte, nicht fuer die
+        // Zusage. Ein beobachteter Takt unter dem Boden ist ein Betriebspunkt,
+        // fuer den kein Profil gemessen wurde — ihn als bestaetigt zu fuehren
+        // hiesse, auf einem Punkt zu planen, den niemand vermessen hat
+        // (Review R07). Geprueft wird deshalb, was **dasteht**, nicht was
+        // angefordert war.
+        if let Err(broken) = self.policy.admits(actual) {
+            self.state = ActuationState::Unconfirmed { requested: clock };
+            return Err(match broken {
+                ActuationError::WouldBreakPromise { .. } => ActuationError::ObservedBelowPromise {
+                    observed: actual,
+                    promised_floor: self.policy.promised_floor,
+                },
+                other => other,
             });
         }
 
@@ -964,5 +1005,63 @@ mod tests {
             ActuationState::Untouched,
             "der Zustand gilt als unbestimmt, nicht als zurueckgesetzt"
         );
+    }
+
+    /// Ein beobachteter Takt unter dem zugesagten Boden ist keine
+    /// Bestaetigung (Review R07).
+    ///
+    /// Die Toleranz gilt fuer die Rundung der Karte auf ihre eigenen
+    /// Taktstufen, nicht fuer die Zusage. 1470 MHz bei einem Boden von
+    /// 1500 MHz liegt innerhalb von 50 MHz Toleranz — und ist trotzdem ein
+    /// Betriebspunkt, fuer den kein Profil gemessen wurde. Ihn als
+    /// bestaetigt zu fuehren hiesse, auf einem Punkt zu planen, den niemand
+    /// vermessen hat.
+    #[test]
+    fn an_observed_clock_below_the_promised_floor_is_not_confirmation() {
+        let mut actuation = Actuation::disabled(ActuationPolicy {
+            platform_min: ClockMhz(300),
+            platform_max: ClockMhz(2100),
+            promised_floor: ClockMhz(1500),
+            dwell_ms: 0,
+            tolerance_mhz: 50,
+            settle_ms: 0,
+        });
+        actuation.enable(Box::new(AlwaysOk));
+
+        let at_1470 = || Some(snapshot_with_clock(1470));
+        assert!(
+            matches!(
+                actuation.request(ClockMhz(1500), 1000, &at_1470, 0),
+                Err(ActuationError::ObservedBelowPromise { .. })
+            ),
+            "1470 unter dem Boden 1500, trotz Toleranz"
+        );
+
+        // Die Gegenprobe: auf dem Boden selbst wird bestaetigt.
+        let at_1500 = || Some(snapshot_with_clock(1500));
+        assert!(actuation.request(ClockMhz(1500), 2000, &at_1500, 0).is_ok());
+    }
+
+    /// Ein Stellglied, das jede Anforderung annimmt.
+    #[derive(Debug)]
+    struct AlwaysOk;
+
+    impl Actuator for AlwaysOk {
+        fn request(&mut self, _: ClockMhz) -> Result<(), ActuationError> {
+            Ok(())
+        }
+        fn restore(&mut self) -> Result<(), ActuationError> {
+            Ok(())
+        }
+    }
+
+    /// Ein Messwertsatz mit diesem SM-Takt.
+    fn snapshot_with_clock(mhz: u32) -> crate::HardwareSnapshot {
+        crate::collector::parse_output(
+            &format!(
+                "0, GPU, 580.173.02, 8.6, 8192, 80, {mhz}, 2100, 129.55, [N/A], P0, Disabled, 0x4"
+            ),
+            1000,
+        )
     }
 }

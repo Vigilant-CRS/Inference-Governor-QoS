@@ -298,10 +298,25 @@ impl CoverageTracker {
         let mut longest = 0_u64;
 
         for (completion, generation) in timeline.iter().copied() {
+            // Brauchbar ist ein Ergebnis von seiner **Auslieferung** bis zum
+            // Ablauf seines Hoechstalters, gerechnet ab der Aufnahme. Faellt
+            // der Ablauf vor die Auslieferung, war es nie brauchbar: es kam
+            // bereits zu alt an und hat keinen einzigen Moment versorgt
+            // (Review R03).
+            //
+            // Ohne diese Pruefung schob eine veraltete Lieferung `usable_until`
+            // trotzdem nach vorn und verkuerzte die gemeldete Luecke — 150 ms
+            // ohne ein einziges brauchbares Ergebnis erschienen als 90 ms.
+            // Genau die Zahl, mit der dieses Projekt argumentiert, fiel damit
+            // zu gut aus.
+            let expires = generation.saturating_add(max_age);
+            if expires <= completion {
+                continue;
+            }
             if completion > usable_until {
                 longest = longest.max(completion.saturating_sub(usable_until));
             }
-            usable_until = usable_until.max(generation.saturating_add(max_age));
+            usable_until = usable_until.max(expires);
         }
         if end > usable_until {
             longest = longest.max(end.saturating_sub(usable_until));
@@ -625,5 +640,48 @@ mod tests {
         let c = t.finish();
         assert!(c.response_age_p50_ns < c.response_age_p99_ns);
         assert_eq!(c.response_age_p99_ns, 99_000_000);
+    }
+
+    /// Eine veraltete Lieferung verkuerzt keine Versorgungsluecke (Review R03).
+    ///
+    /// Beide Lieferungen kommen 50 ms nach ihrer Aufnahme an, bei einem
+    /// Hoechstalter von 10 ms. Keine von beiden war je brauchbar — in den
+    /// ganzen 150 ms lag zu keinem Zeitpunkt ein verwertbares Ergebnis vor.
+    ///
+    /// Gemeldet wurden 90 ms. Der Grund: die Lieferung schob die
+    /// Brauchbarkeitsgrenze nach vorn, ohne dass geprueft wurde, ob sie
+    /// ueberhaupt jemals gegolten hat. Genau die Zahl, mit der dieses Projekt
+    /// ueber Zuverlaessigkeit argumentiert, fiel damit zu gut aus.
+    #[test]
+    fn a_stale_delivery_does_not_shorten_a_continuous_supply_gap() {
+        let mut tracker = CoverageTracker::new(ms(10), ms(10), at(0), ms(150));
+        tracker.record_delivery(at(50), at(0));
+        tracker.record_delivery(at(100), at(50));
+        let coverage = tracker.finish();
+
+        assert_eq!(coverage.consumer_covered, 0, "kein Zyklus war versorgt");
+        assert_eq!(
+            coverage.longest_gap_ns,
+            ms(150).as_nanos(),
+            "und die Luecke ist das ganze Messfenster"
+        );
+    }
+
+    /// Die Gegenprobe: eine rechtzeitige Lieferung schliesst die Luecke sehr
+    /// wohl.
+    ///
+    /// Sonst pruefte der Test darueber nur, dass die Rechnung ueberall
+    /// dieselbe Zahl liefert.
+    #[test]
+    fn a_timely_delivery_still_closes_the_gap() {
+        let mut tracker = CoverageTracker::new(ms(10), ms(10), at(0), ms(150));
+        tracker.record_delivery(at(50), at(45));
+        let coverage = tracker.finish();
+        assert!(
+            coverage.longest_gap_ns < ms(150).as_nanos(),
+            "ein frisches Ergebnis versorgt seinen Zeitraum: {} ns",
+            coverage.longest_gap_ns
+        );
+        assert!(coverage.consumer_covered > 0);
     }
 }

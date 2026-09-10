@@ -95,7 +95,11 @@ async fn a_successful_call_goes_through_the_seam() {
 
     let clock = MonotonicClock::start();
     let reply = handle
-        .submit(descriptor(1, clock.now()), request_for("detector"))
+        .submit(
+            descriptor(1, clock.now()),
+            request_for("detector"),
+            vig_gateway::budget::PayloadPermit::untracked(),
+        )
         .await;
     assert!(reply.is_ok(), "{reply:?}");
     assert_eq!(fake.executed_models(), vec!["detector_main".to_owned()]);
@@ -125,13 +129,21 @@ async fn a_call_that_never_started_returns_its_credit() {
 
     assert!(
         handle
-            .submit(descriptor(1, clock.now()), request_for("detector"))
+            .submit(
+                descriptor(1, clock.now()),
+                request_for("detector"),
+                vig_gateway::budget::PayloadPermit::untracked()
+            )
             .await
             .is_err()
     );
     assert!(
         handle
-            .submit(descriptor(2, clock.now()), request_for("detector"))
+            .submit(
+                descriptor(2, clock.now()),
+                request_for("detector"),
+                vig_gateway::budget::PayloadPermit::untracked()
+            )
             .await
             .is_err(),
         "der zweite Request muss ueberhaupt starten koennen"
@@ -160,7 +172,11 @@ async fn an_aborted_call_does_not_return_its_credit() {
 
     assert!(
         handle
-            .submit(descriptor(1, clock.now()), request_for("detector"))
+            .submit(
+                descriptor(1, clock.now()),
+                request_for("detector"),
+                vig_gateway::budget::PayloadPermit::untracked()
+            )
             .await
             .is_err()
     );
@@ -187,7 +203,11 @@ async fn a_timeout_answers_the_client_and_keeps_waiting_for_the_backend() {
 
     let started = std::time::Instant::now();
     let reply = handle
-        .submit(descriptor(1, clock.now()), request_for("detector"))
+        .submit(
+            descriptor(1, clock.now()),
+            request_for("detector"),
+            vig_gateway::budget::PayloadPermit::untracked(),
+        )
         .await;
     let waited = started.elapsed();
 
@@ -212,7 +232,11 @@ async fn an_unprogrammed_backend_fails_loudly() {
     let clock = MonotonicClock::start();
     assert!(
         handle
-            .submit(descriptor(1, clock.now()), request_for("detector"))
+            .submit(
+                descriptor(1, clock.now()),
+                request_for("detector"),
+                vig_gateway::budget::PayloadPermit::untracked()
+            )
             .await
             .is_err()
     );
@@ -232,7 +256,11 @@ async fn the_executor_owns_no_resources_of_the_governor() {
 
     for id in 1..=10_u64 {
         let reply = handle
-            .submit(descriptor(id, clock.now()), request_for("detector"))
+            .submit(
+                descriptor(id, clock.now()),
+                request_for("detector"),
+                vig_gateway::budget::PayloadPermit::untracked(),
+            )
             .await;
         assert!(reply.is_ok(), "Request {id}: {reply:?}");
     }

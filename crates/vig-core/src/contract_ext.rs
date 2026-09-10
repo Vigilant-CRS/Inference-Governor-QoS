@@ -37,6 +37,7 @@
 //! beherrschte Stoerungen. Ein `MissWindow` ist ein Messgeraet, keine Zusage —
 //! und die Kritikalitaetsklasse `Protected` ist noch kein Weakly-hard-Vertrag.
 
+use crate::arrayvec::ArrayVec;
 use crate::ids::{MAX_VARIANTS, VariantIdx};
 use crate::time::{Duration, Instant};
 
@@ -274,6 +275,24 @@ impl Default for ContractExtension {
     }
 }
 
+/// Hoechstens so viele nicht durchgesetzte Forderungen je Vertrag.
+pub const MAX_UNENFORCED: usize = 4;
+
+/// Eine Vertragsforderung, die gespeichert, aber nicht durchgesetzt wird.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unenforced {
+    /// Das Feld, das die Forderung traegt.
+    pub field: &'static str,
+    /// Warum sie heute nicht eingeloest wird.
+    pub reason: &'static str,
+}
+
+impl core::fmt::Display for Unenforced {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}: {}", self.field, self.reason)
+    }
+}
+
 /// Warum ein Vertragszusatz abgelehnt wurde.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtensionError {
@@ -331,6 +350,18 @@ pub enum ExtensionError {
         /// Der geforderte Wert.
         requested: u32,
     },
+    /// Der Vertrag verlangt etwas, das dieses Produkt nicht einhaelt
+    /// (Review R05).
+    ///
+    /// Ein gueltiges YAML-Dokument ist kein angenommener Betriebsvertrag. Wer
+    /// eine Zusage aufschreibt, die niemand einloest, bekommt hier eine
+    /// Ablehnung — und nicht ein Achselzucken beim ersten Vorfall.
+    Unsupported {
+        /// Das Feld, das die Forderung traegt.
+        field: &'static str,
+        /// Warum sie heute nicht eingeloest wird.
+        reason: &'static str,
+    },
 }
 
 impl core::fmt::Display for ExtensionError {
@@ -375,6 +406,12 @@ impl core::fmt::Display for ExtensionError {
                 f,
                 "observation_window {requested}; zulaessig ist 1 bis {MAX_WINDOW_CYCLES}"
             ),
+            Self::Unsupported { field, reason } => write!(
+                f,
+                "{field} wird von dieser Version nicht durchgesetzt: {reason}. \
+                 Die Forderung wird abgelehnt, statt sie stillschweigend \
+                 anzunehmen."
+            ),
             Self::BackgroundProgressOutOfRange { requested } => write!(
                 f,
                 "minimum_background_progress_pct {requested}; zulaessig ist 0 bis 100"
@@ -407,10 +444,27 @@ impl ContractExtension {
         {
             return Err(ExtensionError::ObservationWindowOutOfRange { requested: window });
         }
-        if let Some(pct) = self.minimum_background_progress_pct
-            && pct > 100
-        {
-            return Err(ExtensionError::BackgroundProgressOutOfRange { requested: pct });
+        if let Some(pct) = self.minimum_background_progress_pct {
+            if pct > 100 {
+                return Err(ExtensionError::BackgroundProgressOutOfRange { requested: pct });
+            }
+            // Ohne Takt gibt es keine Zyklen, in denen ein Fortschritt zu
+            // messen waere; ohne Fenster keine Zahl, ueber die gemittelt
+            // wird. Beides zu raten hiesse, eine Zusage zu erfinden.
+            if self.consumer_period.is_none() {
+                return Err(ExtensionError::Unsupported {
+                    field: "minimum_background_progress_pct",
+                    reason: "ohne consumer_period gibt es keine Zyklen, in \
+                             denen ein Fortschritt zu zaehlen waere",
+                });
+            }
+            if self.observation_window.is_none() {
+                return Err(ExtensionError::Unsupported {
+                    field: "minimum_background_progress_pct",
+                    reason: "ohne observation_window ist offen, ueber wie \
+                             viele Zyklen der Mindestfortschritt gilt",
+                });
+            }
         }
         if let Some(budget) = self.miss_budget {
             if self.consumer_period.is_none() {
@@ -418,13 +472,99 @@ impl ContractExtension {
             }
             budget.validate()?;
         }
+        self.reject_unsupported()
+    }
+
+    /// Weist Forderungen zurueck, die diese Version nicht einloest (R05).
+    ///
+    /// Jedes dieser Felder laesst sich heute speichern und wird von nichts
+    /// ausgewertet. Ein Betreiber, der es setzt, bekaeme eine Zusage, die
+    /// niemand haelt — und merkte es erst, wenn es darauf ankommt. Die
+    /// Ablehnung ist die ehrliche Antwort, und sie faellt weg, sobald das
+    /// jeweilige Feld wirklich durchgesetzt wird.
+    ///
+    /// Bewusst hier und nicht im `doctor`: der `doctor` ist ein Werkzeug, das
+    /// jemand aufrufen muss. Ein Vertrag, den niemand einhaelt, darf nicht
+    /// davon abhaengen, dass jemand vorher nachgesehen hat.
+    fn reject_unsupported(&self) -> Result<(), ExtensionError> {
+        if self.evidence_required == EvidenceLevel::Proven {
+            return Err(ExtensionError::Unsupported {
+                field: "evidence_required: proven",
+                reason: "in diesem Projekt ist nichts analytisch bewiesen; \
+                         belegt sind Messungen und Monitore",
+            });
+        }
         Ok(())
+    }
+
+    /// Was dieser Vertrag fordert, ohne dass es durchgesetzt wird (R05).
+    ///
+    /// Kein Fehler, aber auch keine Nebensache: ein gueltiges YAML-Dokument
+    /// ist kein angenommener Betriebsvertrag. Was hier steht, hat der
+    /// Betreiber aufgeschrieben und bekommt es **nicht**. Der Dienst meldet
+    /// es beim Start, `vig doctor` warnt davor, und beides ist Absicht — eine
+    /// Zusage, die niemand haelt, darf nicht erst beim Vorfall auffallen.
+    ///
+    /// Was daneben **abgelehnt** wird, steht in [`Self::reject_unsupported`]:
+    /// eine Nachweisstufe, die es nicht gibt, ist keine Ungenauigkeit, sondern
+    /// eine falsche Zusage.
+    #[must_use]
+    pub fn unenforced(&self) -> ArrayVec<Unenforced, MAX_UNENFORCED> {
+        let mut out = ArrayVec::new();
+        if self.release_jitter_envelope.is_some() {
+            let _ = out.push(Unenforced {
+                field: "release_jitter_envelope",
+                reason: "der Jitter der Abtastzeitpunkte wird nicht gemessen \
+                         und gegen nichts geprueft",
+            });
+        }
+        if self.delivery_boundary != DeliveryBoundary::Governor {
+            let _ = out.push(Unenforced {
+                field: "delivery_boundary",
+                reason: "gemessen wird am Governor; alles danach — Transport, \
+                         Deserialisierung, Verbraucherschleife — sieht dieses \
+                         Produkt nicht",
+            });
+        }
+        out
     }
 
     /// Der Verbrauchertakt, falls einer vereinbart ist.
     #[must_use]
     pub const fn tick(&self) -> Option<Duration> {
         self.consumer_period
+    }
+
+    /// Die Bedingung, gegen die der Monitor zaehlt.
+    ///
+    /// Ein vereinbartes Missbudget gilt unveraendert. Ist stattdessen ein
+    /// Mindestfortschritt fuer Hintergrundlast gefordert, ist **auch das** ein
+    /// Weakly-hard-Kriterium: „mindestens 20 % der Zyklen versorgt" heisst
+    /// „hoechstens 80 % der Zyklen im Fenster verfehlt". Es dafuer eigens zu
+    /// zaehlen waere dieselbe Rechnung zweimal.
+    ///
+    /// Vor dieser Umsetzung liess sich `minimum_background_progress_pct`
+    /// speichern, und nichts hat es je ausgewertet (Review R05). Ein perfekt
+    /// versorgter Vordergrund konnte einen Strom vollstaendig aushungern,
+    /// ohne dass die Zusage dagegen stand.
+    #[must_use]
+    pub fn effective_miss_budget(&self) -> Option<MissBudget> {
+        if let Some(budget) = self.miss_budget {
+            return Some(budget);
+        }
+        let pct = self.minimum_background_progress_pct?;
+        let cycles = self.observation_window?;
+        // Aufgerundet zugunsten des Betreibers: bei 20 % Mindestfortschritt in
+        // 10 Zyklen sind 8 Misses zulaessig, nicht 8,0 und im Zweifel 9.
+        let allowed = u64::from(cycles)
+            .saturating_mul(u64::from(100_u32.saturating_sub(pct)))
+            .checked_div(100)
+            .unwrap_or(0);
+        Some(MissBudget {
+            max_misses: u32::try_from(allowed).unwrap_or(u32::MAX),
+            window_cycles: cycles,
+            max_consecutive: None,
+        })
     }
 }
 
@@ -552,6 +692,15 @@ pub struct MissWindow {
     last_sample: Option<Instant>,
     /// Der Verbrauchertakt.
     period: Duration,
+    /// Der Versatz des Rasters gegenueber `Instant::ZERO`.
+    ///
+    /// Ohne ihn begann das Raster beim **ersten Ereignis** dieses Stroms —
+    /// also an einem Zeitpunkt, den der Vertrag nicht kennt. Ein Vertrag, der
+    /// „abgetastet wird bei 5 ms, 38 ms, 71 ms" sagt, wurde damit an anderen
+    /// Zeitpunkten gemessen als vereinbart, und die Missrechnung galt fuer ein
+    /// anderes Raster (Review R05). Jetzt liegt der erste Rasterpunkt auf
+    /// `phase + k * period`.
+    phase: Duration,
     /// Die Vertragsrevision, unter der dieser Zaehler laeuft.
     contract_version: u32,
 }
@@ -563,7 +712,7 @@ impl MissWindow {
     /// Bedingung ungueltig ist — ein Monitor ohne Takt koennte nur raten.
     #[must_use]
     pub fn new(extension: &ContractExtension) -> Option<Self> {
-        let budget = extension.miss_budget?;
+        let budget = extension.effective_miss_budget()?;
         let period = extension.consumer_period?;
         if budget.validate().is_err() || period.as_nanos() == 0 {
             return None;
@@ -576,6 +725,7 @@ impl MissWindow {
             cycles: 0,
             last_sample: None,
             period,
+            phase: extension.phase.unwrap_or(Duration::ZERO),
             contract_version: extension.contract_version,
         })
     }
@@ -688,9 +838,25 @@ impl MissWindow {
     ///
     /// Vor dem Vertrag gibt es keine Zyklen, die man nachtragen koennte.
     fn start_at(&mut self, now: Instant, outcome: CycleOutcome) -> u64 {
-        self.last_sample = Some(now);
+        self.last_sample = Some(self.snap_to_grid(now));
         self.record(outcome);
         1
+    }
+
+    /// Der letzte Rasterpunkt bei oder vor `now`.
+    ///
+    /// Das Raster liegt auf `phase + k * period`, gerechnet ab
+    /// `Instant::ZERO`. Ohne Versatz ist das jeder Vielfache der Periode, und
+    /// dann ist diese Rechnung nur eine Abrundung.
+    fn snap_to_grid(&self, now: Instant) -> Instant {
+        let step = self.period.as_nanos().max(1);
+        let phase = self.phase.as_nanos().checked_rem(step).unwrap_or(0);
+        let since_phase = now.as_nanos().saturating_sub(phase);
+        let grid = since_phase
+            .checked_div(step)
+            .unwrap_or(0)
+            .saturating_mul(step);
+        Instant::from_nanos(phase.saturating_add(grid))
     }
 
     /// Letzter Rasterpunkt, Anzahl vergangener Takte und die Taktlaenge.
@@ -1366,5 +1532,168 @@ mod slack_tests {
             w.record(CycleOutcome::Supplied);
         }
         assert!(w.slack().observed);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod background_progress_tests {
+    use super::{ContractExtension, ExtensionError, MissBudget, MissWindow};
+    use crate::Duration;
+
+    fn ms(v: u64) -> Duration {
+        Duration::from_millis(v).unwrap()
+    }
+
+    /// Ein Mindestfortschritt ist ein Weakly-hard-Kriterium.
+    ///
+    /// „Mindestens 20 % der Zyklen versorgt" heisst „hoechstens 80 % der
+    /// Zyklen im Fenster verfehlt". Vor dieser Umsetzung liess sich das Feld
+    /// speichern, und nichts hat es je ausgewertet — ein perfekt versorgter
+    /// Vordergrund konnte einen Strom vollstaendig aushungern, ohne dass die
+    /// Zusage dagegen stand (Review R05).
+    #[test]
+    fn a_minimum_background_progress_becomes_a_miss_budget() {
+        let extension = ContractExtension {
+            consumer_period: Some(ms(10)),
+            observation_window: Some(10),
+            minimum_background_progress_pct: Some(20),
+            ..Default::default()
+        };
+        assert_eq!(
+            extension.effective_miss_budget(),
+            Some(MissBudget {
+                max_misses: 8,
+                window_cycles: 10,
+                max_consecutive: None,
+            })
+        );
+        assert!(
+            MissWindow::new(&extension).is_some(),
+            "und der Monitor laeuft auch ohne ausdrueckliches Missbudget"
+        );
+    }
+
+    /// Ein vereinbartes Missbudget gewinnt.
+    ///
+    /// Es ist die genauere Aussage: es kann eine Grenze fuer aufeinander
+    /// folgende Misses tragen, die ein Prozentsatz nicht ausdruecken kann.
+    #[test]
+    fn an_explicit_miss_budget_wins_over_a_derived_one() {
+        let budget = MissBudget {
+            max_misses: 2,
+            window_cycles: 100,
+            max_consecutive: Some(1),
+        };
+        let extension = ContractExtension {
+            consumer_period: Some(ms(10)),
+            observation_window: Some(10),
+            minimum_background_progress_pct: Some(20),
+            miss_budget: Some(budget),
+            ..Default::default()
+        };
+        assert_eq!(extension.effective_miss_budget(), Some(budget));
+    }
+
+    /// Ohne Takt oder Fenster ist der Mindestfortschritt keine Zusage.
+    ///
+    /// Beides zu raten hiesse, eine Zusage zu erfinden — und genau das ist der
+    /// Fehler, gegen den R05 geschrieben ist.
+    #[test]
+    fn a_minimum_without_cycles_or_a_window_is_rejected() {
+        let without_period = ContractExtension {
+            observation_window: Some(10),
+            minimum_background_progress_pct: Some(20),
+            ..Default::default()
+        };
+        assert!(matches!(
+            without_period.validate(1),
+            Err(ExtensionError::Unsupported { .. })
+        ));
+
+        let without_window = ContractExtension {
+            consumer_period: Some(ms(10)),
+            minimum_background_progress_pct: Some(20),
+            ..Default::default()
+        };
+        assert!(matches!(
+            without_window.validate(1),
+            Err(ExtensionError::Unsupported { .. })
+        ));
+    }
+
+    /// Was das Produkt nicht einhaelt, wird abgelehnt — oder gemeldet.
+    ///
+    /// Zwei verschiedene Antworten auf zwei verschiedene Faelle. Eine
+    /// Nachweisstufe, die es nicht gibt, ist eine **falsche Zusage**: sie
+    /// wird abgelehnt. Ein Feld, das eine Verfeinerung beschreibt, die dieses
+    /// Produkt nicht misst, ist eine **unerfuellte** Forderung: sie wird
+    /// gemeldet, damit der Betreiber es weiss, aber sie macht die
+    /// Konfiguration nicht ungueltig — sonst liesse sich keine bestehende
+    /// Datei mehr lesen (Review R05).
+    #[test]
+    fn a_promise_the_product_cannot_make_is_refused() {
+        use super::EvidenceLevel;
+        let proven = ContractExtension {
+            evidence_required: EvidenceLevel::Proven,
+            ..Default::default()
+        };
+        assert!(matches!(
+            proven.validate(1),
+            Err(ExtensionError::Unsupported { .. })
+        ));
+        // Die Gegenprobe: der voreingestellte Zusatz bleibt gueltig.
+        ContractExtension::default().validate(1).unwrap();
+    }
+
+    /// Ein Versatz wird umgesetzt, nicht abgelehnt.
+    ///
+    /// `phase` verschiebt das Abtastraster. Ihn zu ignorieren hiesse, an
+    /// anderen Zeitpunkten zu messen als vereinbart — und die Missrechnung
+    /// galte dann fuer ein Raster, das im Vertrag nicht steht.
+    #[test]
+    fn a_phase_offset_moves_the_sampling_grid() {
+        use super::CycleOutcome;
+        let extension = ContractExtension {
+            consumer_period: Some(ms(10)),
+            phase: Some(ms(3)),
+            miss_budget: Some(MissBudget {
+                max_misses: 99,
+                window_cycles: 100,
+                max_consecutive: None,
+            }),
+            ..Default::default()
+        };
+        extension.validate(1).unwrap();
+        let mut window = MissWindow::new(&extension).unwrap();
+        // Erstes Ereignis bei 27 ms: der letzte Rasterpunkt ist 23 ms, nicht
+        // 27 und nicht 20.
+        window.advance_to(at(27), CycleOutcome::Supplied);
+        // Bis 32 ms ist noch kein neuer Rasterpunkt erreicht (der naechste
+        // liegt bei 33 ms).
+        assert_eq!(window.advance_to(at(32), CycleOutcome::Supplied), 0);
+        assert_eq!(window.advance_to(at(33), CycleOutcome::Supplied), 1);
+    }
+
+    /// Nicht durchgesetzte Forderungen werden benannt.
+    #[test]
+    fn unenforced_requirements_are_named() {
+        use super::DeliveryBoundary;
+        let extension = ContractExtension {
+            release_jitter_envelope: Some(ms(2)),
+            delivery_boundary: DeliveryBoundary::Consumer,
+            ..Default::default()
+        };
+        extension.validate(1).unwrap();
+        let named: Vec<&str> = extension.unenforced().iter().map(|u| u.field).collect();
+        assert_eq!(named, vec!["release_jitter_envelope", "delivery_boundary"]);
+        assert!(
+            ContractExtension::default().unenforced().is_empty(),
+            "was nichts fordert, hat nichts Unerfuelltes"
+        );
+    }
+
+    fn at(v: u64) -> crate::Instant {
+        crate::Instant::ZERO.checked_add(ms(v)).unwrap()
     }
 }

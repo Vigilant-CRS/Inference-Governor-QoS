@@ -101,7 +101,11 @@ async fn a_vanished_backend_turns_readiness_red() {
 
     assert!(
         handle
-            .submit(descriptor(1, clock.now()), request_for("detector"))
+            .submit(
+                descriptor(1, clock.now()),
+                request_for("detector"),
+                vig_gateway::budget::PayloadPermit::untracked()
+            )
             .await
             .is_err()
     );
@@ -133,13 +137,21 @@ async fn a_recovered_backend_turns_readiness_green_again() {
     let clock = MonotonicClock::start();
 
     let _ = handle
-        .submit(descriptor(1, clock.now()), request_for("detector"))
+        .submit(
+            descriptor(1, clock.now()),
+            request_for("detector"),
+            vig_gateway::budget::PayloadPermit::untracked(),
+        )
         .await;
     assert!(exporter::readiness(&handle.metrics().await.unwrap()).is_err());
 
     assert!(
         handle
-            .submit(descriptor(2, clock.now()), request_for("detector"))
+            .submit(
+                descriptor(2, clock.now()),
+                request_for("detector"),
+                vig_gateway::budget::PayloadPermit::untracked()
+            )
             .await
             .is_ok()
     );
@@ -167,7 +179,11 @@ async fn a_model_error_does_not_take_the_governor_out_of_rotation() {
 
     assert!(
         handle
-            .submit(descriptor(1, clock.now()), request_for("detector"))
+            .submit(
+                descriptor(1, clock.now()),
+                request_for("detector"),
+                vig_gateway::budget::PayloadPermit::untracked()
+            )
             .await
             .is_err()
     );
@@ -202,7 +218,11 @@ async fn two_hanging_calls_quarantine_every_slot() {
         let now = clock.now();
         tokio::spawn(async move {
             handle
-                .submit(descriptor(1, now), request_for("detector"))
+                .submit(
+                    descriptor(1, now),
+                    request_for("detector"),
+                    vig_gateway::budget::PayloadPermit::untracked(),
+                )
                 .await
         })
     };
@@ -211,7 +231,11 @@ async fn two_hanging_calls_quarantine_every_slot() {
         let now = clock.now();
         tokio::spawn(async move {
             handle
-                .submit(descriptor(2, now), request_for("detector"))
+                .submit(
+                    descriptor(2, now),
+                    request_for("detector"),
+                    vig_gateway::budget::PayloadPermit::untracked(),
+                )
                 .await
         })
     };
@@ -251,7 +275,11 @@ async fn a_drain_over_a_hanging_backend_reports_failure_not_success() {
         let now = clock.now();
         tokio::spawn(async move {
             handle
-                .submit(descriptor(1, now), request_for("detector"))
+                .submit(
+                    descriptor(1, now),
+                    request_for("detector"),
+                    vig_gateway::budget::PayloadPermit::untracked(),
+                )
                 .await
         })
     };
@@ -286,7 +314,11 @@ async fn a_drain_over_a_healthy_backend_reports_success() {
     for id in 1..=3_u64 {
         assert!(
             handle
-                .submit(descriptor(id, clock.now()), request_for("detector"))
+                .submit(
+                    descriptor(id, clock.now()),
+                    request_for("detector"),
+                    vig_gateway::budget::PayloadPermit::untracked()
+                )
                 .await
                 .is_ok()
         );
@@ -319,7 +351,11 @@ async fn an_aborted_call_starts_the_reconciliation() {
 
     assert!(
         handle
-            .submit(descriptor(1, clock.now()), request_for("detector"))
+            .submit(
+                descriptor(1, clock.now()),
+                request_for("detector"),
+                vig_gateway::budget::PayloadPermit::untracked()
+            )
             .await
             .is_err()
     );
@@ -353,7 +389,11 @@ async fn a_late_proof_of_completion_frees_the_slot() {
 
     assert!(
         handle
-            .submit(descriptor(1, clock.now()), request_for("detector"))
+            .submit(
+                descriptor(1, clock.now()),
+                request_for("detector"),
+                vig_gateway::budget::PayloadPermit::untracked()
+            )
             .await
             .is_err()
     );
@@ -361,7 +401,11 @@ async fn a_late_proof_of_completion_frees_the_slot() {
 
     assert!(
         handle
-            .submit(descriptor(2, clock.now()), request_for("detector"))
+            .submit(
+                descriptor(2, clock.now()),
+                request_for("detector"),
+                vig_gateway::budget::PayloadPermit::untracked()
+            )
             .await
             .is_ok(),
         "nach dem Nachweis muss wieder etwas starten koennen"
@@ -407,7 +451,11 @@ async fn a_restart_against_a_long_running_backend_does_not_free_a_credit() {
     let clock = MonotonicClock::start();
     assert!(
         handle
-            .submit(descriptor(1, clock.now()), request_for("detector"))
+            .submit(
+                descriptor(1, clock.now()),
+                request_for("detector"),
+                vig_gateway::budget::PayloadPermit::untracked()
+            )
             .await
             .is_err()
     );
@@ -462,7 +510,11 @@ async fn a_backend_without_statistics_reports_the_missing_baseline() {
 
     assert!(
         handle
-            .submit(descriptor(1, clock.now()), request_for("detector"))
+            .submit(
+                descriptor(1, clock.now()),
+                request_for("detector"),
+                vig_gateway::budget::PayloadPermit::untracked()
+            )
             .await
             .is_err()
     );
@@ -500,7 +552,11 @@ async fn a_late_baseline_is_refused_and_reported() {
     // Eine Auslieferung, bevor die Basislinie da ist.
     assert!(
         handle
-            .submit(descriptor(1, clock.now()), request_for("detector"))
+            .submit(
+                descriptor(1, clock.now()),
+                request_for("detector"),
+                vig_gateway::budget::PayloadPermit::untracked()
+            )
             .await
             .is_ok()
     );
@@ -517,4 +573,128 @@ async fn a_late_baseline_is_refused_and_reported() {
         handle.metrics().await.unwrap().reconcile_baseline_missing > 0,
         "eine Basislinie nach der ersten Auslieferung wird nicht angenommen"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Ein aggregierter Zaehler ist kein Einzelnachweis (Review R01)
+// ---------------------------------------------------------------------------
+
+/// Ein spaeterer Abschluss belegt nicht, dass ein frueherer fertig ist.
+///
+/// Das Fehlerbild, und es reicht **ein** Governor als Client: Auftrag A
+/// laeuft, seine Verbindung bricht ab, Auftrag B wird fertig. Der gemeinsame
+/// Abschlusszaehler steigt um eins — und der Abgleich las das als „A ist
+/// fertig" und gab dessen Slotkredit frei. A koennte noch rechnen, und ab da
+/// stimmte die Kapazitaetsrechnung nicht mehr.
+///
+/// Was ein aggregierter Zaehler tragen kann, ist eine **Ruhe-Aussage**: hat
+/// das Modell mindestens so viele Inferenzen abgeschlossen, wie ihm insgesamt
+/// zugestellt wurden, ist von unserer Arbeit nichts mehr offen. Ein einzelner
+/// Abschluss belegt keinen einzelnen Auftrag.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_later_completion_does_not_prove_an_earlier_request_finished() {
+    let fake = Arc::new(FakeExecutor::default());
+    fake.expect_error("detector_main", aborted());
+    fake.expect_ok("detector_main");
+    let handle = actor_with(Arc::clone(&fake));
+    await_baseline(&handle).await;
+    let clock = MonotonicClock::start();
+
+    assert!(
+        handle
+            .submit(
+                descriptor(1, clock.now()),
+                request_for("detector"),
+                vig_gateway::budget::PayloadPermit::untracked()
+            )
+            .await
+            .is_err(),
+        "der erste Aufruf bricht ab; sein Ende ist unbekannt"
+    );
+    assert_eq!(handle.metrics().await.unwrap().quarantined, 1);
+
+    assert!(
+        handle
+            .submit(
+                descriptor(2, clock.now()),
+                request_for("detector"),
+                vig_gateway::budget::PayloadPermit::untracked()
+            )
+            .await
+            .is_ok(),
+        "der zweite laeuft durch"
+    );
+
+    // Genau ein Abschluss ist belegt — und er gehoert zum zweiten Auftrag.
+    fake.set_evidence(1);
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let metrics = handle.metrics().await.unwrap();
+    assert_eq!(
+        metrics.quarantined, 1,
+        "der Kredit des ersten Auftrags gehoert weiter gehalten; \
+         reconciled={}",
+        metrics.reconciled
+    );
+
+    // Die Gegenprobe: sind **beide** Auslieferungen abgeschlossen, ist von
+    // unserer Arbeit nichts mehr offen — und der Kredit kommt zurueck.
+    fake.set_evidence(2);
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    assert_eq!(
+        handle.metrics().await.unwrap().quarantined,
+        0,
+        "Ruhe ist belegt, also endet der Anspruch"
+    );
+}
+
+/// Ein Aufruf, der das Backend nie erreicht hat, hebt das Ziel nicht an.
+///
+/// Die Gegenrichtung desselben Fehlers. Ein Request, der schon am
+/// Kanalaufbau scheiterte, wird nie eine Fertigstellung erzeugen. Zaehlte er
+/// im Abgleichsziel mit, waere das Ziel unerreichbar — und ein spaeter
+/// tatsaechlich abgeschlossener Auftrag bliebe dauerhaft in Quarantaene.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_that_never_reached_the_backend_does_not_raise_the_target() {
+    let fake = Arc::new(FakeExecutor::default());
+    fake.expect_error(
+        "detector_main",
+        BackendError::Unreachable {
+            endpoint: "unbenutzt".to_owned(),
+            cause: "vor der Zustellung abgelehnt".to_owned(),
+        },
+    );
+    fake.expect_error("detector_main", aborted());
+    let handle = actor_with(Arc::clone(&fake));
+    await_baseline(&handle).await;
+    let clock = MonotonicClock::start();
+
+    for id in [1, 2] {
+        assert!(
+            handle
+                .submit(
+                    descriptor(id, clock.now()),
+                    request_for("detector"),
+                    vig_gateway::budget::PayloadPermit::untracked()
+                )
+                .await
+                .is_err()
+        );
+    }
+
+    // Alles, was dieses Backend je erreicht hat, ist jetzt abgeschlossen.
+    fake.set_evidence(1);
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    assert_eq!(
+        handle.metrics().await.unwrap().quarantined,
+        0,
+        "ein nie zugestellter Aufruf darf das Ziel nicht unerreichbar machen"
+    );
+}
+
+/// Ein abgebrochener Aufruf: unterwegs gewesen, Ende unbekannt.
+fn aborted() -> BackendError {
+    BackendError::Rejected {
+        code: tonic::Code::Unavailable,
+        message: "RPC verloren; die Ausfuehrung kann weiterlaufen".to_owned(),
+    }
 }

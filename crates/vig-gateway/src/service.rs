@@ -48,71 +48,8 @@ pub struct GatewayService {
     clock: MonotonicClock,
     next_id: AtomicU64,
     shm: ShmRegistry,
-    budget: ByteBudget,
+    budget: crate::budget::PayloadBudget,
     tokens: Option<crate::auth::Tokens>,
-}
-
-/// Ein Budget fuer gleichzeitig gehaltene Requestnutzlast.
-///
-/// Zaehlt Bytes, nicht Requests. Der Ereigniskanal des Actors begrenzt bereits
-/// die Anzahl; die kostet aber je nach Tensorgroesse zwischen einem Kilobyte
-/// und zig Megabyte. Eine Grenze, die beides nicht unterscheidet, ist entweder
-/// zu eng fuer Bilder oder zu weit fuer Speicher.
-#[derive(Debug)]
-struct ByteBudget {
-    limit: u64,
-    used: Arc<AtomicU64>,
-}
-
-/// Gibt die reservierten Bytes zurueck, sobald der Request beantwortet ist.
-///
-/// Als Guard und nicht als Aufruf am Ende: jeder fruehe Rueckgabepfad — und
-/// davon gibt es in `model_infer` mehrere — wuerde das Budget sonst dauerhaft
-/// verkleinern, bis das Gateway ohne erkennbaren Grund alles ablehnt.
-#[derive(Debug)]
-struct BytePermit {
-    used: Arc<AtomicU64>,
-    bytes: u64,
-}
-
-impl Drop for BytePermit {
-    fn drop(&mut self) {
-        self.used.fetch_sub(self.bytes, Ordering::AcqRel);
-    }
-}
-
-impl ByteBudget {
-    fn new(limit: u64) -> Self {
-        Self {
-            limit,
-            used: Arc::new(AtomicU64::new(0)),
-        }
-    }
-
-    /// Reserviert `bytes`, wenn das Budget reicht.
-    fn try_reserve(&self, bytes: u64) -> Option<BytePermit> {
-        let mut current = self.used.load(Ordering::Acquire);
-        loop {
-            let next = current.saturating_add(bytes);
-            if next > self.limit {
-                return None;
-            }
-            match self.used.compare_exchange_weak(
-                current,
-                next,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    return Some(BytePermit {
-                        used: Arc::clone(&self.used),
-                        bytes,
-                    });
-                }
-                Err(observed) => current = observed,
-            }
-        }
-    }
 }
 
 /// Die Nutzlastgroesse eines Requests.
@@ -181,7 +118,7 @@ impl GatewayService {
             clock,
             next_id: AtomicU64::new(1),
             shm: ShmRegistry::new(),
-            budget: ByteBudget::new(limit),
+            budget: crate::budget::PayloadBudget::new(limit),
             tokens: None,
         }
     }
@@ -377,7 +314,7 @@ impl GrpcInferenceService for GatewayService {
         // grossen Tensoren den Prozess an die Speicherwand, lange bevor die
         // Requestzahl auffaellt.
         let bytes = payload_bytes(&inner);
-        let Some(_permit) = self.budget.try_reserve(bytes) else {
+        let Some(permit) = self.budget.try_reserve(bytes) else {
             return Err(Status::resource_exhausted(format!(
                 "Nutzlastbudget erschoepft: {bytes} Bytes angefordert, Obergrenze \
                  {} Bytes",
@@ -387,7 +324,9 @@ impl GrpcInferenceService for GatewayService {
 
         let descriptor = self.build_descriptor(model, &inner)?;
         let logical = inner.model_name.clone();
-        let mut response = self.scheduler.submit(descriptor, inner).await?;
+        // Der Guard reist mit: das Budget endet mit der Ausfuehrung, nicht mit
+        // diesem Aufruf.
+        let mut response = self.scheduler.submit(descriptor, inner, permit).await?;
         // Nach aussen existiert nur das logische Modell. Welche Variante
         // gelaufen ist, ist eine interne Entscheidung — steht ihr Name in der
         // Antwort, koppelt sich der Client daran, und die Variantenwahl waere

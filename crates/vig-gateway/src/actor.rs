@@ -55,7 +55,7 @@ pub type Reply = Result<ModelInferResponse, Status>;
 
 /// Eine Nachricht an den Actor.
 #[derive(Debug)]
-pub enum Msg {
+pub(crate) enum Msg {
     /// Ein neuer Request ist eingetroffen.
     Arrival {
         /// Die Scheduling-Metadaten.
@@ -64,6 +64,13 @@ pub enum Msg {
         request: Box<ModelInferRequest>,
         /// Wohin die Antwort geht.
         reply: oneshot::Sender<Reply>,
+        /// Die Reservierung des Nutzlastbudgets.
+        ///
+        /// Sie reist mit und wird erst freigegeben, wenn die Ausfuehrung
+        /// nachweislich vorbei ist. Beim Client zu enden waere die falsche
+        /// Lebensdauer: nach einem Timeout rechnet das Backend weiter und
+        /// haelt die Nutzlast (Review R04).
+        permit: crate::budget::PayloadPermit,
     },
     /// Ein Backendaufruf ist beendet.
     BackendDone {
@@ -74,15 +81,24 @@ pub enum Msg {
         /// Das Ergebnis.
         result: Box<Result<ModelInferResponse, BackendError>>,
     },
-    /// Der Abgleich hat belegt, dass eine Ausfuehrung beendet ist.
+    /// Der Abgleich meldet den Zaehlerstand eines Backendmodells.
     ///
-    /// Traegt die Generation mit: eine Meldung zu einem laengst abgeloesten
-    /// Anspruch darf keinen Kredit freigeben.
-    ExecutionProven {
-        /// Der betroffene Request.
-        request: RequestId,
-        /// Die Generation, fuer die der Nachweis gilt.
-        generation: u64,
+    /// **Nicht** „dieser Request ist fertig": das kann ein aggregierter
+    /// Zaehler nicht sagen. Er kann nur sagen, wie viele Inferenzen dieses
+    /// Modell insgesamt abgeschlossen hat. Ob daraus ein Nachweis folgt,
+    /// entscheidet der Actor — er allein kennt die Zahl der Auslieferungen,
+    /// die noch offen sein koennen.
+    CompletionEvidence {
+        /// Das Backendmodell.
+        model: String,
+        /// Der Statistikzaehler des Modells.
+        completed: u64,
+        /// Ob der Zaehler zurueckgesprungen ist.
+        ///
+        /// Ein Zaehler faellt nur, wenn das Modell neu geladen oder der
+        /// Server neu gestartet wurde — und dann ist alles, was dort lief,
+        /// ohnehin verloren.
+        restarted: bool,
     },
     /// Die Abgleichs-Basislinie eines Backendmodells ist eingetroffen.
     ///
@@ -136,27 +152,10 @@ pub enum Msg {
 /// dass wir nicht laenger warten wollen, nicht dass die GPU aufgehoert hat.
 #[derive(Debug, Clone)]
 struct Lease {
-    /// Fortlaufende Kennung dieses Anspruchs.
-    ///
-    /// Fencing: eine verspaetete Meldung zu einer aelteren Generation darf
-    /// weder diesen noch einen spaeteren Kredit freigeben. Ohne sie koennte
-    /// eine doppelte Fertigstellungsmeldung Kapazitaet erfinden.
-    generation: u64,
     /// Der Slot, dessen Kredit gehalten wird.
     slot: SlotIdx,
     /// Das Backendmodell, gegen dessen Statistik abgeglichen wird.
     backend_model: String,
-    /// Wie viele Inferenzen dieser Governor diesem Modell bis hier
-    /// ausgeliefert hat, diese eingeschlossen.
-    ///
-    /// Das Ziel des Abgleichs ist **Basislinie plus dieser Wert**, gerechnet
-    /// erst beim Abgleich. Die Basislinie ist der Punkt: Tritons
-    /// Statistikzaehler laeuft ueber die Lebensdauer des Triton-Prozesses, und
-    /// der ueberlebt den Governor gewoehnlich. Ohne sie waere „Backend meldet
-    /// mindestens so viele Abschluesse wie wir ausgeliefert haben" nach einem
-    /// Governor-Neustart beim ersten Request sofort wahr — und der Abgleich
-    /// gaebe einen Kredit frei, waehrend die Recheneinheit noch rechnet.
-    dispatched_total: u64,
     /// Wie der Anspruch derzeit steht.
     state: LeaseState,
 }
@@ -236,13 +235,19 @@ impl Handle {
     /// `ResourceExhausted`, wenn der Ereigniskanal voll ist — das ist die
     /// Backpressure des Gateways, nicht ein Fehler. `Internal`, wenn der Actor
     /// beendet wurde.
-    pub async fn submit(&self, descriptor: RequestDescriptor, request: ModelInferRequest) -> Reply {
+    pub async fn submit(
+        &self,
+        descriptor: RequestDescriptor,
+        request: ModelInferRequest,
+        permit: crate::budget::PayloadPermit,
+    ) -> Reply {
         let id = descriptor.id;
         let (reply, wait) = oneshot::channel();
         let msg = Msg::Arrival {
             descriptor: Box::new(descriptor),
             request: Box::new(request),
             reply,
+            permit,
         };
         self.tx.try_send(msg).map_err(|e| match e {
             mpsc::error::TrySendError::Full(_) => {
@@ -338,7 +343,6 @@ struct Actor {
     /// koennte — der Scheduler kennt nur, was er selbst gestartet hat.
     leases: HashMap<RequestId, Lease>,
     /// Naechste Lease-Generation.
-    next_generation: u64,
     /// Wie oft ein Backendaufruf das Timeout ueberschritten hat.
     backend_timeouts: u64,
     /// Transportfehler seit dem letzten erfolgreichen Backendaufruf.
@@ -362,6 +366,13 @@ struct Actor {
     /// Token, und ihn als Fortschritt zu buchen hiesse, dieselbe Arbeit
     /// zweimal zu verkaufen.
     generative: GenerativeAccounting,
+    /// Die Nutzlastreservierungen laufender Auftraege (Review R04).
+    ///
+    /// Sie enden mit der **Ausfuehrung**, nicht mit dem Client. Nach einem
+    /// Client-Timeout rechnet das Backend weiter und haelt die Nutzlast; das
+    /// Budget dort freizugeben liesse eine zweite Nutzlast derselben Groesse
+    /// zu, waehrend die erste noch steht.
+    permits: HashMap<RequestId, crate::budget::PayloadPermit>,
     /// Backendaufrufe, die noch offen sind.
     outstanding: u64,
     /// Gesetzt, sobald ein geordnetes Ende angefordert wurde.
@@ -461,6 +472,25 @@ fn spawn_owned(
         scheduler.mark_profile_unverified(*model);
     }
 
+    // Was der Vertrag fordert und dieser Dienst nicht einloest, wird beim
+    // Start genannt — einmal, laut, je Modell (Review R05). Ein gueltiges
+    // YAML-Dokument ist kein angenommener Betriebsvertrag, und der Betreiber
+    // soll es hier erfahren und nicht beim ersten Vorfall.
+    for (index, contract) in config.contracts.iter().enumerate() {
+        let Some(extension) = contract.extension.as_ref() else {
+            continue;
+        };
+        let model = config.model_names.get(index).map_or("?", String::as_str);
+        for item in extension.unenforced().iter() {
+            tracing::warn!(
+                model,
+                field = item.field,
+                reason = item.reason,
+                "im Vertrag gefordert, von dieser Version nicht durchgesetzt"
+            );
+        }
+    }
+
     let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
     spawn_hardware_probe(&tx);
     spawn_baseline_probe(&tx, &config, &backends);
@@ -482,7 +512,6 @@ fn spawn_owned(
         descriptors: HashMap::new(),
         continuation_of: HashMap::new(),
         leases: HashMap::new(),
-        next_generation: 0,
         backend_timeouts: 0,
         consecutive_transport_failures: 0,
         reconciled: 0,
@@ -490,6 +519,7 @@ fn spawn_owned(
         reconcile_baseline: HashMap::new(),
         metrics_rejected_quarantined: 0,
         generative: GenerativeAccounting::default(),
+        permits: HashMap::new(),
         outstanding: 0,
         shutdown: None,
         // Fortsetzungen bekommen Kennungen aus einem eigenen Bereich, damit
@@ -581,9 +611,14 @@ impl Actor {
         mut descriptor: RequestDescriptor,
         mut request: Box<ModelInferRequest>,
         reply: oneshot::Sender<Reply>,
+        permit: crate::budget::PayloadPermit,
         sink: &mut S,
     ) -> bool {
         let id = descriptor.id;
+        // Ab hier gehoert die Reservierung dem Actor. Wird der Request unten
+        // abgewiesen, faellt sie mit dieser Funktion — das ist richtig, denn
+        // dann hat nichts gerechnet.
+        self.permits.insert(id, permit);
 
         // Steht jeder Slotkredit in Quarantaene, kann nichts starten — und
         // zwar nicht "gerade nicht", sondern bis das Backend antwortet. Diesen
@@ -610,7 +645,8 @@ impl Actor {
             .contracts
             .get(descriptor.logical_model.get())
             .and_then(|c| c.cooperative)
-            && let Some(job) = GenerativeJob::from_request(&request, cooperative.max_total_tokens)
+            && let Some(mut job) =
+                GenerativeJob::from_request(&request, cooperative.max_total_tokens)
         {
             if worth_decomposing(&cooperative, &job) {
                 descriptor = decomposed_descriptor(descriptor, id, &job);
@@ -698,6 +734,18 @@ impl Actor {
             Err(e) => e.execution_state() == vig_backend_triton::ExecutionState::Unknown,
             Ok(_) => false,
         };
+        // Ein Aufruf, der schon am Kanalaufbau scheiterte, hat das Backend nie
+        // erreicht. Er wird nie eine Fertigstellung erzeugen, und ihn in der
+        // Auslieferungssumme zu fuehren machte das Abgleichsziel unerreichbar:
+        // ein spaeter tatsaechlich abgeschlossener Auftrag bliebe dann
+        // dauerhaft in Quarantaene (Review R01).
+        if matches!(result.as_ref(),
+            Err(e) if e.execution_state() == vig_backend_triton::ExecutionState::NotStarted)
+            && let Some(lease) = self.leases.get(&request)
+            && let Some(count) = self.dispatched_per_model.get_mut(&lease.backend_model)
+        {
+            *count = count.saturating_sub(1);
+        }
         // Fencing: eine Meldung ohne passenden Anspruch gehoert zu einer
         // aelteren Generation. Sie darf keinen Kredit freigeben — sonst
         // erfindet eine doppelte Fertigstellung Kapazitaet.
@@ -714,7 +762,7 @@ impl Actor {
             // Der Kredit wird in jedem Fall gehalten. Konnte der Abgleich
             // nicht anlaufen — die Basislinie fehlt noch —, merkt sich der
             // Anspruch das und der naechste Tick versucht es erneut.
-            let started = self.start_reconciliation(&lease, request);
+            let started = self.start_reconciliation(&lease);
             if let Some(entry) = self.leases.get_mut(&request) {
                 entry.state = if started {
                     LeaseState::Reconciling
@@ -736,6 +784,9 @@ impl Actor {
 
         // Antwort oder belegtes Ende: der Anspruch endet, genau einmal.
         self.leases.remove(&request);
+        // Und mit ihm die Nutzlastreservierung — jetzt ist belegt, dass das
+        // Backend diese Bytes nicht mehr haelt.
+        self.release_permit(request);
         let failed = timed_out || result.is_err();
         self.responses.insert(request, *result);
         let event = if failed {
@@ -757,8 +808,9 @@ impl Actor {
                 descriptor,
                 request,
                 reply,
+                permit,
             } => {
-                if !self.accept(now, *descriptor, request, reply, &mut sink) {
+                if !self.accept(now, *descriptor, request, reply, permit, &mut sink) {
                     return;
                 }
             }
@@ -771,32 +823,12 @@ impl Actor {
                     return;
                 }
             }
-            Msg::ExecutionProven {
-                request,
-                generation,
+            Msg::CompletionEvidence {
+                model,
+                completed,
+                restarted,
             } => {
-                // Nur wenn der Anspruch noch derselbe ist. Ein Nachweis fuer
-                // eine alte Generation gehoert zu einem Kredit, der laengst
-                // zurueckgegeben wurde.
-                let matching = self
-                    .leases
-                    .get(&request)
-                    .is_some_and(|l| l.generation == generation);
-                if let Some(lease) = matching.then(|| self.leases.remove(&request)).flatten() {
-                    self.reconciled = self.reconciled.saturating_add(1);
-                    tracing::info!(
-                        %request,
-                        "Backend belegt das Ausfuehrungsende; Slotkredit wird zurueckgegeben"
-                    );
-                    self.scheduler.on_event(
-                        now,
-                        Event::BackendFailure {
-                            request,
-                            slot: lease.slot,
-                        },
-                        &mut sink,
-                    );
-                }
+                self.on_completion_evidence(now, &model, completed, restarted, &mut sink);
             }
             Msg::BackendTimeout { request } => {
                 // **Nur der Client wird freigegeben, nicht der Slot.** Der
@@ -965,7 +997,7 @@ impl Actor {
         // Bei einem zerlegten Auftrag wird nicht der urspruengliche Request
         // weitergereicht, sondern das naechste Quantum: Prompt plus bisher
         // Erzeugtes, begrenzt auf die vom Scheduler bestimmte Tokenzahl.
-        if let (Some(tokens), Some(job)) = (quantum, self.jobs.get(&request)) {
+        if let (Some(tokens), Some(job)) = (quantum, self.jobs.get_mut(&request)) {
             let quantum_request = job.build_quantum(&oip, tokens);
             *oip = quantum_request;
             backend_model.clone_into(&mut oip.model_name);
@@ -988,19 +1020,18 @@ impl Actor {
         // Der Anspruch auf den Slotkredit entsteht **hier**, mit dem Dispatch,
         // und endet erst mit einem Nachweis. Die Wanduhrzeit dient
         // ausschliesslich dem spaeteren Abgleich gegen Tritons `last_inference`.
-        self.next_generation = self.next_generation.saturating_add(1);
-        let dispatched_total = *self
-            .dispatched_per_model
+        // Die laufende Summe der Auslieferungen an dieses Modell. Sie ist die
+        // Groesse, gegen die der Abgleich prueft — und sie sinkt wieder, wenn
+        // sich herausstellt, dass ein Aufruf das Backend nie erreicht hat.
+        self.dispatched_per_model
             .entry(oip.model_name.clone())
             .and_modify(|n| *n = n.saturating_add(1))
             .or_insert(1);
         self.leases.insert(
             request,
             Lease {
-                generation: self.next_generation,
                 slot,
                 backend_model: oip.model_name.clone(),
-                dispatched_total,
                 state: LeaseState::Running,
             },
         );
@@ -1067,6 +1098,9 @@ impl Actor {
             .map_or(request, |(origin, _)| *origin);
         self.continuation_of.insert(origin, continuation);
 
+        if let Some(permit) = self.permits.remove(&request) {
+            self.permits.insert(continuation, permit);
+        }
         self.jobs.insert(continuation, job);
         self.descriptors.insert(continuation, next);
         self.waiting.insert(continuation, reply);
@@ -1113,7 +1147,7 @@ impl Actor {
     /// strict` setzt es auf unserer Seite durch. Teilt sich ein fremder Client
     /// dasselbe Modell, zaehlt Triton dessen Arbeit mit, und der Nachweis wird
     /// zum Indiz. Das steht so in `docs/how-it-works.md`.
-    fn start_reconciliation(&self, lease: &Lease, request: RequestId) -> bool {
+    fn start_reconciliation(&self, lease: &Lease) -> bool {
         let Some(backend) = self.backend_for_model_name(&lease.backend_model) else {
             tracing::warn!(
                 model = %lease.backend_model,
@@ -1126,20 +1160,15 @@ impl Actor {
         // geholt), wird der Abgleich nicht gestartet und beim naechsten Tick
         // erneut versucht. Ein Ziel ohne Basislinie waere im Zweifel zu klein
         // und gaebe einen Kredit frei, der gehalten gehoert.
-        let Some(target) = self
-            .reconcile_baseline
-            .get(&lease.backend_model)
-            .map(|base| base.saturating_add(lease.dispatched_total))
-        else {
+        if !self.reconcile_baseline.contains_key(&lease.backend_model) {
             tracing::debug!(
                 model = %lease.backend_model,
                 "Abgleich wartet auf die Basislinie; der Slotkredit bleibt gehalten"
             );
             return false;
-        };
+        }
         let tx = self.tx.clone();
         let model = lease.backend_model.clone();
-        let generation = lease.generation;
         let interval = std::time::Duration::from_millis(RECONCILE_INTERVAL_MS);
 
         tokio::spawn(async move {
@@ -1147,32 +1176,118 @@ impl Actor {
             loop {
                 match backend.completion_evidence(&model).await {
                     Ok(evidence) => {
-                        // Ein rueckwaerts laufender Zaehler heisst: das Backend
-                        // ist neu gestartet. Dann ist unsere Ausfuehrung
-                        // sicher beendet — der Prozess, der sie hielt, gibt es
-                        // nicht mehr.
                         let restarted = evidence.completed < highest;
                         highest = highest.max(evidence.completed);
-                        if evidence.completed >= target || restarted {
-                            let _ = tx
-                                .send(Msg::ExecutionProven {
-                                    request,
-                                    generation,
-                                })
-                                .await;
+                        // Gemeldet, nicht entschieden: was der Zaehlerstand
+                        // belegt, weiss nur der Actor.
+                        if tx
+                            .send(Msg::CompletionEvidence {
+                                model: model.clone(),
+                                completed: evidence.completed,
+                                restarted,
+                            })
+                            .await
+                            .is_err()
+                        {
                             return;
                         }
                     }
                     Err(error) => {
                         // Kein Nachweis heisst: der Kredit bleibt gehalten.
                         // Weiter fragen, bis der Actor endet.
-                        tracing::debug!(%request, %error, "Abgleich noch ohne Nachweis");
+                        tracing::debug!(%model, %error, "Abgleich noch ohne Nachweis");
                     }
                 }
                 tokio::time::sleep(interval).await;
             }
         });
         true
+    }
+
+    /// Wertet einen gemeldeten Zaehlerstand aus (NV-20, Review R01).
+    ///
+    /// Ein aggregierter Zaehler ist **kein** auftragsspezifischer
+    /// Ausfuehrungsnachweis. Er sagt, wie viele Inferenzen dieses Modell
+    /// insgesamt abgeschlossen hat, und nicht, **welche**. Frueher stand als
+    /// Ziel „Basislinie plus die eigene Auslieferungsnummer" — und das ist
+    /// falsch in beide Richtungen:
+    ///
+    /// * Laeuft Auftrag A noch und wird B danach fertig, steigt der Zaehler
+    ///   auf das Ziel von A. A galt damit als beendet, waehrend seine
+    ///   Recheneinheit womoeglich noch rechnete. Die Kapazitaetsrechnung war
+    ///   ab da falsch.
+    /// * Ein Auftrag, der das Backend **nie erreicht** hat, hob das Ziel
+    ///   trotzdem an. Ein spaeter tatsaechlich abgeschlossener Auftrag konnte
+    ///   dadurch dauerhaft in Quarantaene bleiben.
+    ///
+    /// Was ein aggregierter Zaehler tragen kann, ist eine **Ruhe-Aussage**:
+    /// hat das Modell mindestens so viele Inferenzen abgeschlossen, wie
+    /// diesem Governor je zugestellt wurden, ist von dessen Arbeit nichts
+    /// mehr offen — und zwar von keiner einzelnen. Dann enden alle gehaltenen
+    /// Anspruechen dieses Modells gemeinsam. Das ist die schwaechere Aussage,
+    /// und sie ist die einzige, die stimmt.
+    ///
+    /// Ein zurueckgesprungener Zaehler traegt dieselbe Aussage aus einem
+    /// anderen Grund: der Prozess, der die Ausfuehrung hielt, gibt es nicht
+    /// mehr.
+    ///
+    /// Das Generation-Fencing von frueher ist damit hinfaellig und
+    /// entfernt. Es schuetzte davor, dass eine verspaetete Meldung zu einem
+    /// abgeloesten Anspruch einen Kredit freigibt. Der Nachweis wird jetzt
+    /// **hier** gefuehrt, gegen den Live-Zustand: ein alter Zaehlerstand kann
+    /// nur zu wenig sein, nie zu viel — die Auslieferungssumme waechst
+    /// zwischenzeitlich, das Ziel wird also nur schwerer. Eine verspaetete
+    /// Meldung ist damit im schlimmsten Fall wirkungslos.
+    fn on_completion_evidence<S: FnMut(Action)>(
+        &mut self,
+        now: Instant,
+        model: &str,
+        completed: u64,
+        restarted: bool,
+        sink: &mut S,
+    ) {
+        let Some(baseline) = self.reconcile_baseline.get(model).copied() else {
+            return;
+        };
+        // Gezaehlt wird, was das Backend **erreicht** hat. Ein Aufruf, der
+        // schon am Kanalaufbau scheiterte, wird nie eine Fertigstellung
+        // erzeugen; ihn im Ziel zu fuehren machte das Ziel unerreichbar.
+        let dispatched = self.dispatched_per_model.get(model).copied().unwrap_or(0);
+        let target = baseline.saturating_add(dispatched);
+        if !restarted && completed < target {
+            return;
+        }
+
+        let proven: Vec<RequestId> = self
+            .leases
+            .iter()
+            .filter(|(_, lease)| lease.backend_model == model && lease.state != LeaseState::Running)
+            .map(|(request, _)| *request)
+            .collect();
+        for request in proven {
+            let Some(lease) = self.leases.remove(&request) else {
+                continue;
+            };
+            self.reconciled = self.reconciled.saturating_add(1);
+            self.release_permit(request);
+            tracing::info!(
+                %request,
+                model,
+                completed,
+                target,
+                restarted,
+                "Backend belegt, dass von unserer Arbeit nichts mehr laeuft; \
+                 Slotkredit wird zurueckgegeben"
+            );
+            self.scheduler.on_event(
+                now,
+                Event::BackendFailure {
+                    request,
+                    slot: lease.slot,
+                },
+                sink,
+            );
+        }
     }
 
     /// Beantwortet eine Metrikabfrage.
@@ -1266,7 +1381,7 @@ impl Actor {
             .map(|(id, lease)| (*id, lease.clone()))
             .collect();
         for (request, lease) in waiting {
-            if self.start_reconciliation(&lease, request)
+            if self.start_reconciliation(&lease)
                 && let Some(entry) = self.leases.get_mut(&request)
             {
                 entry.state = LeaseState::Reconciling;
@@ -1308,6 +1423,21 @@ impl Actor {
         self.jobs.remove(&request);
         self.continuation_of
             .retain(|origin, current| *origin != request && *current != request);
+        self.release_permit(request);
+    }
+
+    /// Gibt die Nutzlastreservierung frei — aber nur, wenn nichts mehr
+    /// rechnen kann (Review R04).
+    ///
+    /// Ein gehaltener Slotkredit heisst: das Backend koennte diesen Request
+    /// noch bearbeiten und haelt seine Nutzlast. Das Budget dann freizugeben
+    /// waere dieselbe erfundene Kapazitaet wie ein zu frueh
+    /// zurueckgegebener Slotkredit, nur in einer anderen Waehrung.
+    fn release_permit(&mut self, request: RequestId) {
+        if self.leases.contains_key(&request) {
+            return;
+        }
+        self.permits.remove(&request);
     }
 
     /// Der Client fuer das Backend eines Modells.
@@ -1835,6 +1965,7 @@ mod tests {
             declared_sampling: None,
             extra_inputs: Vec::new(),
             quanta: 0,
+            last_requested_tokens: None,
             last_quantum_tokens: 0,
         }
     }

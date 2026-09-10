@@ -210,7 +210,7 @@ models:
     class: best_effort
     queue: {{ policy: fifo, capacity: 64 }}
     contract: {{ deadline_ms: 10000 }}
-    cooperative: {{ tokens_per_second: 1000, min_tokens: 1, max_total_tokens: 3, base_cost_us: 0 }}
+    cooperative: {{ tokens_per_second: 1000, min_tokens: 1, max_total_tokens: 12, base_cost_us: 0 }}
     variants:
       - id: main
         backend_model: qwen
@@ -230,8 +230,11 @@ models:
         .unwrap()
         .into_inner();
 
-    // Drei Quanten a vier Zeichen (rund ein Token je vier Zeichen) erreichen
-    // die Obergrenze von drei Token.
+    // Drei Quanten a vier Zeichen erreichen die Obergrenze von zwoelf Token.
+    // Gezaehlt wird die **garantierte** Obergrenze: in vier Bytes stecken
+    // hoechstens vier Token (Review R06). Die alte Schaetzung `Bytes / 4`
+    // haette hier drei Token gezaehlt — und drei weitere freigegeben, die es
+    // nicht gab.
     assert_eq!(
         backend_impl.served.load(Ordering::Relaxed),
         3,
@@ -1131,7 +1134,7 @@ async fn a_decomposition_that_costs_too_much_is_not_run() {
     // Variante eingeplant hat.
     assert_eq!(
         undivided.1,
-        vec![Some(3)],
+        vec![Some(12)],
         "ungeteilt heisst nicht unbegrenzt (Spec 8.3)"
     );
 }
@@ -1164,7 +1167,7 @@ models:
     cooperative:
       tokens_per_second: 1000
       min_tokens: 1
-      max_total_tokens: 3
+      max_total_tokens: 12
       base_cost_us: 5000{limit}
     variants:
       - id: main
@@ -1227,7 +1230,7 @@ models:
     cooperative:
       tokens_per_second: 1000
       min_tokens: 1
-      max_total_tokens: 3
+      max_total_tokens: 12
       base_cost_us: 0
       prefill_per_token_us: 1000
     variants:
@@ -1249,22 +1252,24 @@ models:
         .unwrap();
 
     let metrics = handle.metrics().await.unwrap();
-    // Drei Quanten zu je einem Token: der Kontext geht 3 -> 4 -> 5 -> 6.
+    // Drei Quanten zu je vier Token: der Kontext geht 3 -> 7 -> 11 -> 15.
+    // Gezaehlt wird die garantierte Obergrenze aus den Bytes, nicht die
+    // Schaetzung `Bytes / 4` (Review R06).
     assert_eq!(
-        metrics.generative_context_tokens, 6,
+        metrics.generative_context_tokens, 15,
         "der Kontext waechst mit jedem Quantum und wird als solcher gefuehrt"
     );
     // Gebucht werden die **wiederholten** Prefills, also die Quanten 2 und 3
-    // mit Kontext 4 und 5 zu je 1 ms. Der erste Prefill faellt auch beim
+    // mit Kontext 7 und 11 zu je 1 ms. Der erste Prefill faellt auch beim
     // ungeteilten Lauf an und ist kein Preis der Zerlegung.
     assert_eq!(
-        metrics.generative_prefill_us, 9_000,
+        metrics.generative_prefill_us, 18_000,
         "wiederholtes Prefill ist Arbeit und wird gebucht"
     );
-    // Alle drei Quanten zu je einem Token bei 1000 Token/s. Das letzte zaehlt
+    // Alle drei Quanten zu je vier Token bei 1000 Token/s. Das letzte zaehlt
     // mit: es wird nicht fortgesetzt, aber es hat gerechnet.
     assert_eq!(
-        metrics.generative_decode_us, 3_000,
+        metrics.generative_decode_us, 12_000,
         "und sie ist getrennt von dem, was wirklich Token erzeugt hat"
     );
     assert_eq!(
@@ -1272,4 +1277,75 @@ models:
         "dieser Vertrag hat keinen Sockel"
     );
     assert_eq!(metrics.decomposition_refused, 0);
+}
+
+/// Das Nutzlastbudget endet mit der Ausfuehrung, nicht mit dem Client
+/// (Review R04).
+///
+/// Der Fall: ein Client laeuft in sein Timeout, das Backend rechnet weiter
+/// und haelt die Nutzlast. Wurde das Budget beim Timeout freigegeben, war
+/// dieselbe Zahl Bytes ein zweites Mal zu haben — zwei 16-Byte-Auftraege bei
+/// einem Budget von 16 Bytes.
+///
+/// Dieselbe Klasse Fehler wie ein zu frueh zurueckgegebener Slotkredit, nur
+/// in einer anderen Waehrung: erfundene Kapazitaet aus einer Antwort, die
+/// nichts ueber das Backend aussagt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_payload_budget_outlives_a_client_timeout() {
+    let backend_impl = Arc::new(mock_backend::MockBackend::new(
+        std::time::Duration::from_secs(5),
+    ));
+    let endpoint = mock_backend::start(backend_impl.clone()).await.to_string();
+
+    let yaml = format!(
+        r"
+version: 1
+backend:
+  type: triton
+  grpc_endpoint: {endpoint}
+  slots: 2
+  pipelining_depth: 0
+  inference_timeout_ms: 50
+models:
+  detector:
+    class: protected
+    queue: {{ policy: fifo, capacity: 64 }}
+    contract: {{ deadline_ms: 10000 }}
+    variants:
+      - id: main
+        backend_model: detector_main
+        quality: {{ value: 1.0, source: measured }}
+        profile: {{ p50_us: 1000, p95_us: 1000, p99_us: 1000, samples: 1000 }}
+"
+    );
+    let mut config = Config::from_yaml(&yaml).unwrap().resolve().unwrap();
+    // Genau eine Nutzlast passt hinein. Die Konfiguration kennt nur Mebibyte;
+    // fuer diesen Nachweis braucht es eine Grenze, die ein Test auch
+    // erreichen kann.
+    config.max_inflight_bytes = 16;
+    let resolved = Arc::new(config);
+    let clock = MonotonicClock::start();
+    let backend = Arc::new(vig_backend_triton::TritonClient::new(endpoint));
+    let handle = actor::spawn(resolved.clone(), &backend, clock, &[]).unwrap();
+    let service = GatewayService::new(resolved, backend, handle, clock);
+
+    let request = || {
+        let mut r = vig_gateway::testing::request_for("detector");
+        r.raw_input_contents = vec![vec![7; 16]];
+        tonic::Request::new(r)
+    };
+
+    let first = service.model_infer(request()).await.unwrap_err();
+    assert_eq!(
+        first.code(),
+        tonic::Code::DeadlineExceeded,
+        "der Client gibt auf; das Backend rechnet weiter"
+    );
+
+    let second = service.model_infer(request()).await.unwrap_err();
+    assert_eq!(
+        second.code(),
+        tonic::Code::ResourceExhausted,
+        "die erste Nutzlast steht noch — die zweite passt nicht daneben"
+    );
 }

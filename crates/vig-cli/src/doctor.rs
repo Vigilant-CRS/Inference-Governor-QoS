@@ -84,6 +84,7 @@ pub(crate) async fn run(
     verdict = verdict.max(check_utilization(&resolved));
     verdict = verdict.max(check_best_effort_feasibility(&resolved));
     verdict = verdict.max(check_decomposition_cost(&resolved));
+    verdict = verdict.max(check_unenforced_requirements(&resolved));
     verdict = verdict.max(check_backend(&resolved, offline).await);
     verdict = verdict.max(check_capabilities(&resolved, offline).await);
     verdict = verdict.max(check_profiles(&resolved, offline).await);
@@ -348,6 +349,32 @@ fn worst_quantum_gap(resolved: &Resolved) -> Duration {
         })
         .max_by_key(|d: &Duration| d.as_nanos())
         .unwrap_or(Duration::ZERO)
+}
+
+/// Nennt Vertragsforderungen, die gespeichert und nicht durchgesetzt werden
+/// (Review R05).
+///
+/// Ein gueltiges YAML-Dokument ist kein angenommener Betriebsvertrag. Wer eine
+/// Zusage aufschreibt, die niemand einloest, soll es hier erfahren und nicht
+/// beim ersten Vorfall. Eine Warnung und kein Fehler: die Konfiguration ist
+/// lesbar und der Rest gilt — nur eben dieser Teil nicht.
+fn check_unenforced_requirements(resolved: &Resolved) -> Verdict {
+    let mut verdict = Verdict::Ready;
+    for (i, contract) in resolved.contracts.iter().enumerate() {
+        let Some(extension) = contract.extension.as_ref() else {
+            continue;
+        };
+        let name = resolved.model_names.get(i).map_or("?", String::as_str);
+        for item in extension.unenforced().iter() {
+            warn(&format!(
+                "{name}: {} ist im Vertrag gefordert und wird nicht \
+                 durchgesetzt — {}. Die uebrigen Zusagen gelten; diese nicht.",
+                item.field, item.reason
+            ));
+            verdict = verdict.max(Verdict::ReadyWithWarnings);
+        }
+    }
+    verdict
 }
 
 /// Die einfache Demand-Warnung aus Spec 10.9: `U = Summe(C_i / T_i)`.

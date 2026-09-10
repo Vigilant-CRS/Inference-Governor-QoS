@@ -74,6 +74,16 @@ pub struct GenerativeJob {
     pub extra_inputs: Vec<(InferInputTensor, Vec<u8>)>,
     /// Wie viele Quanten dieser Auftrag bereits gebraucht hat.
     pub quanta: u32,
+    /// Wie viele Token das zuletzt gebaute Quantum beim Backend bestellt hat.
+    ///
+    /// Die **harte** Schranke: `max_tokens` setzt das Backend selbst durch,
+    /// in echten Token und nicht in geschaetzten. Mehr als diese Zahl kann ein
+    /// Quantum nicht erzeugt haben, gleichgueltig wie der Tokenizer arbeitet
+    /// (Review R06).
+    ///
+    /// `None` heisst: es wurde noch kein Quantum gebaut. Dann gibt es keine
+    /// bestellte Obergrenze, und es bleibt bei der Schranke aus den Bytes.
+    pub last_requested_tokens: Option<u32>,
     /// Was das zuletzt aufgenommene Quantum erzeugt hat, in Token (NV-16).
     ///
     /// Der Zuwachs, nicht der Stand. Die Buchhaltung braucht ihn, um
@@ -107,6 +117,7 @@ impl GenerativeJob {
             declared_sampling: read_sampling_parameters(request),
             extra_inputs: extra_inputs(request),
             quanta: 0,
+            last_requested_tokens: None,
             last_quantum_tokens: 0,
         })
     }
@@ -140,12 +151,15 @@ impl GenerativeJob {
     /// Tokenzahl auf die Quantengroesse begrenzt.
     #[must_use]
     pub fn build_quantum(
-        &self,
+        &mut self,
         template: &ModelInferRequest,
         quantum_tokens: u32,
     ) -> ModelInferRequest {
         let mut request = template.clone();
         let tokens = quantum_tokens.min(self.remaining_tokens()).max(1);
+        // Gemerkt, weil es die einzige **harte** Obergrenze ist, die dieses
+        // Modul hat: das Backend setzt `max_tokens` in echten Token durch.
+        self.last_requested_tokens = Some(tokens);
         let continuation = format!("{}{}", self.prompt, self.generated);
         let sampling = self.sampling_for(tokens);
 
@@ -215,9 +229,27 @@ impl GenerativeJob {
         self.generated.push_str(delta);
         // Grobe Schaetzung: rund vier Zeichen je Token. Sie muss nur gut genug
         // sein, um die Gesamtobergrenze einzuhalten.
-        let produced = u32::try_from(delta.len().div_ceil(4)).unwrap_or(u32::MAX);
-        self.last_quantum_tokens = produced;
-        self.tokens = self.tokens.saturating_add(produced);
+        // Verbraucht wird das Kleinere aus zwei **Obergrenzen** (Review R06):
+        //
+        // * was beim Backend bestellt war — `max_tokens` setzt es in echten
+        //   Token durch, und mehr kann nicht entstanden sein;
+        // * wie viele Token in diesen Bytes ueberhaupt Platz haben — jedes
+        //   Token belegt mindestens ein Byte, also hoechstens `len` Stueck.
+        //
+        // Das Minimum zweier Obergrenzen ist wieder eine Obergrenze, und damit
+        // ist `max_total_tokens` eine Zusage statt einer Schaetzung. Die alte
+        // Rechnung `Bytes / 4` war **keine** obere Schranke: vier
+        // Ein-Byte-Token — vier Ziffern etwa — zaehlten als eines, und drei
+        // weitere wurden freigegeben.
+        //
+        // Fuer gewoehnlichen Text ist die bestellte Zahl die kleinere und
+        // damit massgeblich; die Bytegrenze greift nur, wo das Backend
+        // frueher aufgehoert hat, als es durfte.
+        let by_bytes = u32::try_from(delta.len()).unwrap_or(u32::MAX);
+        let by_order = self.last_requested_tokens.unwrap_or(u32::MAX);
+        let consumed = by_bytes.min(by_order);
+        self.last_quantum_tokens = consumed;
+        self.tokens = self.tokens.saturating_add(consumed);
         self.tokens >= self.max_total_tokens
     }
 
@@ -397,7 +429,7 @@ mod tests {
             .push(length_prefixed("{\"max_tokens\": 4, \"temperature\": 0.7}"));
 
         // Die Konfiguration erlaubt 64 — die Bestellung des Clients gilt.
-        let job = GenerativeJob::from_request(&request, 64).unwrap();
+        let mut job = GenerativeJob::from_request(&request, 64).unwrap();
         assert_eq!(job.max_total_tokens, 4);
 
         let quantum = job.build_quantum(&request, 32);
@@ -426,7 +458,7 @@ mod tests {
         });
         request.raw_input_contents.push(vec![7_u8; 32]);
 
-        let job = GenerativeJob::from_request(&request, 16).unwrap();
+        let mut job = GenerativeJob::from_request(&request, 16).unwrap();
         let quantum = job.build_quantum(&request, 8);
 
         let image = quantum
@@ -524,11 +556,16 @@ mod tests {
     fn the_quantum_never_exceeds_what_remains() {
         let template = request_with("P");
         let mut job = GenerativeJob::from_request(&template, 10).unwrap();
+        // Wie im Betrieb: erst ein Quantum bestellen, dann die Antwort
+        // aufnehmen. Die Bestellung ist die harte Obergrenze — das Backend
+        // setzt `max_tokens` in echten Token durch, und mehr kann nicht
+        // entstanden sein. Ohne sie waeren 32 Zeichen bis zu 32 Token, und
+        // das Budget waere aufgebraucht (Review R06).
+        let _ = job.build_quantum(&template, 8);
         job.absorb(&response_with(&format!("P{}", "x".repeat(32))));
         let request = job.build_quantum(&template, 100);
-        // Nach 32 Zeichen sind rund 8 Token verbraucht, es bleiben 2 von 10.
-        // Auch bei grosszuegig angefragtem Quantum wird nur das Restbudget
-        // angefordert.
+        // Acht bestellte Token sind verbraucht, es bleiben 2 von 10. Auch bei
+        // grosszuegig angefragtem Quantum wird nur das Restbudget angefordert.
         assert_eq!(job.remaining_tokens(), 2);
         let params = String::from_utf8(
             request
@@ -540,5 +577,42 @@ mod tests {
         .unwrap_or_default();
         assert!(params.contains("\"max_tokens\": 2"), "{params}");
         assert!(!params.contains("100"), "{params}");
+    }
+
+    /// Die Tokenobergrenze haelt auch gegen Ein-Byte-Token (Review R06).
+    ///
+    /// `Bytes / 4` ist eine Schaetzung und **keine** obere Schranke: vier
+    /// Ein-Byte-Token — vier Ziffern etwa — zaehlten als eines, und drei
+    /// weitere wurden freigegeben. Aus fremd kontrollierter Eingabe entstand
+    /// so mehr Arbeit, als der Betreiber zugelassen hatte (Spec 8.3).
+    ///
+    /// Gezaehlt wird jetzt das Kleinere aus zwei Obergrenzen: was beim
+    /// Backend bestellt war und wie viele Token in diesen Bytes ueberhaupt
+    /// Platz haben. Das Minimum zweier Obergrenzen ist wieder eine.
+    #[test]
+    fn the_token_budget_holds_against_single_byte_tokens() {
+        let mut job = GenerativeJob::from_request(&request_with("Prompt:"), 4).unwrap();
+        // Vier tatsaechliche Token in vier Bytes.
+        let done = job.absorb(&response_with("1234"));
+        assert!(done, "vier Token verbraucht, gezaehlt {} von 4", job.tokens);
+        assert_eq!(job.remaining_tokens(), 0);
+    }
+
+    /// Die bestellte Zahl ist die schaerfere Schranke, wo sie greift.
+    ///
+    /// Die Gegenprobe zum Test darueber: haette nur die Bytegrenze gegolten,
+    /// waere gewoehnlicher Text viermal zu schnell aufgebraucht. Das Backend
+    /// setzt `max_tokens` in echten Token durch, und diese Zahl ist dann die
+    /// kleinere.
+    #[test]
+    fn the_ordered_amount_binds_where_it_is_smaller() {
+        let template = request_with("Prompt:");
+        let mut job = GenerativeJob::from_request(&template, 64).unwrap();
+        let _ = job.build_quantum(&template, 8);
+        job.absorb(&response_with(&"x".repeat(40)));
+        assert_eq!(
+            job.tokens, 8,
+            "40 Bytes, aber nur 8 Token bestellt — mehr kann nicht entstanden sein"
+        );
     }
 }

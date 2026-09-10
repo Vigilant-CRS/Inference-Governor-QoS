@@ -235,8 +235,25 @@ pub struct Scheduler {
     estimator: RuntimeEstimator,
     /// Beobachtete Ankunftsabstaende je Modell.
     arrivals: [crate::arrival::ArrivalTracker; MAX_MODELS],
-    /// Wann zuletzt ein gueltiges Ergebnis je Modell vorlag.
+    /// Die **Aufnahmezeit** des zuletzt gelieferten gueltigen Ergebnisses.
+    ///
+    /// Aufnahme, nicht Fertigstellung (ADR-0005, Review R02). Ein Verbraucher
+    /// bewertet ein Ergebnis danach, wie alt die Welt darin ist — nicht
+    /// danach, wann die Rechnung fertig wurde. Beides zu verwechseln laesst
+    /// ein Bild frisch aussehen, das es nicht ist: Aufnahme bei 0 ms,
+    /// Fertigstellung bei 50 ms, Abtastung bei 70 ms und ein Hoechstalter von
+    /// 66 ms ist ein Miss — gerechnet ab Fertigstellung waeren es 20 ms und
+    /// alles in Ordnung.
     last_valid: [Option<Instant>; MAX_MODELS],
+    /// Bis wann das zuletzt gelieferte gueltige Ergebnis brauchbar war.
+    ///
+    /// `Aufnahme + max_age`, nicht die Fertigstellung: ein Ergebnis versorgt
+    /// den Verbraucher genau so lange, wie sein Alter unter der vereinbarten
+    /// Grenze bleibt (ADR-0005). Von dieser Zeit an laeuft die
+    /// Versorgungsluecke — dieselbe Rechnung, die auch der Benchmarktracker
+    /// fuehrt (`vig-sim::coverage`, Review R02/R03). Zwei Implementierungen
+    /// derselben Groesse mit verschiedenen Regeln waren der Fehler.
+    usable_until: [Option<Instant>; MAX_MODELS],
     /// Aufeinanderfolgende Requests ohne gueltiges Ergebnis je Modell.
     consecutive_misses: [u32; MAX_MODELS],
     /// Die zustandsabhaengige Prognose (NV-06).
@@ -351,6 +368,7 @@ impl Scheduler {
             next_expected: [None; MAX_MODELS],
             arrivals: [crate::arrival::ArrivalTracker::default(); MAX_MODELS],
             last_valid: [None; MAX_MODELS],
+            usable_until: [None; MAX_MODELS],
             consecutive_misses: [0; MAX_MODELS],
             miss_windows,
             predictor: Predictor::with_shape(models, variants, slot_count),
@@ -589,7 +607,12 @@ impl Scheduler {
         // brauchbares Ergebnis? Eine Abdeckungszahl mittelt das weg, und
         // gerade der zusammenhaengende Block ist das, was eine Regelung
         // umwirft.
-        self.observe_supply(entry.descriptor.logical_model, now, state);
+        self.observe_supply(
+            entry.descriptor.logical_model,
+            now,
+            entry.descriptor.generation_time,
+            state,
+        );
 
         if missed {
             self.metrics.deadline_misses = self.metrics.deadline_misses.saturating_add(1);
@@ -889,7 +912,19 @@ impl Scheduler {
     /// laufende Luecke; alles andere verlaengert sie. `last_valid` ist
     /// `None`, solange noch nie etwas Brauchbares ankam — dann laeuft die
     /// Luecke ab dem ersten Ereignis dieses Stroms.
-    fn observe_supply(&mut self, model: ModelIdx, now: Instant, state: RequestState) {
+    ///
+    /// `capture` ist die Aufnahmezeit des Ergebnisses, `now` seine
+    /// Fertigstellung. Gespeichert wird die **Aufnahme**: sie ist die Zeit,
+    /// gegen die ein Verbraucher sein Hoechstalter misst (ADR-0005). Ein
+    /// spaeteres Ergebnis mit aelterer Aufnahme darf die gespeicherte nicht
+    /// zurueckdrehen — deshalb das Maximum.
+    fn observe_supply(
+        &mut self,
+        model: ModelIdx,
+        now: Instant,
+        capture: Instant,
+        state: RequestState,
+    ) {
         let index = model.get();
         if state == RequestState::CompletedValid {
             if let Some(cell) = self.consecutive_misses.get_mut(index) {
@@ -902,7 +937,35 @@ impl Scheduler {
                 *slot = 0;
             }
             if let Some(cell) = self.last_valid.get_mut(index) {
-                *cell = Some(now);
+                let freshest = cell.map_or(capture, |previous| {
+                    if capture.as_nanos() > previous.as_nanos() {
+                        capture
+                    } else {
+                        previous
+                    }
+                });
+                *cell = Some(freshest);
+            }
+            // Und bis wann es traegt. Ein Ergebnis, dessen Hoechstalter schon
+            // bei der Auslieferung abgelaufen war, verlaengert die
+            // Brauchbarkeit um keine Nanosekunde — es hat nie versorgt.
+            let expires = self
+                .contracts
+                .get(index)
+                .and_then(|c| c.max_age)
+                .and_then(|max_age| capture.checked_add(max_age));
+            if let Some(expires) = expires
+                && expires.as_nanos() > now.as_nanos()
+                && let Some(cell) = self.usable_until.get_mut(index)
+            {
+                let latest = cell.map_or(expires, |previous| {
+                    if expires.as_nanos() > previous.as_nanos() {
+                        expires
+                    } else {
+                        previous
+                    }
+                });
+                *cell = Some(latest);
             }
             return;
         }
@@ -913,7 +976,16 @@ impl Scheduler {
                 *slot = *cell;
             }
         }
-        let since = self.last_valid.get(index).copied().flatten().unwrap_or(now);
+        // Die Luecke laeuft ab dem Ablauf des letzten brauchbaren
+        // Ergebnisses, nicht ab dessen Fertigstellung: dazwischen war der
+        // Strom versorgt. Ohne je ein gueltiges Ergebnis laeuft sie ab dem
+        // ersten Ereignis dieses Stroms.
+        let since = self
+            .usable_until
+            .get(index)
+            .copied()
+            .flatten()
+            .unwrap_or(now);
         let gap = now.saturating_since(since);
         if let Some(slot) = self.metrics.longest_gap_us.get_mut(index) {
             let micros =

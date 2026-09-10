@@ -68,9 +68,9 @@ async fn later_completion_must_not_prove_earlier_unknown_request_finished() {
     fake.expect_error("detector_main", unknown());
     fake.expect_ok("detector_main");
     let (h, clock) = actor_with(fake.clone()).await;
-    assert!(h.submit(desc(1, clock.now()), request_for("detector")).await.is_err());
+    assert!(h.submit(desc(1, clock.now()), request_for("detector"), vig_gateway::budget::PayloadPermit::untracked()).await.is_err());
     assert_eq!(h.metrics().await.unwrap().quarantined, 1);
-    assert!(h.submit(desc(2, clock.now()), request_for("detector")).await.is_ok());
+    assert!(h.submit(desc(2, clock.now()), request_for("detector"), vig_gateway::budget::PayloadPermit::untracked()).await.is_ok());
     // Only request 2 has completed. Request 1 may still be executing.
     fake.set_evidence(1);
     tokio::time::sleep(WallDuration::from_millis(550)).await;
@@ -84,8 +84,8 @@ async fn never_started_request_must_not_raise_future_completion_target() {
     fake.expect_error("detector_main", BackendError::Unreachable { endpoint: "unused".into(), cause: "refused before submission".into() });
     fake.expect_error("detector_main", unknown());
     let (h, clock) = actor_with(fake.clone()).await;
-    assert!(h.submit(desc(1, clock.now()), request_for("detector")).await.is_err());
-    assert!(h.submit(desc(2, clock.now()), request_for("detector")).await.is_err());
+    assert!(h.submit(desc(1, clock.now()), request_for("detector"), vig_gateway::budget::PayloadPermit::untracked()).await.is_err());
+    assert!(h.submit(desc(2, clock.now()), request_for("detector"), vig_gateway::budget::PayloadPermit::untracked()).await.is_err());
     // All work that ever reached this exclusive backend has now completed.
     fake.set_evidence(1);
     tokio::time::sleep(WallDuration::from_millis(550)).await;

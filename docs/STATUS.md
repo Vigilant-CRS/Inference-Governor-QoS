@@ -90,6 +90,22 @@ nicht fuer die Karte. `vig doctor` sagt das jetzt vor jeder Messung (ADR-0021).
 | NV-18 Anwendungssemantik | fertig: ein Hinweis darf verschaerfen, nie lockern | [0029](adr/0029-a-hint-may-tighten-never-loosen.md) |
 | NV-24 Missbudget in Entscheidungen | fertig, Voreinstellung **aus** | [0027](adr/0027-a-miss-budget-that-decides-not-only-observes.md) |
 
+## Der Review vom 10.09. und was er kostete
+
+Ein externes Codereview mit acht lauffaehigen Gegenproben. Alle acht liefen
+rot; alle acht sind behoben und stehen jetzt in der Regression (ADR-0032).
+
+Zwei davon aendern **gemessene Zahlen**, und zwar nach unten: die laengste
+Versorgungsluecke laeuft ab dem Ablauf des letzten brauchbaren Ergebnisses
+statt ab dessen Fertigstellung, und eine veraltete Lieferung schliesst keine
+Luecke mehr. Aeltere Messberichte dieses Projekts sind damit **nicht** mit
+neuen vergleichbar, wo veraltete Lieferungen vorkamen.
+
+Ein dritter aendert das Verhalten generativer Auftraege: die Tokenobergrenze
+ist jetzt garantiert statt geschaetzt und wird bis zu viermal so schnell
+verbraucht. Wer dieselbe Ausgabelaenge will, hebt `max_total_tokens` an — und
+weiss dann, was er zulaesst.
+
 ## Was ausdruecklich noch nicht angeschlossen ist
 
 Drei Bausteine sind gebaut, getestet und tun im Betrieb noch nichts. Das steht

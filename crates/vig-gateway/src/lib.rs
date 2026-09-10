@@ -18,6 +18,7 @@
 
 pub mod actor;
 pub mod auth;
+pub mod budget;
 pub mod clock;
 pub mod cooperative;
 pub mod executor;
@@ -28,7 +29,7 @@ pub mod shm;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
-pub use actor::{Handle, Msg};
+pub use actor::Handle;
 pub use clock::MonotonicClock;
 pub use executor::{Capabilities, Executor, Ticket, TritonExecutor};
 pub use exporter::render as render_metrics;

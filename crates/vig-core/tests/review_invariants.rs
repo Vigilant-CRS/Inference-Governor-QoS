@@ -832,8 +832,15 @@ fn the_longest_supply_gap_is_recorded_per_stream() {
         3,
         "drei Fehlschlaege am Stueck"
     );
-    // Die Lücke reicht vom letzten gültigen Ergebnis bis zum letzten Miss.
-    assert_eq!(s.metrics().longest_gap_us[0], 185_000);
+    // Die Luecke laeuft vom **Ablauf** des letzten brauchbaren Ergebnisses
+    // bis zum letzten Miss: Aufnahme bei 0 ms, Hoechstalter 10 ms, also
+    // brauchbar bis 10 ms; der letzte Miss faellt bei 190 ms an. 180 ms.
+    //
+    // Frueher stand hier 185 ms — gerechnet ab der **Fertigstellung** bei
+    // 5 ms. Das mischte zwei Zeitbegriffe: das Ergebnis war ab 5 ms da und bis
+    // 10 ms brauchbar, und dazwischen war der Strom versorgt. Der Kern
+    // rechnet jetzt dieselbe Regel wie der Benchmarktracker (Review R02/R03).
+    assert_eq!(s.metrics().longest_gap_us[0], 180_000);
 
     // Ein gültiges Ergebnis schließt sie und setzt die Kette zurück.
     event(&mut s, 200, Event::Arrival(frame(5, 0, 198, &c)));
@@ -848,7 +855,7 @@ fn the_longest_supply_gap_is_recorded_per_stream() {
     assert_eq!(s.metrics().consecutive_misses[0], 0);
     assert_eq!(
         s.metrics().longest_gap_us[0],
-        185_000,
+        180_000,
         "die Hoechstmarke bleibt stehen"
     );
 }
@@ -1207,5 +1214,58 @@ fn beyond_a_certain_context_no_quantum_fits_and_it_is_counted() {
     assert!(
         deferred > 0,
         "und das Veto ist ein Befund, kein stiller Nebeneffekt"
+    );
+}
+
+/// Das Alter eines Ergebnisses zaehlt ab der Aufnahme, nicht ab der
+/// Fertigstellung (Review R02).
+///
+/// Ein Verbraucher bewertet ein Ergebnis danach, wie alt die Welt darin ist —
+/// nicht danach, wann die Rechnung fertig wurde (ADR-0005). Beides zu
+/// verwechseln laesst ein Bild frisch aussehen, das es nicht ist, und
+/// betrifft unmittelbar die Zahlen, mit denen dieses Projekt argumentiert.
+///
+/// Der Fall: Aufnahme bei 0 ms, Fertigstellung bei 50 ms, Abtastung bei
+/// 70 ms, Hoechstalter 66 ms. Das ist ein Miss. Ab Fertigstellung gerechnet
+/// waeren es 20 ms und alles in Ordnung.
+#[test]
+fn the_consumer_age_starts_at_capture_not_at_completion() {
+    use vig_core::contract_ext::{ContractExtension, MissBudget};
+
+    let mut c = contract(Criticality::Protected, QueuePolicy::Fifo, &[5]);
+    c.max_age = Some(ms(66));
+    c.extension = Some(ContractExtension {
+        consumer_period: Some(ms(10)),
+        miss_budget: Some(MissBudget {
+            max_misses: 9,
+            window_cycles: 10,
+            max_consecutive: None,
+        }),
+        ..Default::default()
+    });
+    let mut s = scheduler(&[c.clone()], SlotSet::homogeneous(1, 0).unwrap());
+    event(&mut s, 0, Event::Tick);
+
+    // Aufgenommen bei 0, angekommen bei 40, fertig bei 50.
+    let mut d = frame(1, 0, 0, &c);
+    d.arrival_time = at(40);
+    event(&mut s, 40, Event::Arrival(d));
+    event(
+        &mut s,
+        50,
+        Event::Completion {
+            request: RequestId(1),
+            slot: SlotIdx(0),
+        },
+    );
+
+    event(&mut s, 60, Event::Tick);
+    let before = s.metrics().weakly_hard_misses[0];
+    event(&mut s, 70, Event::Tick);
+    assert_eq!(
+        s.metrics().weakly_hard_misses[0],
+        before.saturating_add(1),
+        "70 ms nach der Aufnahme ist das Ergebnis zu alt, gleich wann es \
+         fertig wurde"
     );
 }

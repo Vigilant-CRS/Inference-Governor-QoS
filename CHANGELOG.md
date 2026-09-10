@@ -30,6 +30,36 @@ bedeutet, steht in [docs/releases.md](docs/releases.md).
   Sockel steht daneben, weil er auf der Messmaschine der groesste Einzelterm
   ist.
 
+### Behoben — Zusagen, die zwischen den Komponenten zerfielen (Review 10.09., ADR-0032)
+
+- **Der Abschlussabgleich konnte den falschen Slot freigeben.** Tritons
+  aggregierter Zaehler wurde gegen die eigene Auslieferungsnummer geprueft.
+  Laeuft Auftrag A noch und wird B fertig, galt A als beendet — waehrend seine
+  Recheneinheit womoeglich noch rechnete. Umgekehrt hob ein Auftrag, der das
+  Backend nie erreicht hat, das Ziel an und konnte einen spaeter tatsaechlich
+  abgeschlossenen dauerhaft in Quarantaene halten. Der Zaehler belegt jetzt
+  **Ruhe** statt eines Einzelabschlusses.
+- **Das Alter eines Ergebnisses zaehlte ab der Fertigstellung.** ADR-0005 sagt:
+  ab der Aufnahme. Aufnahme 0 ms, Fertigstellung 50 ms, Abtastung 70 ms,
+  Hoechstalter 66 ms war ein Miss und wurde als frisch gezaehlt.
+- **Veraltete Lieferungen verkuerzten die gemessene Versorgungsluecke.**
+  150 ms ohne ein einziges brauchbares Ergebnis wurden als 90 ms gemeldet.
+  Kern und Benchmarktracker rechnen jetzt dieselbe Regel.
+- **Das Nutzlastbudget endete mit dem Client.** Nach einem Timeout rechnete das
+  Backend weiter und hielt die Nutzlast; das Budget war trotzdem frei. Zwei
+  16-Byte-Auftraege liefen bei einem Budget von 16 Bytes.
+- **`evidence_required: proven` wurde stillschweigend angenommen**, obwohl
+  nichts in diesem Projekt analytisch abgesichert ist. Jetzt abgelehnt.
+  `phase` und `minimum_background_progress_pct` werden umgesetzt;
+  `release_jitter_envelope` und `delivery_boundary: consumer` beim Start und
+  im `doctor` als nicht durchgesetzt gemeldet.
+- **Die Aktuationstoleranz federte eine Zusage ab.** 1470 MHz galten als
+  Erfuellung eines zugesagten Bodens von 1500 MHz. Der **beobachtete** Takt
+  muss jetzt selbst innerhalb aller Grenzen liegen.
+- **Die Tokenobergrenze war eine Schaetzung.** `Bytes / 4` zaehlte vier
+  Ein-Byte-Token als eines. Verbraucht wird jetzt das Kleinere aus zwei
+  Obergrenzen — der bestellten und der aus den Bytes.
+
 ### Behoben
 
 - **Ein nicht zerlegter Auftrag wurde als Quantum eingeplant.** Ein Request
