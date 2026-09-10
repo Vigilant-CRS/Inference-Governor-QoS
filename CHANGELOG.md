@@ -56,6 +56,22 @@ bedeutet, steht in [docs/releases.md](docs/releases.md).
 - **Die Aktuationstoleranz federte eine Zusage ab.** 1470 MHz galten als
   Erfuellung eines zugesagten Bodens von 1500 MHz. Der **beobachtete** Takt
   muss jetzt selbst innerhalb aller Grenzen liegen.
+- **Zwei Messpfade fuer dieselbe Groesse.** `vig calibrate` mass Ruecken an
+  Ruecken und uebersprang fehlgeschlagene Aufrufe; `vig profile` gab auf einem
+  absoluten Raster frei und buchte alles. Beide benutzen jetzt denselben Kern,
+  und aus einer nicht qualifizierten Reihe entsteht kein Profil.
+- **Laufzeitbeobachtungen landeten in der falschen Zustandszelle.** Gebucht
+  wurde der Zustand bei der Fertigstellung; richtig ist der beim Dispatch.
+- **Der Speichertakt fehlte im beobachteten Zustand.** Eine Karte, die ihn
+  heruntertaktet und den SM-Takt haelt, galt als „voller Takt".
+- **Der Collector-Unterprozess hatte keine Frist.** Ein haengender Aufruf liess
+  den Hardwarewaechter unbegrenzt warten — er meldete nie einen Fehlversuch.
+- **Die Startpruefung verglich Geraet und Treiber nicht**, obwohl beides seit
+  NV-04 messbar ist.
+- **Die Besitzsperre der Aktuation war nicht atomar** (lesen, pruefen,
+  abschneiden) und galt fuer alle Geraete gemeinsam. Jetzt `O_EXCL`, je Geraet
+  eine. Und eine Beobachtung von **vor** der Anforderung gilt nicht mehr als
+  Bestaetigung.
 - **Die Tokenobergrenze war eine Schaetzung.** `Bytes / 4` zaehlte vier
   Ein-Byte-Token als eines. Verbraucht wird jetzt das Kleinere aus zwei
   Obergrenzen — der bestellten und der aus den Bytes.

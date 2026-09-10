@@ -29,7 +29,6 @@
 use crate::identity::{ArtifactLookup, IdentityArgs, MeasuredUnder, artifact_of, assemble};
 use std::path::Path;
 use std::process::ExitCode;
-use std::time::Instant;
 use vig_backend_triton::{BackendError, TritonClient, zero_request};
 use vig_config::Config;
 use vig_protocol_oip::inference::ServerMetadataResponse;
@@ -264,83 +263,25 @@ async fn profile_variant(
     identity: &IdentityArgs,
     period_us: Option<u64>,
 ) -> Result<Measured, BackendError> {
-    use vig_platform::measure::{CellId, CellRun, ReleaseOutcome, ReleaseSchedule};
-    use vig_platform::{Collector as _, measure};
+    use vig_platform::measure::CellId;
 
     let metadata = client.model_metadata(model).await?;
     let request = zero_request(model, &metadata)?;
 
-    for _ in 0..WARMUP {
-        client.infer(request.clone()).await?;
-    }
-
-    // Vor der Reihe: Zustand merken, damit ein Wechsel hinterher auffaellt.
-    let mut collector = vig_platform::NvidiaSmi::default();
-    let before = collector.snapshot().ok();
-
-    let mut run = CellRun::with_capacity(
+    // Der gemeinsame Messkern (Review R08). Er ist derselbe, den
+    // `vig calibrate` benutzt — zwei Messpfade fuer dieselbe Groesse waren
+    // der Fehler, und der eine war systematisch guenstiger als der andere.
+    let run = Box::pin(crate::runloop::run_cell(
+        client,
         CellId {
             model: model.to_owned(),
             concurrency: 1,
             batch: 1,
         },
-        samples,
-    );
-
-    let origin = Instant::now();
-    let mut schedule = period_us.map(|us| ReleaseSchedule::new(0, us.saturating_mul(1_000).max(1)));
-
-    for _ in 0..samples {
-        // Auf dem Raster warten, falls periodisch gemessen wird.
-        if let Some(schedule) = schedule.as_mut() {
-            let due_ns = schedule.take();
-            let now_ns = u64::try_from(origin.elapsed().as_nanos()).unwrap_or(u64::MAX);
-            if due_ns > now_ns {
-                tokio::time::sleep(std::time::Duration::from_nanos(
-                    due_ns.saturating_sub(now_ns),
-                ))
-                .await;
-            }
-        }
-
-        let started = Instant::now();
-        let outcome = match client.infer(request.clone()).await {
-            Ok(_) => {
-                let latency_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
-                let overrun = schedule.as_ref().is_some_and(|s| {
-                    let now_ns = u64::try_from(origin.elapsed().as_nanos()).unwrap_or(u64::MAX);
-                    now_ns > s.next_release_ns()
-                });
-                if overrun {
-                    ReleaseOutcome::Overrun { latency_ns }
-                } else {
-                    ReleaseOutcome::Completed { latency_ns }
-                }
-            }
-            Err(e) => ReleaseOutcome::Failed {
-                reason: e.to_string(),
-            },
-        };
-        run.record(outcome);
-
-        // Nach einem Ueberzug auf das Raster aufschliessen: die
-        // ausgelassenen Punkte werden gebucht, der naechste Freigabepunkt
-        // wird **nicht** nach hinten geschoben.
-        if let Some(schedule) = schedule.as_mut() {
-            let now_ns = u64::try_from(origin.elapsed().as_nanos()).unwrap_or(u64::MAX);
-            run.record_skipped(schedule.catch_up(now_ns));
-        }
-    }
-
-    // Mindestens hundert verwertbare Messwerte und hoechstens fuenf Prozent
-    // Fehlschlaege; darunter ist das p99 kein Quantil, sondern das Maximum.
-    run.qualify(100.min(samples), 50);
-
-    if let (Some(before), Ok(after)) = (before.as_ref(), collector.snapshot())
-        && let Some(reason) = measure::hardware_invalidates(before, &after)
-    {
-        run.discard(reason);
-    }
+        &request,
+        crate::runloop::RunOptions::qualified(samples, period_us, WARMUP),
+    ))
+    .await?;
 
     if let Some(reason) = run.discarded() {
         return Err(BackendError::Malformed {

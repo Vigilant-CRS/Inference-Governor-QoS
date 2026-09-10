@@ -135,6 +135,43 @@ Nachweis je Auftrag, den Tritons Statistik nicht hergibt.
 werden nicht durchgesetzt. Der `doctor` sagt das jetzt. Ein Beispiel, das mehr
 verspricht als das Produkt haelt, ist selbst ein Befund.
 
+## Nachtrag, 10.09.2026: die uebrigen Befunde
+
+**Ein Messpfad, nicht zwei (R08).** `vig profile` gab auf einem absoluten
+Raster frei und buchte Fehlschlaege, Ueberzuege und ausgelassene
+Freigabepunkte. `vig calibrate` mass Ruecken an Ruecken und uebersprang
+fehlgeschlagene Aufrufe stillschweigend — ausgerechnet der Befehl, der
+Profile **automatisch in Konfigurationen schreibt**. Beide benutzen jetzt
+denselben Kern (`cli/runloop`), `--periodic-us` gibt es an beiden, und aus
+einer Reihe, die nicht qualifiziert, entsteht kein Profil mehr.
+
+**Die Beobachtung gehoert in die Zelle des Dispatch (R07).** Zwischen Start
+und Ende kann die Karte heruntertakten oder drosseln. Die Laufzeit dem Zustand
+bei der **Fertigstellung** zuzuschreiben fuellt eine Zelle, in der nie etwas
+gelaufen ist — und die Prognose liest sie spaeter als Beleg. Der Zustand reist
+jetzt mit dem Dispatch mit.
+
+**Der Speichertakt gehoert zum Betriebspunkt (R07).** Eine Karte, die den
+Speicher heruntertaktet und den SM-Takt haelt, sah aus wie eine bei vollem
+Takt. Die schlechtere der beiden Klassen gewinnt; ein nicht beobachtbarer
+Speichertakt entwertet die vorhandene Angabe nicht.
+
+**Ein haengender Waechter meldet nie etwas (R07).** Der Collector-Unterprozess
+hatte keine Frist. Ein blockierter Treiber liess ihn unbegrenzt warten, der
+letzte bekannte Zustand blieb stehen, und von aussen sah alles gut aus. Drei
+Sekunden, dann Abbruch.
+
+**Geraet und Treiber sind messbar geworden (R07).** Die Startpruefung verglich
+sie nicht, weil sie „von hier aus nicht messbar" waren. Seit NV-04 sind sie
+es. Ohne den Vergleich meldete der Start ein Profil als gueltig, das auf einer
+anderen Karte gemessen wurde.
+
+**Besitz atomar, Beobachtung frisch (R10).** Die Sperre lief ueber lesen,
+pruefen, abschneiden — mit einem Fenster dazwischen, in dem ein zweiter
+Governor dieselbe Pruefung bestand. Jetzt `O_EXCL`, je Geraet eine Sperre. Und
+eine Aufnahme, die aelter ist als das Kommando, gilt nicht mehr als
+Bestaetigung: sie beschreibt den Zustand davor.
+
 ## Alternativen
 
 **Einen Nachweis je Auftrag vom Backend verlangen.** Triton bietet ihn nicht;

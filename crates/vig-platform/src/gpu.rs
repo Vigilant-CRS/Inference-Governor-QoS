@@ -122,6 +122,22 @@ pub struct GpuState {
     pub persistence_mode: Observation<bool>,
     /// Warum die Karte gedrosselt wird.
     pub throttle_reasons: Observation<Vec<ThrottleReason>>,
+    /// Der aktuelle Speichertakt in MHz (Review R07).
+    ///
+    /// Der bis hierher fehlende Teil des Betriebspunkts. Eine Karte, die den
+    /// Speicher heruntertaktet und den SM-Takt haelt, sah im beobachteten
+    /// Zustand aus wie eine bei vollem Takt — und speicherlastige Kernel
+    /// laufen dann trotzdem langsamer.
+    pub clock_mem_mhz: Observation<u32>,
+    /// Der hoechste Speichertakt in MHz.
+    pub clock_mem_max_mhz: Observation<u32>,
+    /// Die Geraetekennung, wie der Treiber sie meldet (Review R07).
+    ///
+    /// Stabil ueber Neustarts und ueber den Index hinweg: `index` ist eine
+    /// Aufzaehlung und sagt nichts darueber, **welche** Karte gemeint ist.
+    /// Erst die Kennung erlaubt es, ein Profil gegen das Geraet zu pruefen,
+    /// auf dem es gemessen wurde.
+    pub uuid: Observation<String>,
 }
 
 impl GpuState {
@@ -160,10 +176,11 @@ impl GpuState {
 pub const QUERY_FIELDS: &str = "index,name,driver_version,compute_cap,memory.total,\
                                temperature.gpu,clocks.current.sm,clocks.max.sm,\
                                power.draw,power.limit,pstate,persistence_mode,\
-                               clocks_event_reasons.active";
+                               clocks_event_reasons.active,clocks.current.memory,\
+                               clocks.max.memory,uuid";
 
 /// Wie viele Spalten [`QUERY_FIELDS`] hat.
-const COLUMNS: usize = 13;
+const COLUMNS: usize = 16;
 
 /// Liest eine CSV-Zeile von `nvidia-smi --query-gpu`.
 ///
@@ -198,6 +215,9 @@ pub fn parse_query_line(line: &str, observed_at_ms: u64) -> Option<GpuState> {
         performance_state: text(field(10), at),
         persistence_mode: boolean(field(11), at),
         throttle_reasons: mask(field(12), at),
+        clock_mem_mhz: number(field(13), at),
+        clock_mem_max_mhz: number(field(14), at),
+        uuid: text(field(15), at),
     })
 }
 
@@ -339,7 +359,7 @@ mod tests {
     /// Eine echte Zeile dieses Messrechners, waehrend der Dauerlauf lief.
     const REAL: &str = "0, NVIDIA GeForce RTX 3070 Laptop GPU, 580.173.02, 8.6, 8192, \
                         80, 1740, 2100, 129.55, [N/A], P0, Disabled, \
-                        0x0000000000000004";
+                        0x0000000000000004, 7001, 7001, GPU-test";
 
     #[test]
     fn a_real_line_parses_completely() {

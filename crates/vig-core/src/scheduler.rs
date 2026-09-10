@@ -159,6 +159,19 @@ struct Dispatched {
     /// sagt, ob die **Prognose** falsch war. Eine verpasste Deadline sagt das
     /// nicht — die kann genauso aus Warteschlangenzeit entstehen.
     predicted: Duration,
+    /// Der Hardwarezustand **beim Dispatch** (Review R07).
+    ///
+    /// Nicht der bei der Fertigstellung: dazwischen kann die Karte
+    /// heruntergetaktet, gedrosselt oder in einen anderen Leistungsmodus
+    /// gegangen sein. Die beobachtete Laufzeit gehoert in die Zelle des
+    /// Zustands, unter dem sie **entstanden** ist — sonst fuellt sie eine
+    /// Zelle, in der nie etwas gelaufen ist, und die Prognose liest sie
+    /// spaeter als Beleg.
+    ///
+    /// Das ist der Grund, warum NV-06 im Schatten bleibt: die Zuordnung
+    /// stimmt jetzt, aber ein Zustandswechsel **waehrend** der Ausfuehrung
+    /// bleibt ein Fall, ueber den diese Zelle nichts aussagt.
+    hardware_state: crate::predictor::StateClass,
 }
 
 /// Die Planung eines Kandidaten: welche Variante, wie lange, und reicht es.
@@ -790,6 +803,18 @@ impl Scheduler {
 
     /// Der Schattenvergleich der Prognose (NV-06).
     #[must_use]
+    /// Die Prognosetabelle, fuer Pruefungen.
+    ///
+    /// Lesend: der Entscheidungspfad liest sie ueber
+    /// [`Self::predictor_mode`] und den Estimator. Hier steht sie, damit ein
+    /// Test nachsehen kann, in **welcher** Zelle eine Beobachtung gelandet
+    /// ist — die Frage aus Review R07.
+    pub const fn predictor(&self) -> &Predictor {
+        &self.predictor
+    }
+
+    /// Der Schattenvergleich der Prognose.
+    #[must_use]
     pub const fn predictor_ledger(&self) -> &ShadowLedger {
         self.predictor.ledger()
     }
@@ -802,7 +827,11 @@ impl Scheduler {
     fn observe_for_predictor(&mut self, entry: &Dispatched, compute: Duration) {
         let model = entry.descriptor.logical_model;
         let variant = entry.variant;
-        let mut state = self.hardware_state;
+        // Der Zustand **beim Dispatch**, nicht der von jetzt (Review R07).
+        // Zwischen Start und Ende kann die Karte heruntergetaktet oder
+        // gedrosselt haben; die Laufzeit gehoert in die Zelle, unter der sie
+        // entstanden ist.
+        let mut state = entry.hardware_state;
         state.occupancy = u8::try_from(entry.occupancy).unwrap_or(u8::MAX);
         let revision = self.profile_revision;
 
@@ -1292,6 +1321,7 @@ impl Scheduler {
                 vs.record(variant, now);
             }
             let _ = self.inflight.push(Dispatched {
+                hardware_state: self.hardware_state,
                 descriptor,
                 variant,
                 at: now,

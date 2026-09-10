@@ -162,13 +162,26 @@ impl NvidiaSmi {
     }
 }
 
+/// Wie lange ein Aufruf des Collectors hoechstens dauern darf.
+///
+/// `nvidia-smi` antwortet gewoehnlich in Millisekunden. Es kann aber haengen —
+/// bei einer Karte im Fehlerzustand, bei einem blockierten Treiber, bei einem
+/// Persistence-Daemon, der nicht antwortet. Ohne Frist wartete der Aufrufer
+/// unbegrenzt: der Hardwarewaechter meldete dann nie einen Fehlversuch, der
+/// letzte bekannte Zustand blieb stehen, und von aussen sah alles gut aus
+/// (Review R07).
+///
+/// Drei Sekunden sind zwei Groessenordnungen ueber der ueblichen Antwortzeit
+/// und deutlich unter dem Probenintervall.
+pub const SNAPSHOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Wie oft waehrend des Wartens nachgesehen wird, ob der Prozess fertig ist.
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+
 impl Collector for NvidiaSmi {
     fn snapshot(&mut self) -> Result<HardwareSnapshot, String> {
         let taken_at_ms = now_ms().ok_or_else(|| "Systemuhr vor der Epoche".to_owned())?;
-        let output = std::process::Command::new(&self.binary)
-            .args(Self::arguments())
-            .output()
-            .map_err(|e| format!("{} nicht ausfuehrbar: {e}", self.binary))?;
+        let output = run_with_timeout(&self.binary, &Self::arguments(), SNAPSHOT_TIMEOUT)?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!(
@@ -180,6 +193,55 @@ impl Collector for NvidiaSmi {
         let text = String::from_utf8_lossy(&output.stdout);
         Ok(parse_output(&text, taken_at_ms))
     }
+}
+
+/// Faehrt ein Kommando mit einer Frist.
+///
+/// Laeuft es laenger, wird es abgebrochen und der Aufrufer bekommt einen
+/// Fehler. Ein haengender Waechter ist schlimmer als ein fehlender: er meldet
+/// nie etwas, und das liest sich wie „alles in Ordnung".
+///
+/// Die Ausgabe wird erst nach dem Ende gelesen. Fuer `nvidia-smi` traegt das:
+/// seine Ausgabe sind wenige hundert Bytes und passt in den Pipe-Puffer. Ein
+/// Kommando mit grosser Ausgabe braeuchte einen mitlesenden Thread.
+///
+/// # Errors
+///
+/// Wenn das Kommando nicht startbar ist, die Frist reisst oder es mit einem
+/// Fehlercode endet.
+fn run_with_timeout(
+    binary: &str,
+    args: &[String],
+    limit: std::time::Duration,
+) -> Result<std::process::Output, String> {
+    let mut child = std::process::Command::new(binary)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("{binary} nicht ausfuehrbar: {e}"))?;
+
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {}
+            Err(e) => return Err(format!("{binary}: {e}")),
+        }
+        if started.elapsed() >= limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "{binary} hat nach {} ms nicht geantwortet und wurde abgebrochen",
+                limit.as_millis()
+            ));
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+
+    child
+        .wait_with_output()
+        .map_err(|e| format!("{binary}: {e}"))
 }
 
 /// Baut eine Aufnahme aus der vollstaendigen Ausgabe von `nvidia-smi`.
@@ -293,9 +355,9 @@ mod tests {
     use crate::snapshot::diff;
 
     const TWO_CARDS: &str = "0, NVIDIA GeForce RTX 3070 Laptop GPU, 580.173.02, 8.6, 8192, \
-                             80, 1740, 2100, 129.55, [N/A], P0, Disabled, 0x0000000000000004\n\
+                             80, 1740, 2100, 129.55, [N/A], P0, Disabled, 0x0000000000000004, 7001, 7001, GPU-test\n\
                              1, NVIDIA RTX A2000, 580.173.02, 8.6, 12288, \
-                             55, 1200, 1500, 40.00, 70.00, P2, Enabled, 0x0000000000000000\n";
+                             55, 1200, 1500, 40.00, 70.00, P2, Enabled, 0x0000000000000000, 7001, 7001, GPU-test\n";
 
     #[test]
     fn several_cards_are_parsed_into_one_snapshot() {
@@ -396,7 +458,10 @@ mod tests {
         // kann: ein thermisches Limit tritt hinzu.
         let calm = parse_output(TWO_CARDS, 1_000);
         let hot = parse_output(
-            &TWO_CARDS.replace("0x0000000000000004", "0x0000000000000044"),
+            &TWO_CARDS.replace(
+                "0x0000000000000004, 7001, 7001, GPU-test",
+                "0x0000000000000044, 7001, 7001, GPU-test",
+            ),
             2_000,
         );
         let text = Recorded::new(vec![calm, hot]).to_yaml().unwrap();
@@ -435,5 +500,42 @@ mod tests {
         let mut collector = NvidiaSmi::at("/nonexistent-nvidia-smi");
         let error = collector.snapshot().unwrap_err();
         assert!(error.contains("nicht ausfuehrbar"), "{error}");
+    }
+
+    /// Ein haengendes Kommando wird abgebrochen, nicht abgewartet
+    /// (Review R07).
+    ///
+    /// Ohne Frist wartete der Hardwarewaechter unbegrenzt: er meldete nie
+    /// einen Fehlversuch, der letzte bekannte Zustand blieb stehen, und von
+    /// aussen sah alles gut aus. Ein haengender Waechter ist schlimmer als
+    /// ein fehlender.
+    #[test]
+    fn a_hanging_command_is_aborted_not_awaited() {
+        let started = std::time::Instant::now();
+        let result = super::run_with_timeout(
+            "/bin/sleep",
+            &["30".to_owned()],
+            std::time::Duration::from_millis(150),
+        );
+        assert!(result.is_err(), "die Frist muss greifen");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "und sie muss es rechtzeitig tun: {:?}",
+            started.elapsed()
+        );
+        let message = result.err().unwrap_or_default();
+        assert!(message.contains("abgebrochen"), "{message}");
+    }
+
+    /// Ein Kommando, das rechtzeitig antwortet, kommt unveraendert durch.
+    #[test]
+    fn a_prompt_command_returns_its_output() {
+        let output = super::run_with_timeout(
+            "/bin/echo",
+            &["hallo".to_owned()],
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap_or_else(|e| panic!("echo antwortet: {e}"));
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hallo");
     }
 }

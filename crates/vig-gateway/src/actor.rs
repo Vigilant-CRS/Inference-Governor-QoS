@@ -1821,9 +1821,14 @@ fn spawn_hardware_probe(tx: &mpsc::Sender<Msg>) {
                             } else {
                                 ThrottleClass::Limited
                             },
-                            clock: ClockClass::from_mhz(
+                            // Beide Takte, nicht nur das Rechenwerk: eine
+                            // Karte, die den Speicher heruntertaktet, sah
+                            // sonst aus wie eine bei vollem Takt (R07).
+                            clock: ClockClass::from_two_clocks(
                                 gpu.clock_sm_mhz.value().copied(),
                                 gpu.clock_sm_max_mhz.value().copied(),
+                                gpu.clock_mem_mhz.value().copied(),
+                                gpu.clock_mem_max_mhz.value().copied(),
                             ),
                         }
                     })

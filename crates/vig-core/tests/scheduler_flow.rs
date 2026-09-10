@@ -1437,3 +1437,75 @@ fn without_the_operators_approval_a_loosening_hint_changes_nothing() {
         "und ohne sie bleibt es beim Vertrag"
     );
 }
+
+/// Eine Beobachtung landet in der Zelle des Zustands beim **Dispatch**
+/// (Review R07).
+///
+/// Zwischen Start und Ende kann die Karte heruntergetaktet, gedrosselt oder in
+/// einen anderen Leistungsmodus gegangen sein. Wird die Laufzeit dem Zustand
+/// bei der Fertigstellung zugeschrieben, fuellt sie eine Zelle, in der nie
+/// etwas gelaufen ist — und die Prognose liest sie spaeter als Beleg.
+///
+/// Der Test faehrt genau diesen Wechsel: Dispatch unter vollem Takt,
+/// Fertigstellung unter gedrosseltem.
+#[test]
+fn an_observation_lands_in_the_cell_of_the_dispatch_state() {
+    use vig_core::predictor::{ClockClass, StateClass, ThrottleClass};
+
+    let full = StateClass {
+        occupancy: 0,
+        clock: ClockClass::Full,
+        throttle: ThrottleClass::Nominal,
+    };
+    let throttled = StateClass {
+        occupancy: 0,
+        clock: ClockClass::Reduced,
+        throttle: ThrottleClass::Limited,
+    };
+
+    let c = contract(
+        Criticality::Protected,
+        QueuePolicy::Fifo,
+        None,
+        1_000,
+        1_000,
+        &[10],
+    );
+    let mut s = build(vec![c.clone()], 1);
+    s.observe_hardware(full, 1);
+
+    let mut actions = Vec::new();
+    s.on_event(at(0), Event::Arrival(frame(1, 0, 0, &c)), &mut |a| {
+        actions.push(a);
+    });
+    let Some(slot) = actions.iter().find_map(|a| match a {
+        Action::Dispatch { slot, .. } => Some(*slot),
+        _ => None,
+    }) else {
+        panic!("der Request wurde gestartet: {actions:?}");
+    };
+
+    // Zwischen Start und Ende drosselt die Karte.
+    s.observe_hardware(throttled, 1);
+    s.on_event(
+        at(10),
+        Event::Completion {
+            request: RequestId(1),
+            slot,
+        },
+        &mut |_| {},
+    );
+
+    assert_eq!(
+        s.predictor()
+            .observations(ModelIdx(0), VariantIdx(0), full, 1),
+        1,
+        "die Laufzeit gehoert in die Zelle des Zustands beim Dispatch"
+    );
+    assert_eq!(
+        s.predictor()
+            .observations(ModelIdx(0), VariantIdx(0), throttled, 1),
+        0,
+        "und nicht in die des Zustands bei der Fertigstellung"
+    );
+}

@@ -21,6 +21,7 @@ mod calibrate;
 mod doctor;
 mod identity;
 mod profile;
+mod runloop;
 mod serve;
 mod verify;
 
@@ -80,6 +81,14 @@ enum Command {
         /// Number of measurement runs per step.
         #[arg(long, default_value_t = profile::DEFAULT_SAMPLES)]
         samples: usize,
+        /// Release period in microseconds. Without it, back to back.
+        ///
+        /// Same switch, same meaning, same measurement core as `profile`
+        /// (review R08). Back to back is the weaker measurement: waiting one
+        /// period after each answer measures less often when answers are
+        /// slow, and so goes easy on the run exactly when it would get hard.
+        #[arg(long, value_name = "US")]
+        periodic_us: Option<u64>,
         /// Target file. Without one the result goes to stdout.
         ///
         /// Never the template itself: YAML written by a program loses your
@@ -157,9 +166,19 @@ async fn run() -> ExitCode {
         Command::Calibrate {
             config,
             samples,
+            periodic_us,
             out,
             identity,
-        } => Box::pin(calibrate::run(&config, samples, out.as_deref(), &identity)).await,
+        } => {
+            Box::pin(calibrate::run(
+                &config,
+                samples,
+                periodic_us,
+                out.as_deref(),
+                &identity,
+            ))
+            .await
+        }
         Command::Serve {
             config,
             listen,

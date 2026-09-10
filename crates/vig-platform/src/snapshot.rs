@@ -238,7 +238,7 @@ mod tests {
 
     const LINE: &str = "0, NVIDIA GeForce RTX 3070 Laptop GPU, 580.173.02, 8.6, 8192, \
                         80, 1740, 2100, 129.55, [N/A], P0, Disabled, \
-                        0x0000000000000004";
+                        0x0000000000000004, 7001, 7001, GPU-test";
 
     fn snapshot(line: &str, at: u64) -> HardwareSnapshot {
         HardwareSnapshot {
@@ -264,7 +264,10 @@ mod tests {
         // eintrifft.
         let before = snapshot(LINE, 1_000);
         let after = snapshot(
-            &LINE.replace("0x0000000000000004", "0x0000000000000044"),
+            &LINE.replace(
+                "0x0000000000000004, 7001, 7001, GPU-test",
+                "0x0000000000000044, 7001, 7001, GPU-test",
+            ),
             2_000,
         );
         let changes = diff(&before, &after);

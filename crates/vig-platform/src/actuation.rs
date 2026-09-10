@@ -81,6 +81,17 @@ pub enum ActuationError {
         /// Wie lange noch, in Millisekunden.
         remaining_ms: u64,
     },
+    /// Die Beobachtung stammt von **vor** der Anforderung.
+    ///
+    /// Ein Messwert, der aelter ist als das Kommando, sagt nichts darueber,
+    /// ob es gewirkt hat. Ihn als Bestaetigung zu nehmen hiesse, den Zustand
+    /// von vorhin fuer das Ergebnis von jetzt zu halten (Review R10).
+    ObservationTooOld {
+        /// Wann die Aufnahme entstand, Unix-Zeit in Millisekunden.
+        taken_at_ms: u64,
+        /// Wann die Anforderung ausging.
+        requested_at_ms: u64,
+    },
     /// Der **beobachtete** Takt liegt unter dem zugesagten Boden.
     ///
     /// Die Toleranz federt ab, dass Karten auf ihre eigenen Taktstufen runden.
@@ -137,6 +148,14 @@ impl core::fmt::Display for ActuationError {
                 "Zieltakt {} MHz unter dem zugesagten Boden {} MHz; erst die \
                  Zusage aufgeben, dann senken",
                 requested.0, promised_floor.0
+            ),
+            Self::ObservationTooOld {
+                taken_at_ms,
+                requested_at_ms,
+            } => write!(
+                f,
+                "Beobachtung von {taken_at_ms} ms stammt von vor der \
+                 Anforderung ({requested_at_ms} ms); sie belegt nichts"
             ),
             Self::ObservedBelowPromise {
                 observed,
@@ -413,11 +432,26 @@ impl Actuation {
 
         // Beobachten statt annehmen. Ein Kommando, das mit Erfolg
         // zurueckkehrt, hat nichts bewiesen.
-        let observed = observe().and_then(|snap| {
+        let snapshot = observe();
+        let observed_at = snapshot.as_ref().map(|snap| snap.taken_at_ms);
+        let observed = snapshot.and_then(|snap| {
             snap.gpu(gpu_index)
                 .and_then(|gpu| gpu.clock_sm_mhz.value().copied())
                 .map(ClockMhz)
         });
+        // Die Aufnahme muss **nach** der Anforderung entstanden sein. Sonst
+        // beschreibt sie den Zustand davor, und ein Kommando, das nichts
+        // bewirkt hat, saehe genauso aus wie eines, das gewirkt hat
+        // (Review R10).
+        if let Some(taken_at_ms) = observed_at
+            && taken_at_ms < now_ms
+        {
+            self.state = ActuationState::Unconfirmed { requested: clock };
+            return Err(ActuationError::ObservationTooOld {
+                taken_at_ms,
+                requested_at_ms: now_ms,
+            });
+        }
         let Some(actual) = observed else {
             self.state = ActuationState::Unconfirmed { requested: clock };
             return Err(ActuationError::NotObserved {
@@ -499,6 +533,15 @@ impl Actuation {
 /// Beobachtung faengt den Rest.
 pub const LOCK_PATH: &str = "/tmp/vigilant-actuation.lock";
 
+/// Der Sperrpfad **dieser** GPU.
+///
+/// Je Geraet eine Sperre: zwei Governor auf zwei Karten stoeren einander
+/// nicht, und ein gemeinsamer Pfad haette genau das behauptet (Review R10).
+#[must_use]
+pub fn lock_path_for(gpu_index: u32) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!("{LOCK_PATH}.{gpu_index}"))
+}
+
 /// Das Stellglied, das `nvidia-smi` aufruft.
 ///
 /// Braucht Rechte. Ohne sie meldet es [`ActuationError::NotPermitted`] — und
@@ -519,7 +562,7 @@ impl NvidiaSmiActuator {
     /// Sperre haelt. Eine Sperre eines toten Prozesses wird uebernommen — ein
     /// abgestuerzter Governor soll die Karte nicht dauerhaft blockieren.
     pub fn acquire(gpu_index: u32) -> Result<Self, ActuationError> {
-        Self::acquire_at(gpu_index, std::path::Path::new(LOCK_PATH), "nvidia-smi")
+        Self::acquire_at(gpu_index, &lock_path_for(gpu_index), "nvidia-smi")
     }
 
     /// Wie [`Self::acquire`], mit eigenem Sperrpfad und Binary.
@@ -534,25 +577,25 @@ impl NvidiaSmiActuator {
     ) -> Result<Self, ActuationError> {
         use std::io::Write as _;
 
-        // Eine bestehende Sperre eines toten Prozesses uebernehmen: ein
-        // abgestuerzter Governor soll die Karte nicht dauerhaft blockieren.
-        if let Ok(text) = std::fs::read_to_string(lock)
-            && let Ok(pid) = text.trim().parse::<i32>()
-            && std::path::Path::new(&format!("/proc/{pid}")).exists()
-        {
-            return Err(ActuationError::NotExclusive {
-                detail: format!("Prozess {pid} haelt {}", lock.display()),
-            });
-        }
-
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(lock)
-            .map_err(|e| ActuationError::NotPermitted {
-                detail: format!("{}: {e}", lock.display()),
-            })?;
+        // `create_new` heisst `O_EXCL`: das Anlegen gelingt genau einem
+        // Prozess. Vorher stand hier lesen, pruefen, abschneiden — und
+        // zwischen dem Pruefen und dem Schreiben lag ein Fenster, in dem ein
+        // zweiter Governor dieselbe Pruefung bestand. Beide haetten dann die
+        // Karte gestellt, und keiner haette es gemerkt (Review R10).
+        //
+        // Zwei Versuche, und mehr nicht: der erste, danach — falls die Sperre
+        // von einem toten Prozess stammt — ein Aufraeumen und der zweite. Ein
+        // dritter waere eine Schleife gegen einen Gegner, der sie ebenso
+        // faehrt.
+        let mut file = match Self::create_exclusive(lock) {
+            Ok(file) => file,
+            Err(existing) => {
+                Self::reclaim_if_dead(lock, &existing)?;
+                Self::create_exclusive(lock).map_err(|e| ActuationError::NotExclusive {
+                    detail: format!("{}: {e}", lock.display()),
+                })?
+            }
+        };
         write!(file, "{}", std::process::id()).map_err(|e| ActuationError::NotPermitted {
             detail: e.to_string(),
         })?;
@@ -561,6 +604,46 @@ impl NvidiaSmiActuator {
             binary: binary.to_owned(),
             gpu_index,
             lock: Some(lock.to_path_buf()),
+        })
+    }
+
+    /// Legt die Sperrdatei an, oder scheitert, weil es sie schon gibt.
+    fn create_exclusive(lock: &std::path::Path) -> Result<std::fs::File, std::io::Error> {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(lock)
+    }
+
+    /// Raeumt eine Sperre auf, deren Halter nicht mehr lebt.
+    ///
+    /// Ein abgestuerzter Governor soll die Karte nicht dauerhaft blockieren.
+    /// Lebt der Halter noch, ist das ein Befund und kein Hindernis, das man
+    /// wegraeumt.
+    ///
+    /// # Errors
+    ///
+    /// [`ActuationError::NotExclusive`], wenn der Halter lebt oder die Datei
+    /// aus einem anderen Grund nicht wegzubekommen ist.
+    fn reclaim_if_dead(
+        lock: &std::path::Path,
+        cause: &std::io::Error,
+    ) -> Result<(), ActuationError> {
+        if cause.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(ActuationError::NotPermitted {
+                detail: format!("{}: {cause}", lock.display()),
+            });
+        }
+        if let Ok(text) = std::fs::read_to_string(lock)
+            && let Ok(pid) = text.trim().parse::<i32>()
+            && std::path::Path::new(&format!("/proc/{pid}")).exists()
+        {
+            return Err(ActuationError::NotExclusive {
+                detail: format!("Prozess {pid} haelt {}", lock.display()),
+            });
+        }
+        std::fs::remove_file(lock).map_err(|e| ActuationError::NotExclusive {
+            detail: format!("verwaiste Sperre {} nicht entfernbar: {e}", lock.display()),
         })
     }
 
@@ -652,12 +735,17 @@ mod tests {
     fn line(clock: u32) -> String {
         format!(
             "0, NVIDIA GeForce RTX 3070 Laptop GPU, 580.173.02, 8.6, 8192, \
-             80, {clock}, 2100, 129.55, [N/A], P0, Disabled, 0x0000000000000004"
+             80, {clock}, 2100, 129.55, [N/A], P0, Disabled, 0x0000000000000004, 7001, 7001, GPU-test"
         )
     }
 
+    /// Eine Aufnahme mit diesem Takt, entstanden **jetzt**.
+    ///
+    /// `u64::MAX` als Aufnahmezeit heisst hier: nach jeder Anforderung, die
+    /// ein Test stellt. Die Frischepruefung (Review R10) prueft `taken_at_ms
+    /// >= requested_at_ms`, und die Tests hier zielen auf anderes.
     fn snapshot_at(clock: u32) -> impl Fn() -> Option<HardwareSnapshot> {
-        move || Some(parse_output(&line(clock), 1_000))
+        move || Some(parse_output(&line(clock), u64::MAX))
     }
 
     fn policy() -> ActuationPolicy {
@@ -1028,7 +1116,7 @@ mod tests {
         });
         actuation.enable(Box::new(AlwaysOk));
 
-        let at_1470 = || Some(snapshot_with_clock(1470));
+        let at_1470 = || Some(snapshot_taken_at(1470, u64::MAX));
         assert!(
             matches!(
                 actuation.request(ClockMhz(1500), 1000, &at_1470, 0),
@@ -1038,7 +1126,7 @@ mod tests {
         );
 
         // Die Gegenprobe: auf dem Boden selbst wird bestaetigt.
-        let at_1500 = || Some(snapshot_with_clock(1500));
+        let at_1500 = || Some(snapshot_taken_at(1500, u64::MAX));
         assert!(actuation.request(ClockMhz(1500), 2000, &at_1500, 0).is_ok());
     }
 
@@ -1055,13 +1143,94 @@ mod tests {
         }
     }
 
-    /// Ein Messwertsatz mit diesem SM-Takt.
-    fn snapshot_with_clock(mhz: u32) -> crate::HardwareSnapshot {
+    /// Zwei Governor bekommen nicht dieselbe Karte (Review R10).
+    ///
+    /// Vorher stand hier lesen, pruefen, abschneiden — und zwischen dem
+    /// Pruefen und dem Schreiben lag ein Fenster, in dem ein zweiter Prozess
+    /// dieselbe Pruefung bestand. `create_new` schliesst es: das Anlegen
+    /// gelingt genau einem.
+    #[test]
+    fn the_device_lock_is_exclusive() {
+        let dir = std::env::temp_dir().join(format!("vig-lock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock = dir.join("gpu0.lock");
+
+        let first = NvidiaSmiActuator::acquire_at(0, &lock, "/bin/true");
+        assert!(first.is_ok(), "der erste bekommt die Sperre");
+
+        let second = NvidiaSmiActuator::acquire_at(0, &lock, "/bin/true");
+        assert!(
+            matches!(second, Err(ActuationError::NotExclusive { .. })),
+            "der zweite nicht: {second:?}"
+        );
+
+        // Eine verwaiste Sperre eines toten Prozesses wird uebernommen — ein
+        // abgestuerzter Governor soll die Karte nicht dauerhaft blockieren.
+        std::fs::write(&lock, "2147483647").unwrap();
+        assert!(
+            NvidiaSmiActuator::acquire_at(0, &lock, "/bin/true").is_ok(),
+            "eine Sperre ohne lebenden Halter wird uebernommen"
+        );
+
+        drop(first);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Je Geraet eine eigene Sperre.
+    #[test]
+    fn each_device_has_its_own_lock() {
+        assert_ne!(lock_path_for(0), lock_path_for(1));
+    }
+
+    /// Eine Beobachtung von vor der Anforderung belegt nichts (Review R10).
+    ///
+    /// Ein Kommando, das nichts bewirkt hat, saehe sonst genauso aus wie
+    /// eines, das gewirkt hat: beide zeigen den Zustand von vorher.
+    #[test]
+    fn an_observation_from_before_the_request_confirms_nothing() {
+        #[derive(Debug)]
+        struct Ok_;
+        impl Actuator for Ok_ {
+            fn request(&mut self, _: ClockMhz) -> Result<(), ActuationError> {
+                Ok(())
+            }
+            fn restore(&mut self) -> Result<(), ActuationError> {
+                Ok(())
+            }
+        }
+
+        let mut actuation = Actuation::disabled(ActuationPolicy {
+            platform_min: ClockMhz(300),
+            platform_max: ClockMhz(2100),
+            promised_floor: ClockMhz(1000),
+            dwell_ms: 0,
+            tolerance_mhz: 50,
+            settle_ms: 0,
+        });
+        actuation.enable(Box::new(Ok_));
+
+        // Aufnahme bei 500 ms, Anforderung bei 1000 ms.
+        let stale = || Some(snapshot_taken_at(1500, 500));
+        assert!(
+            matches!(
+                actuation.request(ClockMhz(1500), 1_000, &stale, 0),
+                Err(ActuationError::ObservationTooOld { .. })
+            ),
+            "eine Aufnahme von vorher ist keine Bestaetigung"
+        );
+
+        // Die Gegenprobe: dieselbe Aufnahme, nach der Anforderung entstanden.
+        let fresh = || Some(snapshot_taken_at(1500, 1_000));
+        assert!(actuation.request(ClockMhz(1500), 1_000, &fresh, 0).is_ok());
+    }
+
+    /// Ein Messwertsatz mit diesem SM-Takt und dieser Aufnahmezeit.
+    fn snapshot_taken_at(mhz: u32, taken_at_ms: u64) -> crate::HardwareSnapshot {
         crate::collector::parse_output(
             &format!(
-                "0, GPU, 580.173.02, 8.6, 8192, 80, {mhz}, 2100, 129.55, [N/A], P0, Disabled, 0x4"
+                "0, GPU, 580.173.02, 8.6, 8192, 80, {mhz}, 2100, 129.55, [N/A], P0, Disabled, 0x4, 7001, 7001, GPU-test"
             ),
-            1000,
+            taken_at_ms,
         )
     }
 }

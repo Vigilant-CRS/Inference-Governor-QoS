@@ -77,6 +77,39 @@ impl ClockClass {
     /// aus einer fehlenden Zahl wird keine Klasse geraten.
     #[must_use]
     pub fn from_mhz(current: Option<u32>, max: Option<u32>) -> Self {
+        Self::from_two_clocks(current, max, None, None)
+    }
+
+    /// Die Taktklasse aus **beiden** Takten: Rechenwerk und Speicher.
+    ///
+    /// Eine Karte, die den Speicher heruntertaktet und den SM-Takt haelt, sah
+    /// bis hierher aus wie eine bei vollem Takt — und speicherlastige Kernel
+    /// laufen dann trotzdem langsamer (Review R07). Die schlechtere der
+    /// beiden Klassen gewinnt: `Reduced` ist die vorsichtige Antwort, und
+    /// vorsichtig ist hier richtig.
+    ///
+    /// Ist der Speichertakt nicht beobachtbar — auf einer Karte, die ihn
+    /// nicht meldet —, zaehlt allein der SM-Takt. `Unknown` waere hier
+    /// falsch: eine fehlende Zusatzangabe macht die vorhandene nicht wertlos.
+    #[must_use]
+    pub fn from_two_clocks(
+        sm_current: Option<u32>,
+        sm_max: Option<u32>,
+        mem_current: Option<u32>,
+        mem_max: Option<u32>,
+    ) -> Self {
+        let sm = Self::single(sm_current, sm_max);
+        let mem = Self::single(mem_current, mem_max);
+        match (sm, mem) {
+            (Self::Unknown, _) => Self::Unknown,
+            (other, Self::Unknown) => other,
+            (Self::Reduced, _) | (_, Self::Reduced) => Self::Reduced,
+            (Self::Full, Self::Full) => Self::Full,
+        }
+    }
+
+    /// Die Klasse eines einzelnen Taktpaars.
+    fn single(current: Option<u32>, max: Option<u32>) -> Self {
         let (Some(current), Some(max)) = (current, max) else {
             return Self::Unknown;
         };
@@ -1009,6 +1042,49 @@ mod tests {
             Prediction::Fallback {
                 reason: Rejection::NoCell
             }
+        );
+    }
+
+    /// Ein heruntergetakteter Speicher macht die Klasse `Reduced`
+    /// (Review R07).
+    ///
+    /// Der Fall, der vorher unsichtbar war: SM auf vollem Takt, Speicher weit
+    /// darunter. Speicherlastige Kernel laufen dann langsamer, und der
+    /// beobachtete Zustand sagte „voller Takt".
+    #[test]
+    fn a_downclocked_memory_makes_the_class_reduced() {
+        assert_eq!(
+            ClockClass::from_two_clocks(Some(2000), Some(2100), Some(7001), Some(7001)),
+            ClockClass::Full,
+            "beide oben: voller Takt"
+        );
+        assert_eq!(
+            ClockClass::from_two_clocks(Some(2000), Some(2100), Some(810), Some(7001)),
+            ClockClass::Reduced,
+            "der Speicher ist unten, also ist der Betriebspunkt ein anderer"
+        );
+        assert_eq!(
+            ClockClass::from_two_clocks(Some(800), Some(2100), Some(7001), Some(7001)),
+            ClockClass::Reduced,
+            "und umgekehrt genauso"
+        );
+    }
+
+    /// Ein nicht beobachtbarer Speichertakt macht die Aussage nicht wertlos.
+    ///
+    /// `Unknown` waere hier falsch: eine fehlende Zusatzangabe entwertet die
+    /// vorhandene nicht. Ein fehlender **SM**-Takt schon — dann ist ueber den
+    /// Betriebspunkt nichts bekannt.
+    #[test]
+    fn a_missing_memory_clock_leaves_the_sm_clock_standing() {
+        assert_eq!(
+            ClockClass::from_two_clocks(Some(2000), Some(2100), None, None),
+            ClockClass::Full
+        );
+        assert_eq!(
+            ClockClass::from_two_clocks(None, None, Some(7001), Some(7001)),
+            ClockClass::Unknown,
+            "ohne SM-Takt gibt es keine Aussage"
         );
     }
 }

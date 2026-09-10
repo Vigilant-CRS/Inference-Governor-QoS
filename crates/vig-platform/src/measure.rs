@@ -585,7 +585,7 @@ mod tests {
 
     const LINE: &str = "0, NVIDIA GeForce RTX 3070 Laptop GPU, 580.173.02, 8.6, 8192, \
                         80, 1740, 2100, 129.55, [N/A], P0, Disabled, \
-                        0x0000000000000004";
+                        0x0000000000000004, 7001, 7001, GPU-test";
 
     fn cell() -> CellId {
         CellId {
@@ -814,7 +814,10 @@ mod tests {
     fn a_thermal_limit_during_the_cell_discards_it_with_a_reason() {
         let before = parse_output(LINE, 1_000);
         let after = parse_output(
-            &LINE.replace("0x0000000000000004", "0x0000000000000044"),
+            &LINE.replace(
+                "0x0000000000000004, 7001, 7001, GPU-test",
+                "0x0000000000000044, 7001, 7001, GPU-test",
+            ),
             9_000,
         );
         let reason = hardware_invalidates(&before, &after).unwrap();

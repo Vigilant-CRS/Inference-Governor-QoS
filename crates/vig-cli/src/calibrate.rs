@@ -30,7 +30,6 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
 use vig_backend_triton::TritonClient;
 use vig_config::manifest::{ArtifactIdentity, ProfileManifest};
 use vig_config::schema::{Config, ProfileConfig};
@@ -97,40 +96,77 @@ impl Measured {
     }
 }
 
-fn quantiles(mut v: Vec<u64>) -> Measured {
-    v.sort_unstable();
-    let pick = |percent: usize| -> u64 {
-        if v.is_empty() {
-            return 0;
-        }
-        let index = v
-            .len()
-            .saturating_mul(percent)
-            .checked_div(100)
-            .unwrap_or(0)
-            .min(v.len().saturating_sub(1));
-        v.get(index).copied().unwrap_or(0)
+/// Die Quantile einer Messreihe.
+///
+/// Aus dem [`CellRun`](vig_platform::measure::CellRun) und nicht aus einer
+/// nackten Zahlenliste: nur so tragen Freigaben, Fehlschlaege und Ueberzuege
+/// bis hierher, und nur so ist `samples` die Zahl, die auch im Runmanifest
+/// steht (Review R08).
+fn quantiles(run: &vig_platform::measure::CellRun) -> Measured {
+    let pick = |percent: u32| -> u64 {
+        run.quantile_ns(percent)
+            .map_or(0, |ns| ns.checked_div(1_000).unwrap_or(0))
     };
     Measured {
         p50_us: pick(50),
         p95_us: pick(95),
         p99_us: pick(99),
-        samples: u32::try_from(v.len()).unwrap_or(u32::MAX),
+        samples: u32::try_from(run.completed().saturating_add(run.overruns())).unwrap_or(u32::MAX),
     }
 }
 
-/// Misst `samples` Inferenzen nacheinander.
-async fn measure(client: &TritonClient, request: &ModelInferRequest, samples: usize) -> Vec<u64> {
-    let mut out = Vec::with_capacity(samples);
-    for _ in 0..samples {
-        let started = Instant::now();
-        if client.infer(request.clone()).await.is_err() {
-            continue;
-        }
-        out.push(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
+/// Faehrt eine Messreihe auf demselben Kern wie `vig profile` (Review R08).
+///
+/// Vorher mass dieser Befehl Ruecken an Ruecken und uebersprang
+/// fehlgeschlagene Aufrufe stillschweigend — ausgerechnet der Befehl, der
+/// Profile **automatisch in Konfigurationen schreibt**. Zwei Messpfade fuer
+/// dieselbe Groesse, und der eine war systematisch guenstiger als der andere.
+///
+/// Gibt `None` zurueck, wenn die Reihe nicht qualifiziert — zu wenige
+/// verwertbare Messwerte, zu viele Fehlschlaege oder ein Hardwarewechsel
+/// mittendrin. Aus einer verworfenen Reihe darf kein Profil entstehen.
+async fn measure(
+    client: &TritonClient,
+    model: &str,
+    request: &ModelInferRequest,
+    samples: usize,
+    period_us: Option<u64>,
+) -> Option<vig_platform::measure::CellRun> {
+    let run = Box::pin(crate::runloop::run_cell(
+        client,
+        vig_platform::measure::CellId {
+            model: model.to_owned(),
+            concurrency: 1,
+            batch: 1,
+        },
+        request,
+        crate::runloop::RunOptions::qualified(samples, period_us, CALIBRATE_WARMUP),
+    ))
+    .await
+    .ok()?;
+
+    if let Some(reason) = crate::runloop::rejection(&run) {
+        eprintln!(
+            "    Messreihe verworfen: {reason} \
+             (Freigaben {}, Abschluesse {}, Ueberzuege {}, Fehlschlaege {}, \
+             ausgelassen {})",
+            run.releases(),
+            run.completed(),
+            run.overruns(),
+            run.failures(),
+            run.skipped()
+        );
+        return None;
     }
-    out
+    Some(run)
 }
+
+/// Aufwaermlaeufe vor jeder Kalibrierreihe.
+///
+/// Dieselbe Zahl wie in `vig profile`: die erste Anfrage an ein Modell traegt
+/// dessen Initialisierung, und sie in einer Messung zu fuehren macht die
+/// Messung zu einer Aussage ueber den Start.
+const CALIBRATE_WARMUP: usize = 20;
 
 /// Haelt im Hintergrund dauerhaft `count` Auftraege in Flug.
 ///
@@ -186,6 +222,7 @@ struct VariantMeasurement {
 pub(crate) async fn run(
     path: &Path,
     samples: usize,
+    period_us: Option<u64>,
     out: Option<&Path>,
     identity: &IdentityArgs,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
@@ -269,10 +306,23 @@ pub(crate) async fn run(
                 crate::identity::now_rfc3339(),
             );
 
-            for _ in 0..WARMUP {
-                let _ = client.infer(request.clone()).await;
-            }
-            let solo = quantiles(Box::pin(measure(&client, &request, samples)).await);
+            // Der Warmlauf steckt im Messkern; hier keiner mehr.
+            let Some(solo_run) = Box::pin(measure(
+                &client,
+                backend_model,
+                &request,
+                samples,
+                period_us,
+            ))
+            .await
+            else {
+                eprintln!(
+                    "    {logical} -> {backend_model}: keine verwertbare Messreihe; \
+                     die vorhandenen Werte bleiben stehen."
+                );
+                continue;
+            };
+            let solo = quantiles(&solo_run);
             eprintln!("    allein            p50 {:>7} us", solo.p50_us);
 
             // Je zusaetzlich belegtem Slot eine Stufe. Bei einem Slot gibt es
@@ -281,8 +331,19 @@ pub(crate) async fn run(
             for busy in 1..slots {
                 let stop = Arc::new(AtomicBool::new(false));
                 let tasks = spawn_load(&client, &request, busy, &stop);
-                let level = quantiles(Box::pin(measure(&client, &request, samples)).await);
+                let level = Box::pin(measure(
+                    &client,
+                    backend_model,
+                    &request,
+                    samples,
+                    period_us,
+                ))
+                .await;
                 stop_load(&stop, tasks).await;
+                let Some(level) = level.as_ref().map(quantiles) else {
+                    eprintln!("    {busy} belegt: keine verwertbare Messreihe; Stufe faellt aus");
+                    continue;
+                };
                 eprintln!(
                     "    {busy} weitere{}  p50 {:>7} us  ({})",
                     if busy == 1 {
@@ -309,7 +370,7 @@ pub(crate) async fn run(
     }
 
     let pairs = if slots > 1 {
-        Box::pin(measure_pairs(&client, &measurements, samples)).await
+        Box::pin(measure_pairs(&client, &measurements, samples, period_us)).await
     } else {
         eprintln!("\nEin Slot: Modellpaare koennen sich nicht behindern, keine Paarmessung.");
         Vec::new()
@@ -367,6 +428,7 @@ async fn measure_pairs(
     client: &Arc<TritonClient>,
     measurements: &[VariantMeasurement],
     samples: usize,
+    period_us: Option<u64>,
 ) -> Vec<Pair> {
     // Beide Richtungen, und zwar getrennt (NV-11). Bis hierhin wurde nur eine
     // gemessen und das Ergebnis symmetrisch angewandt — genau der Fehler, um
@@ -380,7 +442,18 @@ async fn measure_pairs(
             }
             let stop = Arc::new(AtomicBool::new(false));
             let tasks = spawn_load(client, &co_tenant.request, 1, &stop);
-            let under = quantiles(Box::pin(measure(client, &victim.request, samples)).await);
+            let under = Box::pin(measure(
+                client,
+                &victim.backend_model,
+                &victim.request,
+                samples,
+                period_us,
+            ))
+            .await;
+            let Some(under) = under.as_ref().map(quantiles) else {
+                eprintln!("    Paarmessung ohne verwertbare Reihe; das Paar faellt aus");
+                continue;
+            };
             stop_load(&stop, tasks).await;
 
             let slowdown = slowdown_percent(under.p50_us, victim.solo.p50_us);

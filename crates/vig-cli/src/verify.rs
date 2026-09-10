@@ -13,6 +13,7 @@ use vig_backend_triton::TritonClient;
 use vig_config::manifest::{ManifestComparison, ManifestVerdict, ProfileManifest};
 use vig_config::schema::Resolved;
 use vig_core::ModelIdx;
+use vig_platform::Collector as _;
 use vig_protocol_oip::inference::{ServerMetadataRequest, ServerMetadataResponse};
 
 /// Was der Abgleich einer Variante ergeben hat.
@@ -169,9 +170,15 @@ pub(crate) async fn check(resolved: &Resolved) -> Vec<Checked> {
 
 /// Das Manifest, wie es sich **jetzt** beobachten laesst (NV-03).
 ///
-/// Was nicht beobachtbar ist, bleibt `None` und damit `unknown`. Geraet,
-/// Treiber und Aufteilung stehen bewusst nicht darin: sie sind von hier aus
-/// nicht messbar, und ein geratener Wert waere schlimmer als eine Luecke.
+/// Was nicht beobachtbar ist, bleibt `None` und damit `unknown`. Ein
+/// geratener Wert waere schlimmer als eine Luecke.
+///
+/// Geraet und Treiber standen bis hierher nicht darin, weil sie „von hier aus
+/// nicht messbar" waren. Sie sind es inzwischen: der Hardwarecollector liest
+/// Name, Compute Capability, Speicher und Treiberversion (NV-04), und ohne
+/// diesen Vergleich meldete der Start ein Profil als gueltig, das auf einer
+/// anderen Karte gemessen wurde (Review R07). Die Aufteilung — MIG,
+/// Instanzen, Rate Limiter — bleibt unbeobachtet und damit `unknown`.
 /// Ihre Erfassung ist NV-04.
 fn observed_manifest(
     server: Option<&ServerMetadataResponse>,
@@ -180,6 +187,19 @@ fn observed_manifest(
     backend_model: &str,
 ) -> ProfileManifest {
     let mut manifest = ProfileManifest::default();
+
+    // Das Geraet, auf dem dieser Prozess laeuft. Ein Fehlschlag ist kein
+    // Fehler: ohne `nvidia-smi` bleibt das Feld `unknown`, und unbekannt
+    // heisst hier unbekannt und nicht „passt".
+    if let Ok(snapshot) = vig_platform::NvidiaSmi::default().snapshot()
+        && let Some(gpu) = snapshot.gpu(0)
+    {
+        manifest.device.name = gpu.name.value().cloned();
+        manifest.device.compute_capability = gpu.compute_capability.value().cloned();
+        manifest.device.memory_mib = gpu.memory_total_mib.value().copied();
+        manifest.device.driver = gpu.driver.value().cloned();
+    }
+
     if let (Some(server), Some(model)) = (server, model) {
         let observation = vig_backend_triton::observe(server, model);
         manifest.runtime.server = observation.server;
