@@ -95,11 +95,22 @@ nicht fuer die Karte. `vig doctor` sagt das jetzt vor jeder Messung (ADR-0021).
 Ein externes Codereview mit acht lauffaehigen Gegenproben. Alle acht liefen
 rot; alle acht sind behoben und stehen jetzt in der Regression (ADR-0032).
 
-Zwei davon aendern **gemessene Zahlen**, und zwar nach unten: die laengste
-Versorgungsluecke laeuft ab dem Ablauf des letzten brauchbaren Ergebnisses
-statt ab dessen Fertigstellung, und eine veraltete Lieferung schliesst keine
-Luecke mehr. Aeltere Messberichte dieses Projekts sind damit **nicht** mit
-neuen vergleichbar, wo veraltete Lieferungen vorkamen.
+Zwei davon aendern **gemessene Zahlen**: die laengste Versorgungsluecke laeuft
+ab dem Ablauf des letzten brauchbaren Ergebnisses statt ab dessen
+Fertigstellung, und eine veraltete Lieferung schliesst keine Luecke mehr.
+
+**Neu gemessen, drei Laeufe** ([Bericht](benchmark/gate-m3-r03.md)): die
+Kernzahlen halten. Detektor 20,1–22,4x weniger unabgedeckte Lieferfenster,
+Pose 10,5–12,0x. Beim Detektor waechst die gemeldete Luecke von 90 auf 119 ms
+— das ist die Korrektur, denn bei 84 % Abdeckung kommen dort veraltete
+Lieferungen vor. Bei den uebrigen Stroemen bewegt sie sich in beide
+Richtungen, und das ist Streuung.
+
+Daraus folgt eine Regel: **eine Lueckenzahl aus einem einzelnen Lauf ist keine
+Aussage.** Sie ist ein Maximum ueber ein 30-Sekunden-Fenster, und Maxima
+streuen — bei der Pose auf Tritonseite 54 bis 86 ms zwischen zwei Laeufen
+derselben Konfiguration. Die Abdeckung, die ueber hunderte Perioden mittelt,
+tut es nicht.
 
 Ein dritter aendert das Verhalten generativer Auftraege: die Tokenobergrenze
 ist jetzt garantiert statt geschaetzt und wird bis zu viermal so schnell
