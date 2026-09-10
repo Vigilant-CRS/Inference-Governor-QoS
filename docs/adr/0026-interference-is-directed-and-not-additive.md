@@ -92,3 +92,29 @@ gleichzeitigen Modellen unter Last.
 
 **Die 2x-Regel abschaffen.** Sie ist als Vorschlag brauchbar; falsch war nur,
 sie als allgemeine Wahrheit aufzuschreiben.
+
+## Nachtrag, 10.09.2026: angeschlossen
+
+Bis hierher war dieses ADR eine Beschreibung ohne Wirkung. `vig calibrate`
+mass beide Richtungen, berichtete sie — und warf sie weg. In der
+Konfiguration landete nur `no_corun`, und das sagt „gar nicht zusammen", nie
+„so viel kostet es".
+
+Die Tabelle steht jetzt als `backend.interference` in der Konfiguration und
+wird beim Start in den Scheduler gegeben. Bei jeder Planung wird nachgesehen,
+welche Modelle gerade laufen; ist die Paarung gemessen, kommt ihr Aufschlag
+auf die Prognose.
+
+**Nur wo gemessen.** Eine unbekannte Paarung bekommt keinen erfundenen
+Aufschlag. Der Slot-Belegungsgrad bleibt die Naeherung, die er laut ADR-0006
+immer war, und eine zweite unbelegte Zahl daneben waere schlimmer als keine.
+
+**Nur wo es etwas aendert.** Ein Paar, das ohnehin ueber `no_corun`
+serialisiert wird, bekommt keinen Eintrag: die beiden laufen nie gleichzeitig.
+
+**Die Ursache bleibt offen.** `ConflictKind` wird als `Unspecified`
+geschrieben. Die Messung sagt, **wie viel** dazukommt, nicht **warum** —
+Rechenwerke, Bandbreite, Kapazitaet oder ueberlappende Phasen zu unterscheiden
+braucht mehr als eine Laufzeitdifferenz. Fuer die Planung ist es
+Dokumentation, fuer den Betreiber der Unterschied zwischen „mehr Slots helfen"
+und „mehr Slots helfen nicht".

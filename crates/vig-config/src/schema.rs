@@ -41,6 +41,84 @@ pub struct Config {
     pub models: BTreeMap<String, ModelConfig>,
 }
 
+/// Uebersetzt die gemessene Interferenztabelle in die Kernform (NV-11).
+///
+/// Ein unbekannter Modellname ist ein Befund und keine stille Auslassung: eine
+/// Tabelle, die halb ankommt, plant fuer die Haelfte der Paare mit einer Null,
+/// die niemand gemessen hat.
+fn resolve_interference(
+    pairs: &[InterferencePair],
+    model_names: &[String],
+    findings: &mut Vec<Located>,
+) -> vig_core::interference::Interference {
+    let mut table = vig_core::interference::Interference::new();
+    for (i, pair) in pairs.iter().enumerate() {
+        let path = format!("backend.interference[{i}]");
+        let index = |name: &String| {
+            model_names
+                .iter()
+                .position(|m| m == name)
+                .and_then(|p| u16::try_from(p).ok())
+                .map(vig_core::ModelIdx)
+        };
+        let (Some(victim), Some(co_tenant)) = (index(&pair.victim), index(&pair.co_tenant)) else {
+            findings.push(
+                ConfigError::UnknownModelReference {
+                    name: format!("{} oder {}", pair.victim, pair.co_tenant),
+                }
+                .at(path),
+            );
+            continue;
+        };
+        if victim == co_tenant {
+            findings.push(
+                ConfigError::UnknownModelReference {
+                    name: format!(
+                        "{}: ein Modell stoert sich nicht selbst; das gehoert in den \
+                         Belegungsgrad",
+                        pair.victim
+                    ),
+                }
+                .at(path),
+            );
+            continue;
+        }
+        let added = vig_core::Duration::from_micros(pair.added_us)
+            .unwrap_or(vig_core::Duration::from_nanos_unbounded(0));
+        // Die Ursache bleibt unbestimmt: `vig calibrate` misst die Wirkung,
+        // nicht ihren Grund. Sie zu raten waere eine Aussage ueber die
+        // Hardware, die aus dieser Messung nicht folgt.
+        table.record_pair(
+            victim,
+            co_tenant,
+            added,
+            vig_core::interference::ConflictKind::Unspecified,
+        );
+    }
+    table
+}
+
+/// Wie stark ein Modell ein anderes bremst, gemessen (NV-11, ADR-0026).
+///
+/// **Gerichtet**: `victim` leidet, `co_tenant` stoert. Die Umkehrung ist eine
+/// eigene Zeile und kann sehr andere Zahlen tragen — ein 95-ms-VLM
+/// verlaengert einen 5-ms-Detektor um ein Vielfaches seiner eigenen Laufzeit,
+/// der Detektor das VLM kaum. Eine symmetrische Tabelle waere hier eine
+/// Behauptung.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct InterferencePair {
+    /// Das Modell, dessen Laufzeit sich verlaengert.
+    pub victim: String,
+    /// Das Modell, das gleichzeitig laeuft.
+    pub co_tenant: String,
+    /// Wie viel Laufzeit dazukommt, in Mikrosekunden.
+    ///
+    /// Die absolute Zahl und kein Verhaeltnis: 20 % heissen bei 5 ms etwas
+    /// anderes als bei 95 ms, und geplant wird mit Dauern.
+    pub added_us: u64,
+}
+
 /// Ob und wie der Governor den GPU-Takt stellt (NV-13, ADR-0030).
 ///
 /// ADR-0021 sagt: die Hardware wird gelesen, nie gestellt. ADR-0030 nennt die
@@ -234,6 +312,14 @@ pub struct BackendConfig {
     /// theoretischer Fall.
     #[serde(default = "default_max_inflight_mib")]
     pub max_inflight_mib: u64,
+    /// Die gemessene, gerichtete Interferenztabelle (NV-11, ADR-0026).
+    ///
+    /// Leer heisst: nicht gemessen. Dann bleibt der Slot-Belegungsgrad die
+    /// Naeherung, die er laut ADR-0006 immer war. Gefuellt wird sie von
+    /// `vig calibrate`, das beide Richtungen einzeln misst — bis hierher
+    /// wurden diese Zahlen gemessen, berichtet und **weggeworfen**.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interference: Vec<InterferencePair>,
     /// Ob und wie der Governor den GPU-Takt stellt (NV-13, ADR-0030).
     ///
     /// Nicht gesetzt heisst: gar nicht — der Normalfall. ADR-0021 bleibt die
@@ -1123,6 +1209,8 @@ pub struct Resolved {
     pub hint_policy: vig_core::hints::HintPolicy,
     /// Die Aktuationskonfiguration, falls eine gesetzt ist (NV-13).
     pub actuation: Option<ActuationConfig>,
+    /// Die gemessene Interferenztabelle (NV-11).
+    pub interference: vig_core::interference::Interference,
     /// Die zugesagte Schnittstelle je Modell, in Indexreihenfolge.
     ///
     /// `None`, wo keine hinterlegt ist.
@@ -1533,6 +1621,7 @@ impl Config {
             security: self.backend.security.clone(),
             miss_aware_policy: self.backend.miss_aware_policy,
             actuation: self.backend.actuation.clone(),
+            interference: resolve_interference(&self.backend.interference, &model_names, findings),
             hint_policy: self
                 .backend
                 .hints

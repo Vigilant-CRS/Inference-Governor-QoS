@@ -1509,3 +1509,130 @@ fn an_observation_lands_in_the_cell_of_the_dispatch_state() {
         "und nicht in die des Zustands bei der Fertigstellung"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Die gemessene Interferenz aendert eine Entscheidung (NV-11)
+// ---------------------------------------------------------------------------
+
+/// Eine gemessene Interferenz schlaegt bis in die Planung durch.
+///
+/// Der Befund aus dem Review: die Tabelle war gebaut, getestet und an nichts
+/// angeschlossen — `vig calibrate` mass beide Richtungen, berichtete sie und
+/// **warf sie weg**. Der Belegungsgrad blieb die einzige Naeherung, und der
+/// weiss nicht, **wer** danebenlaeuft.
+///
+/// Geprueft wird die gemeldete Laufzeit: sie ist die Zahl, mit der
+/// Look-ahead, Slotbelegung und Machbarkeit rechnen.
+#[test]
+fn measured_interference_reaches_the_planned_runtime() {
+    use vig_core::interference::{ConflictKind, Interference};
+
+    let slow = contract(
+        Criticality::BestEffort,
+        QueuePolicy::Fifo,
+        None,
+        10_000,
+        10_000,
+        &[200],
+    );
+    let fast = contract(
+        Criticality::Protected,
+        QueuePolicy::Fifo,
+        None,
+        10_000,
+        10_000,
+        &[10],
+    );
+
+    let planned = |table: Option<Interference>| {
+        let mut s = build(vec![slow.clone(), fast.clone()], 2);
+        if let Some(table) = table {
+            s.set_interference(table);
+        }
+        // Das langsame Modell belegt einen Slot.
+        let mut actions = Vec::new();
+        s.on_event(at(0), Event::Arrival(frame(1, 0, 0, &slow)), &mut |a| {
+            actions.push(a);
+        });
+        // Und jetzt der schnelle Kandidat daneben.
+        let mut actions = Vec::new();
+        s.on_event(at(1), Event::Arrival(frame(2, 1, 1, &fast)), &mut |a| {
+            actions.push(a);
+        });
+        actions.iter().find_map(|a| match a {
+            Action::Dispatch {
+                predicted_runtime, ..
+            } => Some(*predicted_runtime),
+            _ => None,
+        })
+    };
+
+    let Some(without) = planned(None) else {
+        panic!("ohne Tabelle laeuft er");
+    };
+
+    let mut table = Interference::new();
+    // Das schnelle Modell leidet unter dem langsamen: 40 ms obendrauf.
+    table.record_pair(
+        ModelIdx(1),
+        ModelIdx(0),
+        ms(40),
+        ConflictKind::MemoryBandwidth,
+    );
+    let Some(with) = planned(Some(table)) else {
+        panic!("mit Tabelle laeuft er auch");
+    };
+
+    assert_eq!(
+        with.as_nanos(),
+        without.as_nanos().saturating_add(ms(40).as_nanos()),
+        "die gemessenen 40 ms stehen in der Zahl, mit der geplant wird"
+    );
+}
+
+/// Eine ungemessene Paarung bekommt keinen erfundenen Aufschlag.
+///
+/// Die Gegenprobe. Eine Tabelle, die fuer unbekannte Paare etwas annimmt,
+/// waere schlimmer als keine: der Belegungsgrad ist die dokumentierte
+/// Naeherung (ADR-0006), und eine erfundene Zahl daneben waere eine zweite,
+/// unbelegte.
+#[test]
+fn an_unmeasured_pairing_gets_no_invented_surcharge() {
+    use vig_core::interference::{ConflictKind, Interference};
+
+    let slow = contract(
+        Criticality::BestEffort,
+        QueuePolicy::Fifo,
+        None,
+        10_000,
+        10_000,
+        &[200],
+    );
+    let fast = contract(
+        Criticality::Protected,
+        QueuePolicy::Fifo,
+        None,
+        50,
+        1_000,
+        &[10],
+    );
+
+    let mut table = Interference::new();
+    // Gemessen ist die **andere** Richtung.
+    table.record_pair(ModelIdx(0), ModelIdx(1), ms(40), ConflictKind::Compute);
+
+    let mut s = build(vec![slow.clone(), fast.clone()], 2);
+    s.set_interference(table);
+    let mut actions = Vec::new();
+    s.on_event(at(0), Event::Arrival(frame(1, 0, 0, &slow)), &mut |a| {
+        actions.push(a);
+    });
+    let mut actions = Vec::new();
+    s.on_event(at(1), Event::Arrival(frame(2, 1, 1, &fast)), &mut |a| {
+        actions.push(a);
+    });
+    assert!(
+        actions.iter().any(|a| matches!(a, Action::Dispatch { .. })),
+        "die Gegenrichtung ist nicht gemessen und wird nicht geraten"
+    );
+}

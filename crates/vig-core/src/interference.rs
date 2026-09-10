@@ -130,7 +130,7 @@ struct Combination {
 pub const MAX_COMBINATIONS: usize = 64;
 
 /// Die gerichtete Interferenztabelle.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Interference {
     /// `added_us[victim][co_tenant]`, in Mikrosekunden.
     added_us: Vec<u32>,

@@ -69,7 +69,7 @@ was that no documented configuration step could reach them at all
 | Application hints (action horizon, elevated, mode) | Reachable | `backend.hints:` plus a bearer token; the authority is derived from the token and printed at startup ([ADR-0029](adr/0029-a-hint-may-tighten-never-loosen.md)) |
 | Clock actuation | Reachable | `backend.actuation:`; needs the permission to set clocks, which this machine does not have ([ADR-0030](adr/0030-actuation-is-an-exception-and-must-be-observed.md)) |
 | State-aware runtime prediction | Built | shadow only; no configuration switches it to deciding ([ADR-0023](adr/0023-state-aware-prediction-runs-in-the-shadow-first.md)) |
-| Directed interference table | Built | the table is empty until a measurement campaign fills it ([ADR-0026](adr/0026-interference-is-directed-and-not-additive.md)) |
+| Directed interference table | Reachable | `backend.interference:`, written by `vig calibrate`; a measured pair adds its surcharge to the planned runtime, an unmeasured one adds nothing ([ADR-0026](adr/0026-interference-is-directed-and-not-additive.md)) |
 | Validity-aware dependency graph | Built | needs a protocol extension ([ADR-0028](adr/0028-a-fusion-needs-a-common-capture.md)) |
 | Hardware observation | **Qualified** | on where `nvidia-smi` exists; read-only, no root |
 | Bearer-token authentication, mTLS | Reachable | `backend.security` |

@@ -29,7 +29,7 @@ use crate::profile::WARMUP;
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use vig_backend_triton::TritonClient;
 use vig_config::manifest::{ArtifactIdentity, ProfileManifest};
 use vig_config::schema::{Config, ProfileConfig};
@@ -146,6 +146,7 @@ async fn measure(
     .ok()?;
 
     if let Some(reason) = crate::runloop::rejection(&run) {
+        DISCARDED.fetch_add(1, Ordering::Relaxed);
         eprintln!(
             "    Messreihe verworfen: {reason} \
              (Freigaben {}, Abschluesse {}, Ueberzuege {}, Fehlschlaege {}, \
@@ -158,7 +159,43 @@ async fn measure(
         );
         return None;
     }
+    QUALIFIED.fetch_add(1, Ordering::Relaxed);
     Some(run)
+}
+
+/// Wie viele Messreihen verworfen wurden, und wie viele nicht.
+///
+/// Prozessweit, weil die Zahl am Ende **einmal** stehen soll. Ein Lauf, der
+/// zwanzig Reihen verwirft und zwei behaelt, hat nichts kalibriert — und das
+/// soll nicht zwischen zwanzig Einzelmeldungen untergehen.
+static DISCARDED: AtomicU64 = AtomicU64::new(0);
+static QUALIFIED: AtomicU64 = AtomicU64::new(0);
+
+/// Sagt am Ende, was die Qualifikation ergeben hat.
+///
+/// Ohne diese Zeile liest sich ein Lauf mit lauter verworfenen Reihen wie ein
+/// Lauf mit ein paar Warnungen. Er ist aber etwas anderes: er hat nichts
+/// gemessen.
+fn report_qualification() {
+    let discarded = DISCARDED.load(Ordering::Relaxed);
+    let qualified = QUALIFIED.load(Ordering::Relaxed);
+    let total = qualified.saturating_add(discarded);
+    if total == 0 {
+        return;
+    }
+    eprintln!("\nQualifikation: {qualified} von {total} Messreihen verwertbar.");
+    if discarded == 0 {
+        return;
+    }
+    eprintln!(
+        "  {discarded} verworfen. Der haeufigste Grund auf einem Laptop oder \n\
+         \x20 einer Karte unter Leistungslimit ist ein wandernder Takt: die \n\
+         \x20 Messung gilt dann fuer keinen Betriebspunkt. Abhilfe ist ein \n\
+         \x20 festgehaltener Takt (`nvidia-smi -lgc`, braucht Rechte) oder \n\
+         \x20 eine Maschine, die ihren Takt haelt. Die Schwelle wird dafuer \n\
+         \x20 **nicht** gelockert — eine Messung, die jeden Betriebspunkt \n\
+         \x20 mittelt, beschreibt keinen."
+    );
 }
 
 /// Aufwaermlaeufe vor jeder Kalibrierreihe.
@@ -369,16 +406,17 @@ pub(crate) async fn run(
         }
     }
 
-    let pairs = if slots > 1 {
+    let (pairs, directed) = if slots > 1 {
         Box::pin(measure_pairs(&client, &measurements, samples, period_us)).await
     } else {
         eprintln!("\nEin Slot: Modellpaare koennen sich nicht behindern, keine Paarmessung.");
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
 
     let cooperative = Box::pin(measure_all_cooperative(&config)).await;
 
-    apply(&mut config, &measurements, &pairs);
+    apply(&mut config, &measurements, &pairs, &directed);
+    report_qualification();
     apply_cooperative(&mut config, &cooperative);
     report(&pairs);
 
@@ -429,7 +467,7 @@ async fn measure_pairs(
     measurements: &[VariantMeasurement],
     samples: usize,
     period_us: Option<u64>,
-) -> Vec<Pair> {
+) -> (Vec<Pair>, Vec<Directed>) {
     // Beide Richtungen, und zwar getrennt (NV-11). Bis hierhin wurde nur eine
     // gemessen und das Ergebnis symmetrisch angewandt — genau der Fehler, um
     // den es geht.
@@ -501,7 +539,7 @@ async fn measure_pairs(
         });
     }
     report_asymmetry(&directed);
-    pairs
+    (pairs, directed)
 }
 
 /// Nennt die Paare, deren Richtungen deutlich auseinanderliegen (NV-11).
@@ -799,7 +837,12 @@ fn apply_cooperative(config: &mut Config, measured: &[CooperativeMeasurement]) {
     }
 }
 
-fn apply(config: &mut Config, measurements: &[VariantMeasurement], pairs: &[Pair]) {
+fn apply(
+    config: &mut Config,
+    measurements: &[VariantMeasurement],
+    pairs: &[Pair],
+    directed: &[Directed],
+) {
     for (name, model) in &mut config.models {
         for variant in &mut model.variants {
             let Some(m) = measurements
@@ -827,6 +870,31 @@ fn apply(config: &mut Config, measurements: &[VariantMeasurement], pairs: &[Pair
         if !config.backend.no_corun.contains(&entry) {
             config.backend.no_corun.push(entry);
         }
+    }
+
+    // Die gerichtete Tabelle selbst (NV-11). Bis hierher wurden diese Zahlen
+    // gemessen, berichtet und **weggeworfen** — `no_corun` allein sagt nur
+    // „gar nicht zusammen" und nie „so viel kostet es".
+    //
+    // Ein Paar, das ohnehin serialisiert wird, braucht keinen Aufschlag: die
+    // beiden laufen nie gleichzeitig.
+    config.backend.interference.clear();
+    for entry in directed {
+        let serialised = pairs.iter().any(|p| {
+            (p.a == entry.victim && p.b == entry.co_tenant)
+                || (p.b == entry.victim && p.a == entry.co_tenant)
+        });
+        if serialised || entry.added_us == 0 {
+            continue;
+        }
+        config
+            .backend
+            .interference
+            .push(vig_config::schema::InterferencePair {
+                victim: entry.victim.clone(),
+                co_tenant: entry.co_tenant.clone(),
+                added_us: entry.added_us,
+            });
     }
 }
 

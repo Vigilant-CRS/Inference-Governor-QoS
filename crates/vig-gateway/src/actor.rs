@@ -585,6 +585,9 @@ fn spawn_owned(
     // NV-18: dasselbe fuer die Hinweispolicy. Ohne `hints:` in der
     // Konfiguration ist sie geschlossen und nimmt nichts an.
     scheduler.set_hint_policy(config.hint_policy);
+    // NV-11: die gemessene Interferenztabelle. Leer heisst „nicht gemessen",
+    // und dann bleibt der Belegungsgrad die Naeherung (ADR-0006).
+    scheduler.set_interference(config.interference.clone());
 
     // G-010: Profile, deren Umgebung sich geaendert hat, werden vorsichtiger
     // geplant, bis der Estimator eigene Messungen hat (ADR-0016).

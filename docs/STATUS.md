@@ -83,7 +83,7 @@ nicht fuer die Karte. `vig doctor` sagt das jetzt vor jeder Messung (ADR-0021).
 | NV-08 TensorRT ueber Triton | fertig, gemessen — kein Codepfad noetig | [benchmark/tensorrt.md](benchmark/tensorrt.md) |
 | NV-09 TensorRT Direct | **offen**, braucht CUDA SDK | — |
 | NV-10 Semantik der Varianten | fertig | [0025](adr/0025-the-same-shape-is-not-the-same-meaning.md) |
-| NV-11 Gerichtete Interferenz | Tabelle und gerichtete Messung fertig; **nicht** an die Zulassung angeschlossen | [0026](adr/0026-interference-is-directed-and-not-additive.md) |
+| NV-11 Gerichtete Interferenz | angeschlossen: `backend.interference` geht in die Planung ein. **Auf dieser Maschine nicht messbar** — der Takt wandert waehrend jeder Reihe, alle vier Messreihen verworfen | [0026](adr/0026-interference-is-directed-and-not-additive.md), [Messung](benchmark/interference.md) |
 | NV-13 Energieregler | fertig, opt-in, beobachtet statt angenommen; auf dieser Maschine fehlen die Rechte | [0030](adr/0030-actuation-is-an-exception-and-must-be-observed.md) |
 | NV-16 Fortschrittskosten | Code fertig; der Prefill-Anteil ist auf dieser Maschine **nicht gemessen** — der `vlm` im Benchmark ist ein ResNet-Platzhalter ohne Texteingang | [0031](adr/0031-a-re-prefill-is-not-free-progress.md) |
 | NV-17 Gueltigkeitsbewusster DAG | Kern fertig; **nicht** an das Gateway angeschlossen | [0028](adr/0028-a-fusion-needs-a-common-capture.md) |
@@ -118,8 +118,9 @@ Aussage, und sie steht jetzt getrennt in der
 Seit dem Review **erreichbar** (Konfigurationsschritt vorhanden, ein Test
 belegt, dass er eine Entscheidung aendert): die Missbudget-Policy
 (`backend.miss_aware_policy`), die Anwendungshinweise (`backend.hints`), der
-Mindestfortschritt fuer Hintergrundlast und der Taktregler
-(`backend.actuation`). Erreichbar heisst **nicht** qualifiziert: ob das
+Mindestfortschritt fuer Hintergrundlast, der Taktregler (`backend.actuation`)
+und die gerichtete Interferenztabelle (`backend.interference`, geschrieben von
+`vig calibrate`). Erreichbar heisst **nicht** qualifiziert: ob das
 Einschalten auf einer bestimmten Last besser ist, sagt keine Messung.
 
 Diese Bausteine sind weiterhin nur **gebaut** und tun im Betrieb nichts:
@@ -130,9 +131,6 @@ Diese Bausteine sind weiterhin nur **gebaut** und tun im Betrieb nichts:
   anhand von `vig_predictor_more_conservative_total` und
   `vig_predictor_more_optimistic_total` — eine Policy, die nur mehr ablehnt,
   haelt jede Zusage ein und ist trotzdem wertlos.
-- **Die Interferenztabelle (NV-11)** ist leer, bis eine Messkampagne sie
-  fuellt. Bis dahin bleibt der Slot-Belegungsgrad die Naeherung, die er laut
-  ADR-0006 immer war.
 - **Der Abhaengigkeitsgraph (NV-17)** braucht eine Zusage vom Client, welche
   Anfrage zu welcher Aufnahme gehoert. Das ist eine Protokollerweiterung, die
   ohne benannten Pilotfall nicht sinnvoll zu entwerfen ist.

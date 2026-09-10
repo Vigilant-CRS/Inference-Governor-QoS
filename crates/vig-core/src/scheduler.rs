@@ -28,6 +28,7 @@ use crate::estimator::{MarginController, RuntimeEstimator};
 use crate::feasibility::{DEFAULT_HORIZON, ExpectedArrival, GuardVerdict, guard_protected};
 use crate::hints::{Effect, Hint, HintPolicy, Hints, Rejection};
 use crate::ids::{MAX_MODELS, ModelIdx, RequestId, SlotIdx, VariantIdx};
+use crate::interference::{Interference, InterferenceVerdict};
 use crate::metrics::Metrics;
 use crate::model::{ContractError, ModelContract};
 use crate::overload::{OverloadController, OverloadState, PressureSample};
@@ -269,6 +270,11 @@ pub struct Scheduler {
     usable_until: [Option<Instant>; MAX_MODELS],
     /// Aufeinanderfolgende Requests ohne gueltiges Ergebnis je Modell.
     consecutive_misses: [u32; MAX_MODELS],
+    /// Die gemessene, gerichtete Interferenz zwischen Modellen (NV-11).
+    ///
+    /// Leer heisst: nicht gemessen. Dann bleibt der Slot-Belegungsgrad die
+    /// Naeherung, die er laut ADR-0006 immer war.
+    interference: Interference,
     /// Die zustandsabhaengige Prognose (NV-06).
     ///
     /// Laeuft per Voreinstellung im Schatten: sie wird gefuettert und
@@ -380,6 +386,7 @@ impl Scheduler {
             variant_states: [VariantState::default(); MAX_MODELS],
             next_expected: [None; MAX_MODELS],
             arrivals: [crate::arrival::ArrivalTracker::default(); MAX_MODELS],
+            interference: Interference::new(),
             last_valid: [None; MAX_MODELS],
             usable_until: [None; MAX_MODELS],
             consecutive_misses: [0; MAX_MODELS],
@@ -1511,6 +1518,15 @@ impl Scheduler {
                 degrade: self.overload.state().forces_degradation(),
             },
         );
+        // NV-11: die gemessene, gerichtete Interferenz kommt auf die
+        // Prognose obendrauf — aber nur, wo sie gemessen ist. Der
+        // Belegungsgrad bleibt die Naeherung fuer alles andere (ADR-0006), und
+        // eine unbekannte Paarung bekommt keinen erfundenen Aufschlag.
+        //
+        // Bis hierher war die Tabelle gebaut, getestet und an nichts
+        // angeschlossen: gemessen, berichtet, weggeworfen.
+        let added = self.measured_interference(model);
+
         match resolution {
             Resolution::Feasible(sel) => Some(Plan {
                 variant: sel.variant,
@@ -1520,10 +1536,12 @@ impl Scheduler {
                     sel.variant,
                     sel.feasibility.start,
                 ),
-                predicted_runtime: sel
-                    .feasibility
-                    .finish
-                    .saturating_since(sel.feasibility.start),
+                predicted_runtime: with_interference(
+                    sel.feasibility
+                        .finish
+                        .saturating_since(sel.feasibility.start),
+                    added,
+                ),
                 feasible: true,
             }),
             Resolution::Infeasible { fastest } => Some(Plan {
@@ -1534,14 +1552,68 @@ impl Scheduler {
                     fastest.variant,
                     fastest.feasibility.start,
                 ),
-                predicted_runtime: fastest
-                    .feasibility
-                    .finish
-                    .saturating_since(fastest.feasibility.start),
+                predicted_runtime: with_interference(
+                    fastest
+                        .feasibility
+                        .finish
+                        .saturating_since(fastest.feasibility.start),
+                    added,
+                ),
                 feasible: false,
             }),
             Resolution::NoSlot | Resolution::NoVariant => None,
         }
+    }
+
+    /// Was die gemessene Interferenz zu diesem Modell gerade dazurechnet
+    /// (NV-11, ADR-0026).
+    ///
+    /// Nachbarn sind die Modelle, die **jetzt** laufen. Ist die Paarung nicht
+    /// gemessen, kommt nichts dazu: eine unbekannte Paarung bekommt keinen
+    /// erfundenen Aufschlag, und der Belegungsgrad bleibt die Naeherung, die
+    /// er laut ADR-0006 immer war.
+    ///
+    /// Gerichtet, nicht symmetrisch: ein 95-ms-VLM verlaengert einen
+    /// 5-ms-Detektor um ein Vielfaches seiner eigenen Laufzeit, der Detektor
+    /// das VLM kaum.
+    fn measured_interference(&self, model: ModelIdx) -> Duration {
+        if self.interference.measured_pairs() == 0 {
+            return Duration::from_nanos_unbounded(0);
+        }
+        // Feste Groesse ohne Allokation: der Kern allokiert nicht im
+        // Entscheidungspfad.
+        let mut neighbours = [ModelIdx(0); MAX_MODELS];
+        let mut count = 0_usize;
+        for entry in self.inflight.iter() {
+            let other = entry.descriptor.logical_model;
+            if other == model {
+                continue;
+            }
+            if neighbours
+                .get(..count)
+                .is_some_and(|seen| seen.contains(&other))
+            {
+                continue;
+            }
+            if let Some(slot) = neighbours.get_mut(count) {
+                *slot = other;
+                count = count.saturating_add(1);
+            }
+        }
+        let Some(neighbours) = neighbours.get(..count) else {
+            return Duration::from_nanos_unbounded(0);
+        };
+        match self.interference.lookup(model, neighbours) {
+            InterferenceVerdict::Measured { added, .. } => added,
+            InterferenceVerdict::Alone
+            | InterferenceVerdict::UnmeasuredPair { .. }
+            | InterferenceVerdict::NotExtrapolated { .. } => Duration::from_nanos_unbounded(0),
+        }
+    }
+
+    /// Die gemessene Interferenztabelle setzen (NV-11).
+    pub fn set_interference(&mut self, table: Interference) {
+        self.interference = table;
     }
 
     /// Die optimistisch geschaetzte Fertigstellung einer Variante (ADR-0010).
@@ -1743,4 +1815,13 @@ impl Scheduler {
             }
         }
     }
+}
+
+/// Rechnet die gemessene Interferenz auf eine Prognose.
+///
+/// Eine eigene Funktion, weil beide Planzweige sie brauchen und weil sie
+/// saettigen muss: eine Dauer, die ueberlaeuft, waere eine Zusage, die
+/// niemand einhalten kann.
+fn with_interference(base: Duration, added: Duration) -> Duration {
+    Duration::from_nanos_unbounded(base.as_nanos().saturating_add(added.as_nanos()))
 }
