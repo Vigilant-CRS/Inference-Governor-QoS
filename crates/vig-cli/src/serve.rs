@@ -11,6 +11,9 @@ use vig_backend_triton::{
 };
 use vig_config::Config;
 use vig_gateway::{GatewayService, MonotonicClock, actor};
+use vig_platform::{
+    Actuation, ActuationPolicy, ClockMhz, Collector as _, NvidiaSmi, NvidiaSmiActuator,
+};
 use vig_protocol_oip::inference::grpc_inference_service_server::GrpcInferenceServiceServer;
 
 /// Startet den Gateway und laeuft, bis ein Abbruchsignal kommt.
@@ -45,6 +48,12 @@ pub(crate) async fn run(
     // aendern kann, ist eine Warnung.
     let mut resolved = config.resolve()?;
 
+    // NV-13: der Taktregler, falls der Betreiber ihn eingeschaltet hat. Vor
+    // dieser Zeile war er gebaut, getestet und durch keine Konfiguration
+    // erreichbar (Review R09). Er bleibt bis zum Ende dieser Funktion am
+    // Leben: sein `Drop` gibt den Takt zurueck.
+    let mut actuation = start_actuation(resolved.actuation.as_ref());
+
     let clock = MonotonicClock::start();
     let backend = Arc::new(TritonClient::new(&resolved.backend_endpoint));
     report_backend_capabilities(&backend).await;
@@ -72,6 +81,16 @@ pub(crate) async fn run(
         let tokens = vig_gateway::auth::Tokens::load(path)
             .map_err(|e| format!("{}: {e}", path.display()))?;
         tracing::info!(tokens = tokens.len(), "Bearer-Token-Pruefung aktiv");
+        // Die Kennungen, die diese Token belegen (NV-18). Der Betreiber
+        // braucht die Zahl fuer `backend.hints.authority`; ohne sie waere die
+        // Hinweispolicy zwar konfigurierbar, aber nicht ausfuellbar. Die
+        // Token selbst stehen hier nicht.
+        for authority in tokens.authorities() {
+            tracing::info!(
+                authority = authority.0,
+                "Hinweis-Kennung eines hinterlegten Tokens"
+            );
+        }
         service = service.with_tokens(tokens);
     }
 
@@ -180,6 +199,15 @@ pub(crate) async fn run(
         remaining_ms = remaining.as_millis(),
         "kein neuer Verkehr; laufende Arbeit wird abgeschlossen"
     );
+    // Der Takt gehoert zurueck, bevor der Prozess endet — und zwar auch
+    // dann, wenn der Drain scheitert.
+    if let Some(actuation) = actuation.as_mut() {
+        match actuation.restore() {
+            Ok(()) => tracing::info!("GPU-Takt zurueckgegeben"),
+            Err(error) => tracing::warn!(%error, "der GPU-Takt liess sich nicht zurueckgeben"),
+        }
+    }
+
     match handle.drain(remaining).await {
         Ok(true) => {
             tracing::info!("alle Requests beantwortet, Governor beendet");
@@ -214,6 +242,68 @@ const DRAIN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
 /// Kubernetes-Pod-Ende und systemd senden es. Nur auf Ctrl-C zu hoeren hiess:
 /// im Betrieb wird der Governor immer hart getoetet, und jede Drain-Logik ist
 /// wirkungslos.
+/// Schaltet den Taktregler ein, wenn der Betreiber ihn konfiguriert hat
+/// (NV-13, ADR-0030).
+///
+/// Gibt `None` zurueck, wenn keine Aktuation konfiguriert ist — der
+/// Normalfall — oder wenn die Stellbefugnis nicht zu bekommen war. Beides ist
+/// **kein** Startfehler: ein Governor ohne Stellbefugnis ist ein
+/// funktionierender Governor, und ADR-0021 bleibt die Regel.
+///
+/// Was hier passiert, ist ein Betriebspunkt und keine Regelung: der Takt wird
+/// einmal angefordert und beim Beenden zurueckgegeben. Wann eine Anhebung
+/// sich waehrend des Betriebs lohnt, ist eine Messfrage und braucht eine
+/// Installation, auf der das Stellen ueberhaupt erlaubt ist.
+fn start_actuation(config: Option<&vig_config::schema::ActuationConfig>) -> Option<Actuation> {
+    let config = config?;
+    let policy = ActuationPolicy {
+        platform_min: ClockMhz(config.platform_min_mhz),
+        platform_max: ClockMhz(config.platform_max_mhz),
+        promised_floor: ClockMhz(config.promised_floor_mhz),
+        dwell_ms: config.dwell_ms,
+        tolerance_mhz: config.tolerance_mhz,
+        settle_ms: config.settle_ms,
+    };
+    let mut actuation = Actuation::disabled(policy);
+
+    let actuator = match NvidiaSmiActuator::acquire(config.gpu_index) {
+        Ok(actuator) => actuator,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "keine Stellbefugnis fuer die GPU; der Governor laeuft ohne \
+                 Aktuation weiter"
+            );
+            return None;
+        }
+    };
+    actuation.enable(Box::new(actuator));
+
+    let gpu = config.gpu_index;
+    let now_ms = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+    };
+    // Frisch beobachten, nicht auf einen Zustand von vorhin schauen: die
+    // Bestaetigung soll die Karte **jetzt** zeigen.
+    let observe = || NvidiaSmi::default().snapshot().ok();
+    match actuation.request(ClockMhz(config.hold_mhz), now_ms(), &observe, gpu) {
+        Ok(confirmed) => tracing::info!(
+            requested = config.hold_mhz,
+            confirmed = confirmed.0,
+            "GPU-Takt gestellt und beobachtet"
+        ),
+        Err(error) => tracing::warn!(
+            %error,
+            requested = config.hold_mhz,
+            "der GPU-Takt liess sich nicht bestaetigen; geplant wird weiter \
+             mit dem beobachteten Zustand"
+        ),
+    }
+    Some(actuation)
+}
+
 async fn shutdown_signal() {
     #[cfg(unix)]
     {

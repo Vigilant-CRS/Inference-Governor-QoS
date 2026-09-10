@@ -42,23 +42,42 @@ Three levels are used throughout, and the difference matters:
 
 ## Features
 
-Not everything in the code is meant to be switched on. Three things are built,
-tested, and deliberately inert:
+Four states, not two. The review of 10 September 2026 found the difference
+mattering: several features were described as "off by default" when the truth
+was that no documented configuration step could reach them at all
+([ADR-0032](adr/0032-four-promises-that-fell-apart-between-components.md)).
 
-| Feature | State | Default |
+| State | What it means |
+|---|---|
+| **Built** | Compiles, has unit tests. No product code calls it. |
+| **Reachable** | A documented configuration step switches it on, and a test proves that step changes a real decision. |
+| **Connected** | On by default, or on wherever its configuration block appears. Part of the normal path. |
+| **Qualified** | Measured on this configuration. Numbers exist and are published. |
+
+| Feature | State | How to switch it on |
 |---|---|---|
-| Freshness-aware admission, supersession, look-ahead | **Qualified** | on |
+| Freshness-aware admission, supersession, look-ahead | **Qualified** | always on |
 | Variant selection by quality | **Qualified** | on where variants are interchangeable |
-| Cooperative decomposition of generative jobs | **Qualified** | on where `cooperative:` is configured |
-| Slot credits with proof-based release | **Qualified** | on |
-| Weakly-hard monitoring (M/K/L) | Built and tested | on where a `miss_budget` is configured |
-| Weakly-hard **policy** — the budget influencing dispatch | Built and tested | **off** ([ADR-0027](adr/0027-a-miss-budget-that-decides-not-only-observes.md)) |
-| State-aware runtime prediction | Built and tested | **shadow only** ([ADR-0023](adr/0023-state-aware-prediction-runs-in-the-shadow-first.md)) |
-| Directed interference table | Built and tested | **not connected** — the table is empty until a measurement campaign fills it ([ADR-0026](adr/0026-interference-is-directed-and-not-additive.md)) |
-| Validity-aware dependency graph | Built and tested | **not connected** — needs a protocol extension ([ADR-0028](adr/0028-a-fusion-needs-a-common-capture.md)) |
+| Cooperative decomposition of generative jobs | **Qualified** | `cooperative:` on the model |
+| Context-dependent progress cost for generative jobs | Connected | `cooperative.prefill_per_token_us`; **not measured on this machine** ([ADR-0031](adr/0031-a-re-prefill-is-not-free-progress.md)) |
+| Slot credits with proof-based release | **Qualified** | always on |
+| Active per-backend readiness probe | Connected | always on |
+| Payload budget bound to execution, not to the client | Connected | `backend.max_inflight_mib` |
+| Weakly-hard monitoring (M/K/L) | Connected | `miss_budget` on the contract |
+| Minimum background progress | Reachable | `minimum_background_progress_pct` plus `consumer_period_ms` and `observation_window` |
+| Weakly-hard **policy** — the budget influencing dispatch | Reachable | `backend.miss_aware_policy: true` ([ADR-0027](adr/0027-a-miss-budget-that-decides-not-only-observes.md)) |
+| Application hints (action horizon, elevated, mode) | Reachable | `backend.hints:` plus a bearer token; the authority is derived from the token and printed at startup ([ADR-0029](adr/0029-a-hint-may-tighten-never-loosen.md)) |
+| Clock actuation | Reachable | `backend.actuation:`; needs the permission to set clocks, which this machine does not have ([ADR-0030](adr/0030-actuation-is-an-exception-and-must-be-observed.md)) |
+| State-aware runtime prediction | Built | shadow only; no configuration switches it to deciding ([ADR-0023](adr/0023-state-aware-prediction-runs-in-the-shadow-first.md)) |
+| Directed interference table | Built | the table is empty until a measurement campaign fills it ([ADR-0026](adr/0026-interference-is-directed-and-not-additive.md)) |
+| Validity-aware dependency graph | Built | needs a protocol extension ([ADR-0028](adr/0028-a-fusion-needs-a-common-capture.md)) |
 | Hardware observation | **Qualified** | on where `nvidia-smi` exists; read-only, no root |
-| Bearer-token authentication, mTLS | Built and tested | off — `backend.security` |
-| `trust: strict` | Built and tested | off; the default is `open` (Spec L-002) |
+| Bearer-token authentication, mTLS | Reachable | `backend.security` |
+| `trust: strict` | Reachable | `backend.trust: strict`; the default is `open` (Spec L-002) |
+
+**Reachable is not qualified.** A feature in that column has a test proving
+that its configuration changes a decision — and no measurement saying the
+change is an improvement on your workload. That measurement is yours to make.
 
 ## Permissions and administration
 

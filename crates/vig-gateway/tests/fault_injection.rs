@@ -698,3 +698,54 @@ fn aborted() -> BackendError {
         message: "RPC verloren; die Ausfuehrung kann weiterlaufen".to_owned(),
     }
 }
+
+/// Der Governor erholt sich ohne Verkehr (Review R11).
+///
+/// Der Fall, gegen den die aktive Probe existiert: das Backend faellt aus,
+/// ein Loadbalancer nimmt daraufhin allen Verkehr weg — und damit den
+/// einzigen Ausloeser, der die Bereitschaft je wieder gruen machen koennte.
+/// Vorher blieb der Governor rot, bis jemand von aussen eine Inferenz
+/// schickte, die er selbst als „nicht bereit" abgelehnt hatte.
+///
+/// Hier wird **keine einzige** Inferenz gefahren. Nur die Probe laeuft.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readiness_recovers_without_any_traffic() {
+    let fake = Arc::new(FakeExecutor::default());
+    let handle = actor_with(Arc::clone(&fake));
+
+    // Erst muss die Probe ueberhaupt einmal geantwortet haben: vor der ersten
+    // Antwort ist die Lieferfaehigkeit ungeprueft.
+    await_reachable(&handle, true).await;
+
+    // Das Backend faellt aus.
+    fake.set_unreachable(Some(BackendError::Unreachable {
+        endpoint: "127.0.0.1:59999".to_owned(),
+        cause: "Verbindung abgelehnt".to_owned(),
+    }));
+    await_reachable(&handle, false).await;
+    assert!(
+        vig_gateway::exporter::readiness(&handle.metrics().await.unwrap()).is_err(),
+        "ein nicht antwortendes Backend nimmt den Governor aus der Rotation"
+    );
+
+    // Es kommt zurueck — und niemand schickt eine Inferenz.
+    fake.set_unreachable(None);
+    await_reachable(&handle, true).await;
+    assert!(
+        vig_gateway::exporter::readiness(&handle.metrics().await.unwrap()).is_ok(),
+        "die Erholung braucht keinen Verkehr"
+    );
+    assert_eq!(fake.executed(), 0, "es lief keine einzige Inferenz");
+}
+
+/// Wartet, bis die Erreichbarkeitsprobe den erwarteten Stand meldet.
+async fn await_reachable(handle: &vig_gateway::Handle, expected: bool) {
+    for _ in 0..80 {
+        let metrics = handle.metrics().await.unwrap();
+        if (metrics.backends_reachable == metrics.backends && metrics.backends > 0) == expected {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("die Probe meldete nie {expected}");
+}

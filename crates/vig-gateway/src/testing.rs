@@ -68,6 +68,8 @@ struct Recorded {
 pub struct FakeExecutor {
     inner: Mutex<Recorded>,
     capabilities: Mutex<Capabilities>,
+    /// Wenn gesetzt, meldet die Erreichbarkeitsprobe diesen Fehler.
+    unreachable: Mutex<Option<BackendError>>,
 }
 
 impl Default for FakeExecutor {
@@ -78,11 +80,21 @@ impl Default for FakeExecutor {
                 completion_evidence: true,
                 decoupled_endpoint: true,
             }),
+            unreachable: Mutex::new(None),
         }
     }
 }
 
 impl FakeExecutor {
+    /// Laesst die Erreichbarkeitsprobe scheitern — oder wieder gelingen.
+    ///
+    /// Damit laesst sich der Fall nachstellen, um den es bei R11 geht: das
+    /// Backend faellt aus, der Loadbalancer nimmt den Verkehr weg, und der
+    /// Governor muss sich **ohne** Inferenz wieder erholen koennen.
+    pub fn set_unreachable(&self, error: Option<BackendError>) {
+        *self.unreachable.lock().unwrap() = error;
+    }
+
     /// Der naechste Aufruf gelingt und meldet diesen Modellnamen.
     pub fn expect_ok(&self, model: &str) {
         self.inner
@@ -236,6 +248,13 @@ impl Executor for FakeExecutor {
                 Err(BackendError::UnknownModel { model })
             }
         })
+    }
+
+    fn reachable(
+        &self,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + '_>> {
+        let error = self.unreachable.lock().unwrap().clone();
+        Box::pin(async move { error.map_or(Ok(()), Err) })
     }
 
     fn capabilities(&self) -> Capabilities {

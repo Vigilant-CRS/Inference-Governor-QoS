@@ -33,7 +33,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tonic::{Request, Response, Status};
 #[allow(clippy::wildcard_imports)]
 use vig_protocol_oip::inference::*;
-use vig_protocol_oip::params::{self, GenerationSource, VigParams};
+use vig_protocol_oip::params::{self, GenerationSource, HintRequest, VigParams};
 
 /// Hoechstalter, ab dem ein Client-Zeitstempel als „aus einer anderen Uhr"
 /// gilt, wenn das Modell kein `max_age` konfiguriert hat (ADR-0011).
@@ -200,6 +200,46 @@ impl GatewayService {
     /// Was der Client angibt, gewinnt; was er weglaesst, kommt aus dem Vertrag
     /// (Spec 16.3). Ein fehlerhafter Parameter fuehrt zur Ablehnung, nicht zu
     /// einem stillen Default.
+    /// Reicht einen mitgegebenen Anwendungshinweis an den Kern durch (NV-18).
+    ///
+    /// Die Kennung kommt aus der Zugangsschicht und nicht aus dem Request:
+    /// ADR-0029 verlangt, dass sie **belegt** und nicht behauptet wird. Ohne
+    /// belegte Kennung — also ohne hinterlegte Token — passiert hier nichts.
+    ///
+    /// Ebenso ohne Geltungsdauer: ein Hinweis ohne Frist gaebe es nach
+    /// ADR-0029 gar nicht, und einen Standardwert zu erfinden hiesse, eine
+    /// Dauer zu setzen, die niemand vereinbart hat.
+    fn offer_hint_from(
+        &self,
+        model: vig_core::ModelIdx,
+        request: &ModelInferRequest,
+        authority: Option<vig_core::hints::Authority>,
+    ) {
+        let Some(authority) = authority else {
+            return;
+        };
+        let Ok(params): Result<VigParams, _> = params::extract(&request.parameters) else {
+            return;
+        };
+        let (Some(requested), Some(ttl)) = (params.hint, params.hint_ttl) else {
+            return;
+        };
+        let kind = match requested {
+            HintRequest::ActionHorizon(holds_for) => {
+                vig_core::hints::HintKind::ActionHorizon { holds_for }
+            }
+            HintRequest::Elevated(max_age) => vig_core::hints::HintKind::Elevated { max_age },
+            HintRequest::Mode(id) => vig_core::hints::HintKind::Mode { id },
+        };
+        self.scheduler.offer_hint(vig_core::hints::Hint {
+            model,
+            authority,
+            kind,
+            issued_at: self.clock.now(),
+            ttl,
+        });
+    }
+
     fn build_descriptor(
         &self,
         model: vig_core::ModelIdx,
@@ -288,6 +328,13 @@ impl GrpcInferenceService for GatewayService {
         // Vor allem anderen: unautorisierte Arbeit soll nicht einmal die
         // Parameter kosten, die ihr Auslesen braucht.
         self.authorize(&request)?;
+        // Die belegte Kennung des Aufrufers, bevor der Request verbraucht
+        // wird (NV-18). Ohne hinterlegte Token gibt es keine — und dann auch
+        // keinen Hinweis.
+        let authority = self
+            .tokens
+            .as_ref()
+            .and_then(|tokens| tokens.authority_of(&request));
         let inner = request.into_inner();
 
         let Some(model) = self.config.model_index(&inner.model_name) else {
@@ -321,6 +368,13 @@ impl GrpcInferenceService for GatewayService {
                 self.config.max_inflight_bytes
             )));
         };
+
+        // NV-18: ein mitgegebener Hinweis geht an den Kern, bevor der Request
+        // eingereiht wird — er soll fuer diesen Request schon gelten. Er wird
+        // **nicht** beantwortet: was die Policy des Betreibers damit macht,
+        // ist eine Betriebsfrage, und ein abgelehnter Hinweis darf den
+        // Request, der ihn mitgebracht hat, nicht scheitern lassen.
+        self.offer_hint_from(model, &inner, authority);
 
         let descriptor = self.build_descriptor(model, &inner)?;
         let logical = inner.model_name.clone();

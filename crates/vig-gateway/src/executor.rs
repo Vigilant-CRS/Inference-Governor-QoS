@@ -96,6 +96,21 @@ pub trait Executor: Send + Sync + std::fmt::Debug {
         model: &str,
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<Evidence, BackendError>> + Send + '_>>;
 
+    /// Ob dieses Backend gerade erreichbar ist.
+    ///
+    /// Eine **aktive** Probe, unabhaengig vom Verkehr. Ohne sie haengt die
+    /// Bereitschaftsaussage am letzten Inferenzfehler: nimmt ein
+    /// Loadbalancer daraufhin allen Verkehr weg, fehlt der Ausloeser zur
+    /// Erholung, und der Governor bleibt rot, obwohl das Backend laengst
+    /// wieder da ist (Review R11).
+    ///
+    /// # Errors
+    ///
+    /// [`BackendError`], wenn das Backend nicht antwortet.
+    fn reachable(
+        &self,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + '_>>;
+
     /// Was dieses Backend kann.
     fn capabilities(&self) -> Capabilities;
 }
@@ -151,6 +166,18 @@ impl Executor for TritonExecutor {
         let client = Arc::clone(&self.client);
         let model = model.to_owned();
         Box::pin(async move { client.completion_evidence(&model).await })
+    }
+
+    fn reachable(
+        &self,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + '_>> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            // `live` und nicht `ready`: gefragt ist, ob der Server antwortet.
+            // Ob ein einzelnes Modell geladen ist, ist eine andere Frage und
+            // gehoert nicht in die Erreichbarkeit des Endpunkts.
+            client.health().await.map(|_| ())
+        })
     }
 
     fn capabilities(&self) -> Capabilities {

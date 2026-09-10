@@ -1316,3 +1316,124 @@ fn a_hint_does_not_change_what_the_scheduler_dispatches_by_itself() {
         backend.dispatched_models()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Ein Hinweis muss eine Entscheidung aendern (Review R09)
+// ---------------------------------------------------------------------------
+
+const HINT_AUTHORITY: vig_core::hints::Authority = vig_core::hints::Authority(7);
+
+/// Ein Vertrag, dessen Laufzeit sein Hoechstalter sicher reisst.
+///
+/// 50 ms Laufzeit bei 10 ms Hoechstalter: jeder Request ist bei der
+/// Fertigstellung veraltet und wird verworfen — solange kein Hinweis etwas
+/// anderes sagt.
+fn doomed_contract() -> ModelContract {
+    contract(
+        Criticality::BestEffort,
+        QueuePolicy::Latest,
+        None,
+        1_000,
+        10,
+        &[50],
+    )
+}
+
+/// Ein freigegebener Aktionshorizont rettet einen Request, der sonst als
+/// veraltet verworfen wuerde.
+///
+/// Der Befund aus R09: `offer_hint`, `set_hint_policy` und
+/// `effective_max_age` waren gebaut und getestet — und keine
+/// Schedulingentscheidung hing daran. „Modul fertig" und „wirksam" sind
+/// verschiedene Aussagen, und dieser Test prueft die zweite.
+///
+/// Der Aktionshorizont sagt: bis der laufende Vorgang abgeschlossen ist,
+/// aendert eine neue Wahrnehmung nichts mehr. Er **lockert** und braucht
+/// deshalb `allow_loosening` (ADR-0029).
+#[test]
+fn an_approved_action_horizon_saves_a_request_that_would_be_dropped() {
+    use vig_core::hints::{Hint, HintKind, HintPolicy};
+
+    let c = doomed_contract();
+    let mut without = build(vec![c.clone()], 1);
+    let mut actions = Vec::new();
+    without.on_event(at(0), Event::Arrival(frame(1, 0, 0, &c)), &mut |a| {
+        actions.push(a);
+    });
+    assert!(
+        !actions.iter().any(|a| matches!(a, Action::Dispatch { .. })),
+        "ohne Hinweis ist der Request bei der Fertigstellung wertlos"
+    );
+
+    let mut with = build(vec![c.clone()], 1);
+    with.set_hint_policy(HintPolicy {
+        authority: Some(HINT_AUTHORITY),
+        allow_loosening: true,
+        approved_modes: 0,
+        min_max_age: None,
+        max_action_horizon: Some(ms(500)),
+    });
+    with.offer_hint(
+        Hint {
+            model: ModelIdx(0),
+            authority: HINT_AUTHORITY,
+            kind: HintKind::ActionHorizon { holds_for: ms(200) },
+            issued_at: at(0),
+            ttl: ms(200),
+        },
+        at(0),
+    )
+    .unwrap();
+
+    let mut actions = Vec::new();
+    with.on_event(at(0), Event::Arrival(frame(1, 0, 0, &c)), &mut |a| {
+        actions.push(a);
+    });
+    assert!(
+        actions.iter().any(|a| matches!(a, Action::Dispatch { .. })),
+        "mit dem Hinweis reicht die Frische — er aendert eine Entscheidung \
+         und nicht nur einen Zaehler: {actions:?}"
+    );
+}
+
+/// Ohne Freigabe des Betreibers bleibt es beim Vertrag.
+///
+/// Die Gegenprobe. Ein Hinweis, der ohne `allow_loosening` wirkte, waere ein
+/// Hebel, mit dem sich jede Anwendung ihren eigenen Vertrag schreibt.
+#[test]
+fn without_the_operators_approval_a_loosening_hint_changes_nothing() {
+    use vig_core::hints::{Hint, HintKind, HintPolicy};
+
+    let c = doomed_contract();
+    let mut s = build(vec![c.clone()], 1);
+    s.set_hint_policy(HintPolicy {
+        authority: Some(HINT_AUTHORITY),
+        allow_loosening: false,
+        approved_modes: 0,
+        min_max_age: None,
+        max_action_horizon: Some(ms(500)),
+    });
+    assert!(
+        s.offer_hint(
+            Hint {
+                model: ModelIdx(0),
+                authority: HINT_AUTHORITY,
+                kind: HintKind::ActionHorizon { holds_for: ms(200) },
+                issued_at: at(0),
+                ttl: ms(200),
+            },
+            at(0),
+        )
+        .is_err(),
+        "lockern braucht eine Freigabe"
+    );
+
+    let mut actions = Vec::new();
+    s.on_event(at(0), Event::Arrival(frame(1, 0, 0, &c)), &mut |a| {
+        actions.push(a);
+    });
+    assert!(
+        !actions.iter().any(|a| matches!(a, Action::Dispatch { .. })),
+        "und ohne sie bleibt es beim Vertrag"
+    );
+}

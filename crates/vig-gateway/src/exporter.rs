@@ -464,22 +464,29 @@ pub fn readiness(metrics: &Metrics) -> Result<(), String> {
         ));
     }
 
-    // Ein abgelehnter Verbindungsaufbau erzeugt **keine** Quarantaene: der
-    // Aufruf kehrt sofort mit einem Fehler zurueck, und der Slotkredit wird
-    // regulaer frei. Auf die Quarantaene allein zu schauen hiess deshalb, den
-    // haeufigsten Backendausfall zu uebersehen — das Backend ist weg, und die
-    // Bereitschaftspruefung meldet gruen.
+    // Erreichbarkeit wird **aktiv** geprueft, je Endpunkt, unabhaengig vom
+    // Verkehr (Review R11). Der globale Zaehler
+    // `consecutive_transport_failures` taugt dafuer nicht: er wird nur von
+    // einer erfolgreichen Inferenz zurueckgesetzt. Nimmt ein Loadbalancer
+    // daraufhin den Verkehr weg, fehlt der Ausloeser zur Erholung, und der
+    // Governor bleibt rot, obwohl das Backend laengst wieder da ist. Umgekehrt
+    // setzte ein Erfolg an Backend B den Ausfall von Backend A zurueck. Und
+    // vor der ersten Inferenz stand er auf null — das las sich wie „bereit",
+    // obwohl nichts geprueft war.
     //
-    // Gezaehlt werden nur **Transport**fehler. Ein Modellfehler sagt etwas
-    // ueber einen Request, nicht ueber die Erreichbarkeit; er darf den
-    // Governor nicht aus der Rotation nehmen. Ein einziger Transportfehler
-    // genuegt dagegen: er wird beim naechsten Erfolg zurueckgesetzt, und
-    // solange keiner gelingt, ist hier nichts auszurichten.
-    if metrics.consecutive_transport_failures > 0 {
+    // Er bleibt als Kennzahl exportiert: er sagt etwas ueber die Stabilitaet
+    // des Verkehrs. Nur die Bereitschaftsentscheidung haengt nicht mehr an
+    // ihm.
+    if metrics.backends == 0 {
+        return Err("backend: kein Endpunkt konfiguriert".to_owned());
+    }
+    if metrics.backends_reachable < metrics.backends {
         return Err(format!(
-            "backend: {} Transportfehler seit dem letzten Erfolg; das Backend ist \
-             nicht erreichbar",
-            metrics.consecutive_transport_failures
+            "backend: {} von {} Endpunkten haben die letzte Probe nicht \
+             beantwortet; vor der ersten Probe steht hier null, und das heisst \
+             ungeprueft",
+            metrics.backends.saturating_sub(metrics.backends_reachable),
+            metrics.backends
         ));
     }
     Ok(())
@@ -684,47 +691,75 @@ mod tests {
     /// ihm keinen Verkehr mehr schicken.
     #[test]
     fn readiness_fails_when_every_slot_is_quarantined() {
-        let healthy = Metrics {
-            slots: 2,
-            quarantined: 1,
+        let reachable = |slots: u64, quarantined: u64| Metrics {
+            slots,
+            quarantined,
+            backends: 1,
+            backends_reachable: 1,
             ..Metrics::default()
         };
-        assert!(readiness(&healthy).is_ok(), "ein freier Slot genuegt");
 
-        // Ein bestaetigter Transportfehler nimmt ihn ebenfalls aus der
-        // Rotation — ein abgelehnter Verbindungsaufbau erzeugt keine
-        // Quarantaene, das Backend ist aber genauso weg.
-        let refused = Metrics {
-            slots: 2,
-            consecutive_transport_failures: 1,
-            ..Metrics::default()
-        };
-        assert!(readiness(&refused).is_err());
+        assert!(
+            readiness(&reachable(2, 1)).is_ok(),
+            "ein freier Slot genuegt"
+        );
 
-        // Ein Modellfehler dagegen nicht: der betrifft einen Request.
+        let reason = readiness(&reachable(2, 2)).expect_err("nichts kann mehr starten");
+        assert!(reason.contains("Quarantaene"), "{reason}");
+
+        // Ein Modellfehler nimmt niemanden aus der Rotation: der betrifft
+        // einen Request, nicht die Erreichbarkeit.
         let model_error = Metrics {
-            slots: 2,
             backend_failures: 5,
-            ..Metrics::default()
+            ..reachable(2, 0)
         };
         assert!(readiness(&model_error).is_ok());
 
-        let stuck = Metrics {
-            slots: 2,
-            quarantined: 2,
+        // Und ohne Backendproblem bleibt er bereit.
+        assert!(readiness(&reachable(1, 0)).is_ok());
+    }
+
+    /// Bereitschaft haengt an einer aktiven Probe, nicht am letzten Fehler
+    /// (Review R11).
+    ///
+    /// Drei Faelle, die der globale Zaehler alle falsch beantwortet hat: vor
+    /// der ersten Probe ist nichts geprueft; ein nicht antwortender Endpunkt
+    /// nimmt den Governor aus der Rotation, auch ohne dass jemand eine
+    /// Inferenz versucht; und ein zweites, erreichbares Backend deckt den
+    /// Ausfall des ersten nicht zu.
+    #[test]
+    fn readiness_hangs_on_an_active_probe_not_on_the_last_failure() {
+        let unprobed = Metrics {
+            slots: 1,
+            backends: 1,
+            backends_reachable: 0,
             ..Metrics::default()
         };
-        let reason = readiness(&stuck).expect_err("nichts kann mehr starten");
-        assert!(reason.contains("Quarantaene"), "{reason}");
+        let reason = readiness(&unprobed).expect_err("nichts ist belegt");
+        assert!(reason.contains("ungeprueft"), "{reason}");
 
-        // Und ohne Backendproblem bleibt er bereit.
+        let half = Metrics {
+            slots: 1,
+            backends: 2,
+            backends_reachable: 1,
+            ..Metrics::default()
+        };
         assert!(
-            readiness(&Metrics {
-                slots: 1,
-                ..Metrics::default()
-            })
-            .is_ok()
+            readiness(&half).is_err(),
+            "ein erreichbares Backend deckt den Ausfall des anderen nicht zu"
         );
+
+        // Ein Transportfehler in der Vergangenheit haelt niemanden mehr rot,
+        // wenn die Probe wieder antwortet — das ist die Erholung ohne
+        // Verkehr, die vorher fehlte.
+        let recovered = Metrics {
+            slots: 1,
+            backends: 1,
+            backends_reachable: 1,
+            consecutive_transport_failures: 7,
+            ..Metrics::default()
+        };
+        assert!(readiness(&recovered).is_ok());
     }
 
     /// Ein Zaehler, den niemand abfragen kann, ist kein Zaehler.

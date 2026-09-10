@@ -16,6 +16,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 use tonic::{Request, Status};
+use vig_core::hints::Authority;
 
 /// Der Metadatenschluessel, in dem das Token reist.
 pub const AUTH_HEADER: &str = "authorization";
@@ -90,6 +91,62 @@ impl Tokens {
             _ => Err(Status::unauthenticated("kein gueltiges Bearer-Token")),
         }
     }
+
+    /// Die belegte Kennung des Aufrufers, falls sein Token bekannt ist
+    /// (NV-18).
+    ///
+    /// ADR-0029 verlangt, dass die Zugangsschicht die Kennung **belegt** und
+    /// der Aufrufer sie nicht behauptet. Sie ist deshalb aus dem Token
+    /// abgeleitet und steht in keinem Requestfeld: ein Client, der seine
+    /// eigene Berechtigung mitschickt, hat keine.
+    ///
+    /// Ohne hinterlegte Token gibt es keine belegte Kennung — und damit
+    /// keinen Hinweis. Ein Governor ohne Zugangssicherung soll seinen Vertrag
+    /// nicht von Aufrufern verschieben lassen.
+    #[must_use]
+    pub fn authority_of<T>(&self, request: &Request<T>) -> Option<Authority> {
+        let token = request
+            .metadata()
+            .get(AUTH_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(str::trim)?;
+        self.allowed
+            .contains(token)
+            .then(|| Authority(fnv1a64(token.as_bytes())))
+    }
+
+    /// Die Kennungen aller hinterlegten Token.
+    ///
+    /// Damit der Betreiber weiss, welche Zahl er in `hints.authority`
+    /// eintragen muss. Sie steht beim Start im Log; die Token selbst stehen
+    /// dort nicht.
+    #[must_use]
+    pub fn authorities(&self) -> Vec<Authority> {
+        let mut out: Vec<Authority> = self
+            .allowed
+            .iter()
+            .map(|t| Authority(fnv1a64(t.as_bytes())))
+            .collect();
+        out.sort_unstable();
+        out
+    }
+}
+
+/// FNV-1a ueber 64 Bit.
+///
+/// Kein kryptografischer Hash und keiner noetig: die Kennung ist eine
+/// Gleichheitspruefung gegen die Freigabeliste des Betreibers, kein Geheimnis
+/// und kein Beweis. Das Geheimnis ist das Token, und das bleibt, wo es ist.
+/// Bewusst selbst geschrieben statt einer Abhaengigkeit: fuenf Zeilen, deren
+/// Ergebnis ueber Versionen hinweg gleich bleiben muss.
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 #[cfg(test)]

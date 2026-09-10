@@ -108,8 +108,21 @@ weiss dann, was er zulaesst.
 
 ## Was ausdruecklich noch nicht angeschlossen ist
 
-Drei Bausteine sind gebaut, getestet und tun im Betrieb noch nichts. Das steht
-hier, weil „umgesetzt" und „wirksam" verschiedene Aussagen sind:
+Vier Zustaende, nicht zwei: **gebaut**, **erreichbar**, **angeschlossen**,
+**qualifiziert**. Der Review vom 10.09. hat den Unterschied als Befund
+notiert — mehrere Funktionen galten als „Voreinstellung aus", waren aber durch
+keinen dokumentierten Konfigurationsschritt zu erreichen. Das ist eine andere
+Aussage, und sie steht jetzt getrennt in der
+[Support-Matrix](support-matrix.md).
+
+Seit dem Review **erreichbar** (Konfigurationsschritt vorhanden, ein Test
+belegt, dass er eine Entscheidung aendert): die Missbudget-Policy
+(`backend.miss_aware_policy`), die Anwendungshinweise (`backend.hints`), der
+Mindestfortschritt fuer Hintergrundlast und der Taktregler
+(`backend.actuation`). Erreichbar heisst **nicht** qualifiziert: ob das
+Einschalten auf einer bestimmten Last besser ist, sagt keine Messung.
+
+Diese Bausteine sind weiterhin nur **gebaut** und tun im Betrieb nichts:
 
 - **Die zustandsabhaengige Prognose (NV-06)** laeuft im Schattenbetrieb. Sie
   wird gefuettert und verglichen; entschieden wird weiter mit

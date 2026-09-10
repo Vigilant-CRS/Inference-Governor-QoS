@@ -49,6 +49,25 @@ pub const P_DEADLINE_US: &str = "vig_deadline_us";
 pub const P_MAX_AGE_US: &str = "vig_max_age_us";
 /// Wichtigkeitsklasse.
 pub const P_CLASS: &str = "vig_class";
+/// Aktionshorizont: so lange braucht die Anwendung diesen Strom **nicht**
+/// frischer, in Mikrosekunden (NV-18).
+///
+/// Der einzige Hinweis, der eine Zusage **lockert**. Er wird nur angenommen,
+/// wenn der Betreiber `allow_loosening` gesetzt hat.
+pub const P_HINT_ACTION_HORIZON_US: &str = "vig_hint_action_horizon_us";
+/// Erhoehter Bedarf: dieses Hoechstalter, kuerzer als das vertragliche, in
+/// Mikrosekunden (NV-18).
+///
+/// Verschaerft und ist deshalb ohne Modusfreigabe zulaessig — die Zusage des
+/// Betreibers wird dadurch nicht schwaecher, nur teurer.
+pub const P_HINT_ELEVATED_MAX_AGE_US: &str = "vig_hint_elevated_max_age_us";
+/// Ein vom Betreiber benannter Betriebsmodus (NV-18).
+pub const P_HINT_MODE: &str = "vig_hint_mode";
+/// Wie lange ein Hinweis gilt, in Mikrosekunden (NV-18).
+///
+/// Ohne Frist gibt es keinen Hinweis: nach ihrem Ablauf gilt der Grundvertrag
+/// und nicht der letzte bekannte Zustand.
+pub const P_HINT_TTL_US: &str = "vig_hint_ttl_us";
 
 /// Groesste akzeptierte Zukunftsabweichung eines Client-Zeitstempels.
 ///
@@ -81,6 +100,25 @@ pub struct VigParams {
     pub max_age: Option<Duration>,
     /// Wichtigkeitsklasse.
     pub class: Option<Criticality>,
+    /// Ein Anwendungshinweis, falls einer mitgegeben wurde (NV-18).
+    pub hint: Option<HintRequest>,
+    /// Die Geltungsdauer des Hinweises.
+    pub hint_ttl: Option<Duration>,
+}
+
+/// Was ein mitgegebener Hinweis aussagt (NV-18).
+///
+/// Bewusst hier und nicht im Kern: `vig-protocol-oip` kennt den Draht,
+/// `vig-core` kennt die Regel. Die Uebersetzung macht das Gateway, weil nur
+/// es die Berechtigung des Aufrufers kennt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HintRequest {
+    /// So lange traegt die aktuelle Entscheidung noch.
+    ActionHorizon(Duration),
+    /// Dieses Hoechstalter wird gebraucht, kuerzer als das vertragliche.
+    Elevated(Duration),
+    /// Dieser Betriebsmodus.
+    Mode(u32),
 }
 
 impl VigParams {
@@ -231,6 +269,20 @@ pub fn extract<S: core::hash::BuildHasher>(
             P_DEADLINE_US => out.deadline = Some(as_duration_from_micros(name, value)?),
             P_MAX_AGE_US => out.max_age = Some(as_duration_from_micros(name, value)?),
             P_CLASS => out.class = Some(as_class(value)?),
+            P_HINT_ACTION_HORIZON_US => {
+                out.hint = Some(HintRequest::ActionHorizon(as_duration_from_micros(
+                    name, value,
+                )?));
+            }
+            P_HINT_ELEVATED_MAX_AGE_US => {
+                out.hint = Some(HintRequest::Elevated(as_duration_from_micros(name, value)?));
+            }
+            P_HINT_MODE => {
+                out.hint = Some(HintRequest::Mode(
+                    u32::try_from(as_u64(name, value)?).unwrap_or(u32::MAX),
+                ));
+            }
+            P_HINT_TTL_US => out.hint_ttl = Some(as_duration_from_micros(name, value)?),
             other => {
                 return Err(ExtractError::UnknownParameter {
                     name: other.to_owned(),

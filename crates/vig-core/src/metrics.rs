@@ -41,6 +41,19 @@ pub struct Metrics {
     /// und genau das muss die Bereitschaftspruefung sehen, auch bevor ein
     /// Timeout ueberhaupt ablaufen konnte.
     pub consecutive_transport_failures: u64,
+    /// Wie viele Backendendpunkte konfiguriert sind (Review R11).
+    pub backends: u64,
+    /// Wie viele davon die letzte aktive Probe beantwortet haben.
+    ///
+    /// **Nicht** aus dem Verkehr abgeleitet: eine Bereitschaftsaussage, die
+    /// nur eine erfolgreiche Inferenz zuruecksetzen kann, erholt sich nie,
+    /// wenn ein Loadbalancer daraufhin den Verkehr wegnimmt. Und ein Erfolg
+    /// an einem Backend sagt nichts ueber ein anderes.
+    ///
+    /// Vor der ersten Probe steht hier null. Das heisst „ungeprueft", nicht
+    /// „nicht erreichbar" — und beides ist ein Grund, keinen Verkehr zu
+    /// schicken.
+    pub backends_reachable: u64,
     /// Die laengste Zeit ohne gueltiges Ergebnis, je Modell, in Mikrosekunden.
     ///
     /// Die Groesse, die eine Abdeckungszahl nicht zeigt: zehn verstreute

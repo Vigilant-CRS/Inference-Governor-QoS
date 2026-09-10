@@ -41,6 +41,134 @@ pub struct Config {
     pub models: BTreeMap<String, ModelConfig>,
 }
 
+/// Ob und wie der Governor den GPU-Takt stellt (NV-13, ADR-0030).
+///
+/// ADR-0021 sagt: die Hardware wird gelesen, nie gestellt. ADR-0030 nennt die
+/// Ausnahme und ihre Bedingungen — ausdruecklich einzuschalten, beobachtet
+/// statt angenommen, mit einem Boden, unter den nicht gestellt wird.
+///
+/// Ohne diesen Block hat der Governor **keine** Stellbefugnis. Das ist der
+/// Normalfall, und es bleibt der Normalfall.
+///
+/// Was hier steht, ist ein **Betriebspunkt**, keine Regelung: der Governor
+/// fordert diesen Takt beim Start an und gibt ihn beim Beenden zurueck. Wann
+/// eine Anhebung sich waehrend des Betriebs lohnt, ist eine Messfrage und
+/// braucht eine Installation, auf der das Stellen ueberhaupt erlaubt ist
+/// (ADR-0030, „die Struktur steht; die Politik nicht").
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActuationConfig {
+    /// Die GPU, deren Takt gestellt wird.
+    #[serde(default)]
+    pub gpu_index: u32,
+    /// Der Takt, der beim Start angefordert wird, in MHz.
+    pub hold_mhz: u32,
+    /// Der niedrigste Takt der Plattform, in MHz.
+    pub platform_min_mhz: u32,
+    /// Der hoechste Takt der Plattform, in MHz.
+    pub platform_max_mhz: u32,
+    /// Der niedrigste Takt, bei dem alle gegebenen Zusagen gelten, in MHz.
+    ///
+    /// Kommt aus den Profilmanifesten: wo ein Profil bei 1830 MHz gemessen
+    /// wurde und ein Vertrag darauf beruht, ist 1830 der Boden. Unter ihn wird
+    /// nicht gestellt, und ein **beobachteter** Takt darunter gilt nicht als
+    /// Bestaetigung.
+    pub promised_floor_mhz: u32,
+    /// Wie lange nach einer Aenderung nicht wieder gestellt werden darf, in
+    /// Millisekunden.
+    #[serde(default)]
+    pub dwell_ms: u64,
+    /// Wie weit der beobachtete Takt abweichen darf, bis er als wirksam gilt.
+    ///
+    /// Fuer die Rundung der Karte auf ihre eigenen Taktstufen — nicht fuer
+    /// den zugesagten Boden.
+    #[serde(default = "default_tolerance_mhz")]
+    pub tolerance_mhz: u32,
+    /// Wie lange nach einer Anforderung auf die Bestaetigung gewartet wird.
+    #[serde(default = "default_settle_ms")]
+    pub settle_ms: u64,
+}
+
+const fn default_tolerance_mhz() -> u32 {
+    50
+}
+
+const fn default_settle_ms() -> u64 {
+    200
+}
+
+/// Welche Anwendungshinweise dieser Governor annimmt (NV-18, ADR-0029).
+///
+/// Ein Hinweis darf **verschaerfen, nie lockern** — das ist die Regel aus
+/// ADR-0029, und sie steht im Kern. Diese Konfiguration sagt, wer ueberhaupt
+/// gehoert wird und wie weit.
+///
+/// Ohne diesen Block nimmt der Governor keinen Hinweis an. Das ist Absicht:
+/// eine Anwendung, die den Vertrag verschieben darf, ist eine
+/// Betreiberentscheidung und keine Voreinstellung.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HintsConfig {
+    /// Die Kennungen, die gehoert werden.
+    ///
+    /// Woher eine Kennung kommt und wie sie belegt wird — Token,
+    /// mTLS-Zertifikat, Unix-Peer — entscheidet die Zugangsschicht. Hier
+    /// steht nur, welche zaehlt.
+    pub authority: u64,
+    /// Ob lockernde Hinweise angenommen werden duerfen.
+    ///
+    /// Ein Aktionshorizont lockert: er sagt „so frisch brauche ich es gerade
+    /// nicht". Das ist der einzige Hinweistyp, der eine Zusage schwaecher
+    /// macht, und er braucht deshalb eine ausdrueckliche Freigabe.
+    #[serde(default)]
+    pub allow_loosening: bool,
+    /// Die freigegebenen Betriebsmodus-Kennungen.
+    ///
+    /// Ein Modus ausserhalb dieser Liste wird abgelehnt, auch von einer
+    /// berechtigten Stelle. Der Betreiber benennt die Modi, nicht die
+    /// Anwendung.
+    #[serde(default)]
+    pub approved_modes: Vec<u32>,
+    /// Das kuerzeste Hoechstalter, das ein Hinweis fordern darf, in
+    /// Millisekunden.
+    ///
+    /// Ohne Untergrenze koennte eine Anwendung durch immer schaerfere
+    /// Forderungen die gesamte Kapazitaet auf sich ziehen. Verschaerfen ist
+    /// sicher fuer die **Zusage** und nicht fuer die **Nachbarn**.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_max_age_ms: Option<u64>,
+    /// Die laengste Dauer, die ein Aktionshorizont beanspruchen darf, in
+    /// Millisekunden.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_action_horizon_ms: Option<u64>,
+}
+
+impl HintsConfig {
+    /// Uebersetzt die Konfiguration in die Kernform.
+    fn resolve(&self) -> vig_core::hints::HintPolicy {
+        // Die Modi als Maske: Kennungen ab 32 passen nicht hinein und werden
+        // damit nicht freigegeben. Das ist die sichere Richtung — eine
+        // Kennung, die niemand freigeben kann, wird abgelehnt.
+        let mut approved_modes = 0_u32;
+        for id in &self.approved_modes {
+            if *id < 32 {
+                approved_modes |= 1_u32 << *id;
+            }
+        }
+        vig_core::hints::HintPolicy {
+            authority: Some(vig_core::hints::Authority(self.authority)),
+            allow_loosening: self.allow_loosening,
+            approved_modes,
+            min_max_age: self
+                .min_max_age_ms
+                .and_then(vig_core::Duration::from_millis),
+            max_action_horizon: self
+                .max_action_horizon_ms
+                .and_then(vig_core::Duration::from_millis),
+        }
+    }
+}
+
 /// Das Ausfuehrungsbackend.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -106,6 +234,32 @@ pub struct BackendConfig {
     /// theoretischer Fall.
     #[serde(default = "default_max_inflight_mib")]
     pub max_inflight_mib: u64,
+    /// Ob und wie der Governor den GPU-Takt stellt (NV-13, ADR-0030).
+    ///
+    /// Nicht gesetzt heisst: gar nicht — der Normalfall. ADR-0021 bleibt die
+    /// Regel, ADR-0030 die benannte Ausnahme.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actuation: Option<ActuationConfig>,
+    /// Welche Anwendungshinweise angenommen werden (NV-18, ADR-0029).
+    ///
+    /// Nicht gesetzt heisst: keine. Vor dieser Zeile war der Hinweisregler
+    /// gebaut, getestet und durch keine Konfiguration erreichbar — ein
+    /// Betreiber konnte ihn nicht einschalten (Review R09).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hints: Option<HintsConfig>,
+    /// Ob das Missbudget in die Kandidatenwahl eingeht (NV-24, ADR-0027).
+    ///
+    /// Voreinstellung **aus**. Eingeschaltet geht innerhalb einer
+    /// Kritikalitaetsklasse ein Strom mit erschoepftem Missbudget vor einem
+    /// mit Spielraum. Zwischen Klassen aendert sich nichts: der Vorrang von
+    /// `protected` vor `best_effort` ist Betreiberpolicy und bleibt es.
+    ///
+    /// Vor dieser Zeile war der Regler gebaut, getestet und **nicht
+    /// einschaltbar** — es gab keinen dokumentierten Konfigurationsschritt,
+    /// der ihn erreicht haette (Review R09). „Voreinstellung aus" und „nicht
+    /// erreichbar" sind verschiedene Aussagen.
+    #[serde(default)]
+    pub miss_aware_policy: bool,
     /// Transport- und Zugangssicherung (TLS, mTLS, Token).
     #[serde(default)]
     pub security: SecurityConfig,
@@ -963,6 +1117,12 @@ pub struct Resolved {
     pub max_inflight_bytes: u64,
     /// Transport- und Zugangssicherung.
     pub security: SecurityConfig,
+    /// Ob das Missbudget in die Kandidatenwahl eingeht (NV-24).
+    pub miss_aware_policy: bool,
+    /// Die Hinweispolicy des Betreibers (NV-18).
+    pub hint_policy: vig_core::hints::HintPolicy,
+    /// Die Aktuationskonfiguration, falls eine gesetzt ist (NV-13).
+    pub actuation: Option<ActuationConfig>,
     /// Die zugesagte Schnittstelle je Modell, in Indexreihenfolge.
     ///
     /// `None`, wo keine hinterlegt ist.
@@ -1371,6 +1531,13 @@ impl Config {
             trust: self.backend.trust,
             max_inflight_bytes: self.backend.max_inflight_mib.saturating_mul(1024 * 1024),
             security: self.backend.security.clone(),
+            miss_aware_policy: self.backend.miss_aware_policy,
+            actuation: self.backend.actuation.clone(),
+            hint_policy: self
+                .backend
+                .hints
+                .as_ref()
+                .map_or_else(vig_core::hints::HintPolicy::closed, HintsConfig::resolve),
             backend_endpoint: self.backend.grpc_endpoint.clone(),
             slots,
             contracts,

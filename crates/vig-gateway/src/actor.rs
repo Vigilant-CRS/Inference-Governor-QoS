@@ -50,6 +50,66 @@ const CHANNEL_CAPACITY: usize = 1_024;
 /// aber ein Backend, das ohnehin gerade Probleme hat.
 const RECONCILE_INTERVAL_MS: u64 = 250;
 
+/// Prueft jedes Backend regelmaessig auf Erreichbarkeit (Review R11).
+///
+/// Aktiv, unabhaengig vom Verkehr und **je Endpunkt**. Vorher hing die
+/// Bereitschaftsaussage an einem globalen Zaehler, den nur eine erfolgreiche
+/// Inferenz zuruecksetzte. Das hatte drei Folgen, und alle drei sind falsch:
+///
+/// * Nahm ein Loadbalancer den Verkehr weg, weil die Bereitschaft rot war,
+///   gab es keinen Ausloeser mehr, der sie wieder gruen macht.
+/// * Ein Erfolg an Backend B setzte den Ausfall von Backend A zurueck.
+/// * Vor der ersten Inferenz stand der Zaehler auf null — und das las sich
+///   wie „bereit", obwohl nichts geprueft war.
+///
+/// Jede Probe hat eine Frist. Der Verbindungsaufbau hat eine, die **Antwort**
+/// eines aufgebauten Kanals nicht; ein Backend, das annimmt und dann
+/// schweigt, liesse den Waechter sonst haengen — und ein haengender Waechter
+/// meldet nie etwas.
+fn spawn_reachability_probe(tx: &mpsc::Sender<Msg>, backends: &HashMap<String, Arc<dyn Executor>>) {
+    for (endpoint, backend) in backends {
+        let tx = tx.clone();
+        let endpoint = endpoint.clone();
+        let backend = Arc::clone(backend);
+        tokio::spawn(async move {
+            let interval = std::time::Duration::from_millis(REACHABILITY_PROBE_INTERVAL_MS);
+            let limit = std::time::Duration::from_millis(REACHABILITY_PROBE_TIMEOUT_MS);
+            loop {
+                let reachable = matches!(
+                    tokio::time::timeout(limit, backend.reachable()).await,
+                    Ok(Ok(()))
+                );
+                if tx
+                    .send(Msg::Reachability {
+                        endpoint: endpoint.clone(),
+                        reachable,
+                    })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                tokio::time::sleep(interval).await;
+            }
+        });
+    }
+}
+
+/// Wie oft jedes Backend aktiv auf Erreichbarkeit geprueft wird.
+///
+/// Aktiv und nicht aus dem Verkehr abgeleitet: nimmt ein Loadbalancer den
+/// Verkehr weg, weil die Bereitschaft rot ist, gaebe es sonst keinen
+/// Ausloeser mehr, der sie wieder gruen macht (Review R11).
+const REACHABILITY_PROBE_INTERVAL_MS: u64 = 1_000;
+
+/// Wie lange eine Erreichbarkeitsprobe hoechstens dauern darf.
+///
+/// Der Verbindungsaufbau hat eine Frist, die **Antwort** eines aufgebauten
+/// Kanals hat keine. Ein Backend, das die Verbindung annimmt und dann
+/// schweigt, liesse die Probe sonst haengen — und ein haengender Waechter
+/// meldet nie etwas, also sieht alles gut aus.
+const REACHABILITY_PROBE_TIMEOUT_MS: u64 = 2_000;
+
 /// Das Ergebnis, das ein wartender Client bekommt.
 pub type Reply = Result<ModelInferResponse, Status>;
 
@@ -99,6 +159,23 @@ pub(crate) enum Msg {
         /// Server neu gestartet wurde — und dann ist alles, was dort lief,
         /// ohnehin verloren.
         restarted: bool,
+    },
+    /// Ein Anwendungshinweis (NV-18, ADR-0029).
+    ///
+    /// Er wird **nicht** beantwortet: eine Ablehnung ist eine Betriebsmeldung
+    /// und kein Fehler des Requests, der ihn mitgebracht hat. Ein Hinweis,
+    /// der die Zulassung eines Requests scheitern liesse, waere ein Hebel,
+    /// den er nicht haben soll.
+    Hint {
+        /// Der Hinweis in Kernform.
+        hint: Box<vig_core::hints::Hint>,
+    },
+    /// Das Ergebnis einer aktiven Erreichbarkeitsprobe (Review R11).
+    Reachability {
+        /// Der gepruefte Endpunkt.
+        endpoint: String,
+        /// Ob er geantwortet hat.
+        reachable: bool,
     },
     /// Die Abgleichs-Basislinie eines Backendmodells ist eingetroffen.
     ///
@@ -156,6 +233,13 @@ struct Lease {
     slot: SlotIdx,
     /// Das Backendmodell, gegen dessen Statistik abgeglichen wird.
     backend_model: String,
+    /// Der Endpunkt, an den dieser Aufruf ging.
+    ///
+    /// Ein Transportfehler sagt etwas ueber **diesen** Endpunkt und ueber
+    /// keinen anderen. Ohne ihn liesse sich der Befund nur global buchen, und
+    /// ein Erfolg an Backend B deckte den Ausfall von Backend A zu
+    /// (Review R11).
+    endpoint: String,
     /// Wie der Anspruch derzeit steht.
     state: LeaseState,
 }
@@ -299,6 +383,26 @@ impl Handle {
     /// # Errors
     ///
     /// Wenn der Actor beendet wurde.
+    /// Reicht einen Anwendungshinweis an den Kern durch (NV-18).
+    ///
+    /// Ohne Antwort und ohne Fehlerweg zum Aufrufer: was der Kern mit dem
+    /// Hinweis macht, entscheidet die Policy des Betreibers, und eine
+    /// Ablehnung ist eine Betriebsmeldung. Ein Hinweis darf die Zulassung des
+    /// Requests, der ihn mitgebracht hat, nicht scheitern lassen.
+    pub fn offer_hint(&self, hint: vig_core::hints::Hint) {
+        // `try_send`: ein voller Kanal heisst, dass gerade Wichtigeres
+        // ansteht. Ein Hinweis, der dafuer Platz verdraengt, waere die
+        // falsche Reihenfolge.
+        let _ = self.tx.try_send(Msg::Hint {
+            hint: Box::new(hint),
+        });
+    }
+
+    /// Der aktuelle Metrikabzug.
+    ///
+    /// # Errors
+    ///
+    /// Wenn der Actor beendet wurde.
     pub async fn metrics(&self) -> Result<Metrics, Status> {
         let (tx, rx) = oneshot::channel();
         self.tx
@@ -366,6 +470,14 @@ struct Actor {
     /// Token, und ihn als Fortschritt zu buchen hiesse, dieselbe Arbeit
     /// zweimal zu verkaufen.
     generative: GenerativeAccounting,
+    /// Das jeweils letzte Ergebnis der Erreichbarkeitsprobe je Endpunkt
+    /// (Review R11).
+    ///
+    /// Ein Eintrag entsteht erst mit der ersten Antwort. Solange er fehlt,
+    /// gilt der Endpunkt als **nicht** belegt erreichbar — vor der ersten
+    /// Probe ist die Lieferfaehigkeit ungeprueft, und ein Zaehler, der dann
+    /// auf null steht, ist keine Zusage.
+    reachability: HashMap<String, bool>,
     /// Die Nutzlastreservierungen laufender Auftraege (Review R04).
     ///
     /// Sie enden mit der **Ausfuehrung**, nicht mit dem Client. Nach einem
@@ -466,6 +578,14 @@ fn spawn_owned(
         overload,
         config.margin,
     )?;
+    // NV-24: der Missbudget-Regler wird hier eingeschaltet, wenn der Betreiber
+    // ihn eingeschaltet hat. Vorher war er gebaut, getestet und durch keine
+    // Konfiguration erreichbar (Review R09).
+    scheduler.set_miss_aware_policy(config.miss_aware_policy);
+    // NV-18: dasselbe fuer die Hinweispolicy. Ohne `hints:` in der
+    // Konfiguration ist sie geschlossen und nimmt nichts an.
+    scheduler.set_hint_policy(config.hint_policy);
+
     // G-010: Profile, deren Umgebung sich geaendert hat, werden vorsichtiger
     // geplant, bis der Estimator eigene Messungen hat (ADR-0016).
     for model in unverified {
@@ -494,6 +614,7 @@ fn spawn_owned(
     let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
     spawn_hardware_probe(&tx);
     spawn_baseline_probe(&tx, &config, &backends);
+    spawn_reachability_probe(&tx, &backends);
     // Die Revision der Profilidentitaet: solange sie nicht aus dem Manifest
     // kommt, ist sie 1 fuer eine geladene Konfiguration. Wichtig ist nicht
     // ihr Wert, sondern dass sie sich aendert, wenn die Profile es tun.
@@ -520,6 +641,7 @@ fn spawn_owned(
         metrics_rejected_quarantined: 0,
         generative: GenerativeAccounting::default(),
         permits: HashMap::new(),
+        reachability: HashMap::new(),
         outstanding: 0,
         shutdown: None,
         // Fortsetzungen bekommen Kennungen aus einem eigenen Bereich, damit
@@ -717,8 +839,27 @@ impl Actor {
             Err(e) if e.is_transport_failure() => {
                 self.consecutive_transport_failures =
                     self.consecutive_transport_failures.saturating_add(1);
+                // Und der Befund gehoert zu **diesem** Endpunkt. Ein
+                // beobachteter Transportfehler ist echte Evidenz und wirkt
+                // sofort; die aktive Probe ist das, was ihn wieder aufhebt
+                // (Review R11). Andersherum — Erholung an den Verkehr zu
+                // haengen — war der Fehler.
+                if let Some(lease) = self.leases.get(&request) {
+                    let endpoint = lease.endpoint.clone();
+                    self.reachability.insert(endpoint, false);
+                }
             }
-            _ => self.consecutive_transport_failures = 0,
+            _ => {
+                self.consecutive_transport_failures = 0;
+                // Eine Antwort — auch eine ablehnende — ist der staerkste
+                // Erreichbarkeitsnachweis, den es gibt: staerker als jede
+                // Probe. Ein Modellfehler heisst „das Backend hat geantwortet
+                // und diesen Request abgelehnt", nicht „das Backend ist weg".
+                if let Some(lease) = self.leases.get(&request) {
+                    let endpoint = lease.endpoint.clone();
+                    self.reachability.insert(endpoint, true);
+                }
+            }
         }
 
         // Ein **abgebrochener** Aufruf beweist nicht, dass die
@@ -867,6 +1008,27 @@ impl Actor {
                 // Arbeit offen sein, und ein Client ohne Antwort ist genau das,
                 // was ein geordnetes Herunterfahren vermeiden soll.
                 self.shutdown = Some(done);
+            }
+            Msg::Hint { hint } => {
+                let model = hint.model;
+                match self.scheduler.offer_hint(*hint, now) {
+                    Ok(effect) => tracing::debug!(
+                        model = model.get(),
+                        ?effect,
+                        "Anwendungshinweis angenommen"
+                    ),
+                    Err(rejection) => tracing::info!(
+                        model = model.get(),
+                        ?rejection,
+                        "Anwendungshinweis abgelehnt"
+                    ),
+                }
+            }
+            Msg::Reachability {
+                endpoint,
+                reachable,
+            } => {
+                self.reachability.insert(endpoint, reachable);
             }
             Msg::ReconcileBaseline { model, completed } => {
                 self.on_baseline(model, completed);
@@ -1032,6 +1194,7 @@ impl Actor {
             Lease {
                 slot,
                 backend_model: oip.model_name.clone(),
+                endpoint: self.config.endpoint_of(model).to_owned(),
                 state: LeaseState::Running,
             },
         );
@@ -1306,6 +1469,12 @@ impl Actor {
         metrics.backend_timeouts = self.backend_timeouts;
         metrics.quarantined = self.held_credits();
         metrics.consecutive_transport_failures = self.consecutive_transport_failures;
+        metrics.backends = self.backends.len() as u64;
+        metrics.backends_reachable = self
+            .reachability
+            .iter()
+            .filter(|(endpoint, ok)| **ok && self.backends.contains_key(*endpoint))
+            .count() as u64;
         metrics.rejected_quarantined = self.metrics_rejected_quarantined;
         metrics.generative_prefill_us = self.generative.prefill_work.as_micros();
         metrics.generative_decode_us = self.generative.decode_work.as_micros();

@@ -46,6 +46,7 @@ pub mod snapshot;
 
 pub use actuation::{
     Actuation, ActuationError, ActuationPolicy, ActuationState, Actuator, ClockMhz,
+    NvidiaSmiActuator,
 };
 pub use collector::{Collector, CollectorHealth, Fallback, NvidiaSmi, Recorded};
 pub use gpu::{GpuState, ThrottleReason, parse_query_line};

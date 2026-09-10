@@ -694,6 +694,30 @@ impl Scheduler {
     /// Ohne Hinweis der Wert aus dem Vertrag. Ein Hinweis kann ihn
     /// verschaerfen, und lockern nur, wenn der Betreiber es freigegeben hat.
     #[must_use]
+    /// Das wirksame Hoechstalter fuer **diesen** Request (NV-18).
+    ///
+    /// Grundlage ist, was der Request mitbringt — ein Client darf sein
+    /// eigenes Hoechstalter nennen. Darauf wirkt der Hinweis der Anwendung,
+    /// und der gilt je Strom, nicht je Request.
+    ///
+    /// Ohne Hinweis ist das Ergebnis der Wert aus dem Request, und alles
+    /// verhaelt sich wie vor NV-18.
+    fn effective_max_age_for(
+        &self,
+        model: ModelIdx,
+        descriptor: &RequestDescriptor,
+        now: Instant,
+    ) -> Option<Duration> {
+        self.hints.effective_max_age(model, descriptor.max_age, now)
+    }
+
+    /// Das wirksame Hoechstalter eines **Stroms**, Hinweise eingerechnet
+    /// (NV-18).
+    ///
+    /// Grundlage ist der Vertrag. Fuer einen einzelnen Request gilt
+    /// stattdessen, was er selbst mitbringt — dafuer rechnet
+    /// `effective_max_age_for`.
+    #[must_use]
     pub fn effective_max_age(&self, model: ModelIdx, now: Instant) -> Option<Duration> {
         let base = self
             .contracts
@@ -1111,7 +1135,13 @@ impl Scheduler {
                 continue;
             }
             for descriptor in queue.iter() {
-                let Some(limit) = descriptor.max_age else {
+                // Das **wirksame** Hoechstalter, Hinweise eingerechnet
+                // (NV-18). Ein Aktionshorizont, den der Betreiber freigegeben
+                // hat, verlaengert es fuer die Dauer seiner Frist; ein
+                // erhoehter Bedarf verkuerzt es. Ohne diese Zeile blieb der
+                // Hinweisregler ohne jede Wirkung auf eine Entscheidung —
+                // gebaut, getestet, folgenlos (Review R09).
+                let Some(limit) = self.effective_max_age_for(model, descriptor, now) else {
                     continue;
                 };
                 let Some(plan) = self.plan(model, descriptor, now) else {
@@ -1306,9 +1336,11 @@ impl Scheduler {
         optimistic_finish: Instant,
         sink: &mut S,
     ) -> bool {
-        let worthless = descriptor.max_age.is_some_and(|limit| {
-            optimistic_finish.saturating_since(descriptor.generation_time) > limit
-        });
+        let worthless = self
+            .effective_max_age_for(model, descriptor, now)
+            .is_some_and(|limit| {
+                optimistic_finish.saturating_since(descriptor.generation_time) > limit
+            });
         if !(worthless && descriptor.queue_policy.allows_stale_drop()) {
             return false;
         }
