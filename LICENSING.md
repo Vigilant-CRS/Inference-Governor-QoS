@@ -9,7 +9,7 @@ Short version: **testing is free, running your business on it is not.**
 | Evaluate, develop, test, benchmark, research, teach, run in CI | **Free, no time limit** — including inside a company, and on production-grade hardware. We would rather you tested it properly than briefly. |
 | Run it in production on **up to 3 devices** | **Free.** A pilot cell, a demo robot, a single line does not need a contract. |
 | Read, modify, fork, publish patches | **Free.** It is source-available; the licence restricts *use in production*, not reading or changing. |
-| Use any version four years after its release | **Free, under Apache-2.0.** Every version converts automatically. |
+| Use any version four years after its release | **Free, under Apache-2.0.** Every version converts automatically — [the text of that future licence](docs/licensing/apache-2.0-change-license.txt). |
 
 ## What needs a commercial licence
 
