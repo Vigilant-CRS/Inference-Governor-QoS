@@ -142,6 +142,26 @@ Diese Bausteine sind weiterhin nur **gebaut** und tun im Betrieb nichts:
   nicht „kostenlos". Die erste Installation mit einem echten generativen
   Backend schliesst diese Luecke in einem Kalibrierlauf.
 
+## Die offenen Arbeitspakete
+
+| Paket | Stand | Was fehlt |
+|---|---|---|
+| NV-09 TensorRT Direct | **offen** | Ein schmaler Referenzpfad an Triton vorbei. Zwei Dinge fehlen: die TensorRT-Header (im Triton-Image nicht enthalten, auf PyPI nur als Stub) und eine Entscheidung ueber `unsafe_code = "forbid"` — jede CUDA-FFI braucht `unsafe`. Das ist eine Entscheidung ueber die Kernzusage dieses Projekts und keine technische Huerde. |
+| NV-12 CUDA-Graphs | **gemessen, negativ** | Ueber Tritons Modellkonfiguration erreichbar, ohne eigenen Codepfad — wie NV-08 bei TensorRT. 3,7 % weniger p50, und **mehrere** Modelle mit Graphs laden nicht mehr: die Aufnahme des einen vergiftet den Stream des anderen. Fuer einen Governor, der mehrere Modelle ordnet, unbrauchbar. [Messung](benchmark/cuda-graphs.md) |
+| NV-14 Green Contexts | **offen** | Braucht die CUDA-Treiber-API (`cuGreenCtxCreate`, in `/usr/include/cuda.h` vorhanden) und damit dieselbe `unsafe`-Entscheidung wie NV-09. |
+| NV-15 XSched-Spike | **offen** | Ein Rechercheversuch gegen ein fremdes Repository, kein Codepaket dieses Projekts. |
+| NV-17 DAG | Kern fertig, nicht angeschlossen | Eine Zusage vom Client, welche Anfrage zu welcher Aufnahme gehoert. Protokollerweiterung, ohne benannten Pilotfall nicht sinnvoll zu entwerfen. |
+| NV-21/22/23 | optional / Forschung | Ein weiterer Backendadapter, mehrere Ressourcendomaenen, formale Analyse. |
+
+**Zur `unsafe`-Frage bei NV-09/12/14.** Die Header sind da: CUDA 12.4 ist
+installiert, `cuda.h` und `cuda_runtime.h` liegen in `/usr/include`,
+`libcuda.so.580` ist geladen, und `cuGreenCtxCreate` steht im Header. Was
+fehlt, ist keine Datei, sondern eine Entscheidung: `Cargo.toml` setzt
+`unsafe_code = "forbid"` fuer den ganzen Workspace, und das ist die staerkste
+Zusage, die dieses Projekt macht. Ein eigenes Crate mit enger, gepruefter
+FFI-Oberflaeche waere der uebliche Weg — er kostet die Zusage in ihrer heutigen
+Form.
+
 ## Offen fuer eine Produktionsfreigabe
 
 - **NV-19 — ein Entwicklungspartner.** Das einzige Paket, das nicht durch Code
