@@ -334,6 +334,10 @@ impl GatewayService {
             stateful: contract.stateful,
             variant: None,
             payload: PayloadRef(0),
+            context_tokens: 0,
+            // Beides setzt der Actor, sobald feststeht, ob dieser Auftrag
+            // wirklich zerlegt wird (NV-16).
+            decomposable: false,
         })
     }
 }

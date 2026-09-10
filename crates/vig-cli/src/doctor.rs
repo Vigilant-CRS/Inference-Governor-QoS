@@ -11,6 +11,8 @@ use std::process::ExitCode;
 use vig_backend_triton::TritonClient;
 use vig_config::Config;
 use vig_config::schema::Resolved;
+use vig_core::Duration;
+use vig_core::generative::{Latencies, Plan};
 
 /// Das Gesamturteil eines Laufs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -81,6 +83,7 @@ pub(crate) async fn run(
     verdict = verdict.max(check_contracts(&resolved));
     verdict = verdict.max(check_utilization(&resolved));
     verdict = verdict.max(check_best_effort_feasibility(&resolved));
+    verdict = verdict.max(check_decomposition_cost(&resolved));
     verdict = verdict.max(check_backend(&resolved, offline).await);
     verdict = verdict.max(check_capabilities(&resolved, offline).await);
     verdict = verdict.max(check_profiles(&resolved, offline).await);
@@ -215,6 +218,136 @@ fn check_best_effort_feasibility(resolved: &Resolved) -> Verdict {
         }
     }
     verdict
+}
+
+/// Nennt den Preis der Zerlegung, statt sie als kostenlos darzustellen (NV-16).
+///
+/// ADR-0014 zerlegt einen generativen Auftrag in Quanten, und jedes Quantum
+/// traegt den gewachsenen Prompt erneut ins Backend. Ohne wirksames
+/// Prefix-Caching wird dieser Prompt jedes Mal neu berechnet — die Zerlegung
+/// erzeugt dann quadratisch viel Arbeit, wo der ungeteilte Lauf linear
+/// gewesen waere. Der `doctor` hat diese Zerlegung bisher als reine Abhilfe
+/// gemeldet („wird aber in Quanten zerlegt") und ihren Preis verschwiegen.
+///
+/// Gerechnet wird mit Quanten in Mindestgroesse — der groessten Zahl von
+/// Fortsetzungen, die dieser Vertrag zulaesst — und mit einem **leeren
+/// Prompt**. Die tatsaechliche Quantengroesse haengt an der Luecke zur
+/// naechsten geschuetzten Ankunft, die Promptlaenge am Aufrufer; beide stehen
+/// zur Konfigurationszeit nicht fest.
+///
+/// Der genannte Aufschlag ist damit eine **Untergrenze**, nicht der
+/// unguenstigste Fall. Der Prompt ist der dominierende Term der
+/// Prefill-Summe: `n * prompt` gegen `total * (n-1) / 2` aus dem Wachstum. Bei
+/// 16 Quanten und einem 500-Token-Prompt sind das 8000 gegen 480
+/// Token-Prefills. Was der Betrieb sieht, ist also mehr als das hier — und
+/// `worth_decomposing` im Gateway rechnet zur Laufzeit mit dem echten Prompt.
+/// Ein Vertrag, den dieses Werkzeug gruen meldet, kann dort trotzdem als zu
+/// teuer abgelehnt werden. Das steht deshalb im Text.
+///
+/// Das ist ein Hinweis und kein Fehler: ob ein Aufschlag tragbar ist,
+/// entscheidet der Betreiber und nicht dieses Werkzeug.
+fn check_decomposition_cost(resolved: &Resolved) -> Verdict {
+    let mut verdict = Verdict::Ready;
+    for (i, contract) in resolved.contracts.iter().enumerate() {
+        let Some(cooperative) = contract.cooperative else {
+            continue;
+        };
+        let name = resolved.model_names.get(i).map_or("?", String::as_str);
+        let cost = cooperative.cost_model();
+        let plan = Plan::project(
+            cost,
+            0,
+            cooperative.max_total_tokens,
+            cooperative.min_tokens,
+        );
+        if plan.quanta <= 1 {
+            continue;
+        }
+        let overhead = plan.overhead_permille();
+        let percent = overhead.checked_div(10).unwrap_or(0);
+
+        // Dieselbe Schwelle, die auch `worth_decomposing` im Gateway
+        // anwendet. Frueher schwieg diese Pruefung bei
+        // `prefill_per_token_us == 0`, weil die Null zweideutig ist — waehrend
+        // das Gateway denselben Vertrag ablehnte. Zwei Antworten auf eine
+        // Konfiguration. `base_cost_us` ist ein Pflichtfeld und gemessen; der
+        // Aufschlag aus Round-Trips allein ist eine belastbare Zahl. Die
+        // Zweideutigkeit gehoert in den Text, nicht in die Bewertung.
+        let ambiguous = if cooperative.prefill_per_token.as_nanos() == 0 {
+            " (nur Round-Trips; prefill_per_token_us ist 0, also entweder \
+             gemessen wirkungslos oder nicht gemessen)"
+        } else {
+            " — gerechnet ohne Prompt; mit einem echten Prompt ist es mehr"
+        };
+        if overhead > 1_000 {
+            warn(&format!(
+                "{name}: bis zu {} Quanten kosten mindestens {percent} % mehr \
+                 Arbeit als der ungeteilte Lauf{ambiguous}. Abhilfe: groesseres \
+                 min_tokens, kleineres max_total_tokens oder ein Backend mit \
+                 wirksamem Prefix-Cache.",
+                plan.quanta
+            ));
+            verdict = verdict.max(Verdict::ReadyWithWarnings);
+        } else {
+            ok(&format!(
+                "{name}: bis zu {} Quanten, mindestens {percent} % Aufschlag \
+                 gegenueber dem ungeteilten Lauf{ambiguous}",
+                plan.quanta
+            ));
+        }
+
+        // Was die Zerlegung dem Nutzer bringt und was sie ihn kostet, in den
+        // beiden Groessen, an denen ein generativer Dienst gemessen wird. Sie
+        // laufen gegenlaeufig: kleine Quanten verkuerzen die Wartezeit auf das
+        // erste Token und verlaengern den Abstand zwischen den spaeteren.
+        //
+        // Auch diese Zahlen rechnen ohne Prompt, und das steht im Text: bei
+        // TTFT ist der Prompt-Prefill in einem echten Lauf der groesste
+        // Einzelterm, die genannte Zahl also eine Untergrenze.
+        let gap = worst_quantum_gap(resolved);
+        let latencies = Latencies::project(
+            cost,
+            0,
+            cooperative.max_total_tokens,
+            cooperative.min_tokens,
+            gap,
+        );
+        ok(&format!(
+            "{name}: erstes Token fruehestens nach {} (TTFT ohne Prompt; mit \
+             Prompt kommt dessen Prefill dazu), groesster Tokenabstand {} \
+             (TBT, mit {gap} fuer die laengste dazwischenliegende geschuetzte \
+             Arbeit)",
+            latencies.ttft, latencies.worst_tbt
+        ));
+    }
+    verdict
+}
+
+/// Die laengste Wartezeit, die ein Quantum zwischen zwei Fortsetzungen
+/// einplanen muss.
+///
+/// Zwischen zwei Quanten laeuft die geschuetzte Arbeit, fuer die die Zerlegung
+/// ueberhaupt gemacht wird. Was das kostet, ist ihre **Ausfuehrungszeit** und
+/// nicht ihre Periode — die Periode sagt, wie oft sie kommt, nicht wie lange
+/// sie dauert. Und gesucht ist die **laengste**, nicht die kuerzeste: der
+/// unguenstigste Fall ist der, in dem das teuerste geschuetzte Modell
+/// dazwischenkommt.
+///
+/// Eine Naeherung bleibt es trotzdem: kommen mehrere geschuetzte Ankuenfte
+/// zwischen zwei Quanten, ist die Wartezeit laenger. Der Wert ist eine
+/// Untergrenze, und der Bericht sagt das auch.
+fn worst_quantum_gap(resolved: &Resolved) -> Duration {
+    resolved
+        .contracts
+        .iter()
+        .filter(|c| c.criticality.is_guarded())
+        .filter_map(|c| {
+            c.variants
+                .get(0)
+                .and_then(|v| v.profile.conservative_at(0, resolved.margin).ok())
+        })
+        .max_by_key(|d: &Duration| d.as_nanos())
+        .unwrap_or(Duration::ZERO)
 }
 
 /// Die einfache Demand-Warnung aus Spec 10.9: `U = Summe(C_i / T_i)`.
@@ -638,4 +771,97 @@ async fn check_backend(resolved: &Resolved, offline: bool) -> Verdict {
         }
     }
     verdict
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+
+    use super::{Verdict, check_decomposition_cost};
+    use vig_config::Config;
+    use vig_config::schema::Resolved;
+
+    /// Ein Vertrag mit dem angegebenen Prefill-Anteil.
+    fn resolved_with(prefill_per_token_us: u64, min_tokens: u32) -> Resolved {
+        let yaml = format!(
+            r"
+version: 1
+backend:
+  type: triton
+  grpc_endpoint: 127.0.0.1:8001
+  slots: 1
+models:
+  vlm:
+    class: best_effort
+    queue: {{ policy: fifo, capacity: 8 }}
+    contract: {{ deadline_ms: 30000 }}
+    cooperative:
+      tokens_per_second: 242
+      min_tokens: {min_tokens}
+      max_total_tokens: 64
+      base_cost_us: 18000
+      prefill_per_token_us: {prefill_per_token_us}
+    variants:
+      - id: main
+        backend_model: vlm_main
+        quality: {{ value: 1.0, source: measured }}
+        profile: {{ p50_us: 100000, p95_us: 120000, p99_us: 130000, samples: 100 }}
+"
+        );
+        Config::from_yaml(&yaml).unwrap().resolve().unwrap()
+    }
+
+    /// Ein gemessener Prefill-Anteil, der die Zerlegung teuer macht, wird
+    /// gemeldet.
+    ///
+    /// Der Fall, den NV-16 sichtbar macht: 16 Quanten a 4 Token, jedes traegt
+    /// den gewachsenen Prompt erneut. Der `doctor` hat das bis dahin als reine
+    /// Abhilfe gemeldet und den Preis verschwiegen.
+    #[test]
+    fn a_costly_decomposition_is_reported() {
+        let verdict = check_decomposition_cost(&resolved_with(200, 4));
+        assert_eq!(
+            verdict,
+            Verdict::ReadyWithWarnings,
+            "ein Aufschlag ueber 100 % gehoert in den Bericht"
+        );
+    }
+
+    /// Auch ohne gemessenen Prefill-Anteil wird gewarnt, wenn der Aufschlag
+    /// die Schwelle reisst.
+    ///
+    /// Der Befund aus dem Nachreview: diese Pruefung schwieg frueher bei
+    /// `prefill_per_token_us == 0`, weil die Null zweideutig ist — waehrend
+    /// `worth_decomposing` im Gateway denselben Vertrag ablehnte. Zwei
+    /// Antworten auf eine Konfiguration. `base_cost_us` ist ein Pflichtfeld
+    /// und gemessen; ein Aufschlag von 197 % aus reinen Round-Trips ist eine
+    /// belastbare Zahl. Die Zweideutigkeit steht jetzt im Text.
+    #[test]
+    fn round_trips_alone_can_already_break_the_threshold() {
+        // 32 Quanten zu je 2 Token, 18 ms Sockel: knapp 200 % Aufschlag,
+        // ganz ohne Prefill-Term.
+        assert_eq!(
+            check_decomposition_cost(&resolved_with(0, 2)),
+            Verdict::ReadyWithWarnings,
+            "der Sockel allein traegt diese Warnung"
+        );
+        // Und bei 16 Quanten bleibt es darunter — die Schwelle ist eine
+        // Schwelle und kein Dauerzustand.
+        assert_eq!(
+            check_decomposition_cost(&resolved_with(0, 4)),
+            Verdict::Ready
+        );
+    }
+
+    /// Ein Vertrag, der gar nicht zerlegt, wird nicht bewertet.
+    ///
+    /// `min_tokens = max_total_tokens` heisst: ein einziges Quantum. Dann gibt
+    /// es keinen Aufschlag, ueber den zu reden waere.
+    #[test]
+    fn a_contract_that_never_splits_is_not_judged() {
+        assert_eq!(
+            check_decomposition_cost(&resolved_with(200, 64)),
+            Verdict::Ready
+        );
+    }
 }

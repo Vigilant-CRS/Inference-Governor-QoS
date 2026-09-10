@@ -122,9 +122,52 @@ pub fn render(metrics: &Metrics) -> String {
         "Best-Effort-Requests, die terminal wurden, ohne je gelaufen zu sein (ADR-0012).",
         metrics.best_effort_starved,
     );
+    render_generative(&mut out, metrics);
 
     render_derived(&mut out, metrics);
     out
+}
+
+/// Die Kennzahlen der kooperativen Zerlegung (NV-16).
+///
+/// Sie stehen zusammen, weil sie nur zusammen etwas sagen: Prefill gegen
+/// Dekodierung ist das Verhaeltnis, an dem sich entscheidet, ob die Zerlegung
+/// noch traegt.
+fn render_generative(out: &mut String, metrics: &Metrics) {
+    let mut counter = |name: &str, help: &str, value: u64| {
+        let _ = writeln!(out, "# HELP {name} {help}");
+        let _ = writeln!(out, "# TYPE {name} counter");
+        let _ = writeln!(out, "{name} {value}");
+    };
+    counter(
+        "vig_generative_prefill_us_total",
+        "Arbeit in wiederholten Prefill-Berechnungen; erzeugt kein Token (NV-16).",
+        metrics.generative_prefill_us,
+    );
+    counter(
+        "vig_generative_decode_us_total",
+        "Arbeit, die tatsaechlich Token erzeugt hat (NV-16).",
+        metrics.generative_decode_us,
+    );
+    counter(
+        "vig_generative_fixed_us_total",
+        "Feste Kosten der Quanten: Round-Trip und Scheduling im Backend (NV-16).",
+        metrics.generative_fixed_us,
+    );
+    counter(
+        "vig_decomposition_refused_total",
+        "Auftraege, die ungeteilt liefen, weil die Zerlegung zu teuer war (NV-16).",
+        metrics.decomposition_refused,
+    );
+    // Ein Hoechststand, keine Summe: der laengste Kontext faellt nie, aber er
+    // beschreibt einen Zustand und keinen Zaehler.
+    let name = "vig_generative_context_tokens";
+    let _ = writeln!(
+        out,
+        "# HELP {name} Laengster Kontext, den eine Fortsetzung getragen hat, in Token (NV-16)."
+    );
+    let _ = writeln!(out, "# TYPE {name} gauge");
+    let _ = writeln!(out, "{name} {}", metrics.generative_context_tokens);
 }
 
 /// Zeitsummen und abgeleitete Verhaeltnisse.
@@ -623,6 +666,11 @@ mod tests {
             "vig_requests_stale_total",
             "vig_deferred_for_protected_total",
             "vig_best_effort_starved_total",
+            "vig_generative_prefill_us_total",
+            "vig_generative_decode_us_total",
+            "vig_generative_fixed_us_total",
+            "vig_decomposition_refused_total",
+            "vig_generative_context_tokens",
         ] {
             assert!(text.contains(name), "{name} fehlt im Export");
         }

@@ -1100,3 +1100,176 @@ async fn a_proven_execution_end_releases_the_credit_exactly_once() {
         .await
         .expect("der Slot ist wieder nutzbar");
 }
+
+/// Eine zu teure Zerlegung wird nicht gefahren — der Auftrag laeuft ungeteilt.
+///
+/// ADR-0014 nennt den ungeteilten Lauf als Rueckfall, NV-16 rechnet aus, wann
+/// er faellig ist: jedes Quantum traegt den gewachsenen Prompt erneut ins
+/// Backend, und ohne wirksames Prefix-Caching kostet die Zerlegung dann mehr
+/// Arbeit, als sie an Blockadezeit spart. Mit `max_overhead_permille: 0` ist
+/// jeder Aufschlag zu viel, und der Governor darf gar nicht erst zerlegen.
+///
+/// Der Nachweis ist die Zahl der Backendaufrufe: einer statt drei. Er haengt
+/// an keiner Uhr — die Entscheidung faellt bei der Zulassung, aus Zahlen, die
+/// im Vertrag stehen.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_decomposition_that_costs_too_much_is_not_run() {
+    let split = backend_calls_for(None).await;
+    assert_eq!(split.0, 3, "ohne Grenze wird zerlegt wie bisher");
+
+    let undivided = backend_calls_for(Some(0)).await;
+    assert_eq!(
+        undivided.0, 1,
+        "mit einer Grenze von null laeuft der Auftrag am Stueck"
+    );
+
+    // Und der eine Aufruf traegt die Obergrenze des Betreibers. Ohne diese
+    // Zusicherung war der Rueckfall schlimmer als die Zerlegung: der
+    // `GenerativeJob` ist die **einzige** Stelle, die `max_total_tokens`
+    // durchsetzt, und ohne ihn bekaeme ein Client ohne eigenes `max_tokens`
+    // unbegrenzte Erzeugung — waehrend der Kern die Profillaufzeit der
+    // Variante eingeplant hat.
+    assert_eq!(
+        undivided.1,
+        vec![Some(3)],
+        "ungeteilt heisst nicht unbegrenzt (Spec 8.3)"
+    );
+}
+
+/// Ein Auftrag gegen ein Backend, das je Aufruf vier Zeichen erzeugt; zurueck
+/// kommen die Zahl der Aufrufe und das `max_tokens`, das je Aufruf ankam.
+async fn backend_calls_for(max_overhead_permille: Option<u32>) -> (u64, Vec<Option<u32>>) {
+    let backend_impl = Arc::new(mock_backend::MockBackend::generative(
+        std::time::Duration::from_millis(1),
+        4,
+    ));
+    let endpoint = mock_backend::start(backend_impl.clone()).await.to_string();
+
+    let limit = max_overhead_permille
+        .map(|p| format!("\n      max_overhead_permille: {p}"))
+        .unwrap_or_default();
+    let yaml = format!(
+        r"
+version: 1
+backend:
+  type: triton
+  grpc_endpoint: {endpoint}
+  slots: 1
+  pipelining_depth: 0
+models:
+  vlm:
+    class: best_effort
+    queue: {{ policy: fifo, capacity: 64 }}
+    contract: {{ deadline_ms: 10000 }}
+    cooperative:
+      tokens_per_second: 1000
+      min_tokens: 1
+      max_total_tokens: 3
+      base_cost_us: 5000{limit}
+    variants:
+      - id: main
+        backend_model: qwen
+        quality: {{ value: 1.0, source: measured }}
+        profile: {{ p50_us: 1000, p95_us: 1000, p99_us: 1000, samples: 1000 }}
+"
+    );
+    let resolved = Arc::new(Config::from_yaml(&yaml).unwrap().resolve().unwrap());
+    let clock = MonotonicClock::start();
+    let backend = Arc::new(vig_backend_triton::TritonClient::new(endpoint));
+    let handle = actor::spawn(resolved.clone(), &backend, clock, &[]).unwrap();
+    let service = GatewayService::new(resolved, backend, handle, clock);
+
+    service
+        .model_infer(tonic::Request::new(text_request("Beschreibe: ")))
+        .await
+        .unwrap();
+
+    (
+        backend_impl.served.load(Ordering::Relaxed),
+        backend_impl.seen_max_tokens.lock().unwrap().clone(),
+    )
+}
+
+/// Der Kontext eines zerlegten Auftrags erreicht die Metrik — und damit den
+/// Kern.
+///
+/// Die Luecke, die das Review gefunden hat: beide Unittests riefen
+/// `continuation_descriptor` direkt auf. Haette jemand die Zeile in
+/// `continue_job` geloescht, die sie benutzt, waeren sie gruen geblieben und
+/// der ganze Umbau wirkungslos. Dieser Test geht ueber den Draht: der
+/// gemeldete laengste Kontext kann nur entstehen, wenn die Fortsetzung ihn
+/// wirklich traegt.
+///
+/// Gerechnet: 12 Zeichen Prompt sind 3 Token, jedes Quantum erzeugt 4 Zeichen
+/// (1 Token). Nach dem ersten Quantum steht der Kontext bei 4, nach dem
+/// zweiten bei 5.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_grown_context_of_a_continuation_reaches_the_metrics() {
+    let backend_impl = Arc::new(mock_backend::MockBackend::generative(
+        std::time::Duration::from_millis(1),
+        4,
+    ));
+    let endpoint = mock_backend::start(backend_impl.clone()).await.to_string();
+
+    let yaml = format!(
+        r"
+version: 1
+backend:
+  type: triton
+  grpc_endpoint: {endpoint}
+  slots: 1
+  pipelining_depth: 0
+models:
+  vlm:
+    class: best_effort
+    queue: {{ policy: fifo, capacity: 64 }}
+    contract: {{ deadline_ms: 10000 }}
+    cooperative:
+      tokens_per_second: 1000
+      min_tokens: 1
+      max_total_tokens: 3
+      base_cost_us: 0
+      prefill_per_token_us: 1000
+    variants:
+      - id: main
+        backend_model: qwen
+        quality: {{ value: 1.0, source: measured }}
+        profile: {{ p50_us: 1000, p95_us: 1000, p99_us: 1000, samples: 1000 }}
+"
+    );
+    let resolved = Arc::new(Config::from_yaml(&yaml).unwrap().resolve().unwrap());
+    let clock = MonotonicClock::start();
+    let backend = Arc::new(vig_backend_triton::TritonClient::new(endpoint));
+    let handle = actor::spawn(resolved.clone(), &backend, clock, &[]).unwrap();
+    let service = GatewayService::new(resolved, backend, handle.clone(), clock);
+
+    service
+        .model_infer(tonic::Request::new(text_request("Beschreibe: ")))
+        .await
+        .unwrap();
+
+    let metrics = handle.metrics().await.unwrap();
+    // Drei Quanten zu je einem Token: der Kontext geht 3 -> 4 -> 5 -> 6.
+    assert_eq!(
+        metrics.generative_context_tokens, 6,
+        "der Kontext waechst mit jedem Quantum und wird als solcher gefuehrt"
+    );
+    // Gebucht werden die **wiederholten** Prefills, also die Quanten 2 und 3
+    // mit Kontext 4 und 5 zu je 1 ms. Der erste Prefill faellt auch beim
+    // ungeteilten Lauf an und ist kein Preis der Zerlegung.
+    assert_eq!(
+        metrics.generative_prefill_us, 9_000,
+        "wiederholtes Prefill ist Arbeit und wird gebucht"
+    );
+    // Alle drei Quanten zu je einem Token bei 1000 Token/s. Das letzte zaehlt
+    // mit: es wird nicht fortgesetzt, aber es hat gerechnet.
+    assert_eq!(
+        metrics.generative_decode_us, 3_000,
+        "und sie ist getrennt von dem, was wirklich Token erzeugt hat"
+    );
+    assert_eq!(
+        metrics.generative_fixed_us, 0,
+        "dieser Vertrag hat keinen Sockel"
+    );
+    assert_eq!(metrics.decomposition_refused, 0);
+}

@@ -82,6 +82,8 @@ fn descriptor(id: u64, now: Instant) -> RequestDescriptor {
         stateful: false,
         variant: None,
         payload: PayloadRef::default(),
+        context_tokens: 0,
+        decomposable: false,
     }
 }
 

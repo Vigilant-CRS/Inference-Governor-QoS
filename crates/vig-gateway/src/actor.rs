@@ -25,6 +25,8 @@ use tokio::sync::{mpsc, oneshot};
 use tonic::Status;
 use vig_backend_triton::{BackendError, TritonClient};
 use vig_config::schema::Resolved;
+use vig_core::generative::{Plan, Progress, Verdict};
+use vig_core::model::Cooperative;
 use vig_core::overload::{OverloadConfig, OverloadController};
 use vig_core::predictor::{ClockClass, StateClass, ThrottleClass};
 use vig_core::scheduler::{Action, Event, Scheduler, SchedulerError};
@@ -354,6 +356,12 @@ struct Actor {
     reconcile_baseline: HashMap<String, u64>,
     /// Requests, die wegen vollstaendiger Quarantaene abgewiesen wurden.
     metrics_rejected_quarantined: u64,
+    /// Die Fortschrittsbuchhaltung ueber alle zerlegten Auftraege (NV-16).
+    ///
+    /// Getrennt nach Prefill und Dekodierung: ein Re-Prefill erzeugt kein
+    /// Token, und ihn als Fortschritt zu buchen hiesse, dieselbe Arbeit
+    /// zweimal zu verkaufen.
+    generative: GenerativeAccounting,
     /// Backendaufrufe, die noch offen sind.
     outstanding: u64,
     /// Gesetzt, sobald ein geordnetes Ende angefordert wurde.
@@ -481,6 +489,7 @@ fn spawn_owned(
         dispatched_per_model: HashMap::new(),
         reconcile_baseline: HashMap::new(),
         metrics_rejected_quarantined: 0,
+        generative: GenerativeAccounting::default(),
         outstanding: 0,
         shutdown: None,
         // Fortsetzungen bekommen Kennungen aus einem eigenen Bereich, damit
@@ -569,8 +578,8 @@ impl Actor {
     fn accept<S: FnMut(Action)>(
         &mut self,
         now: Instant,
-        descriptor: RequestDescriptor,
-        request: Box<ModelInferRequest>,
+        mut descriptor: RequestDescriptor,
+        mut request: Box<ModelInferRequest>,
         reply: oneshot::Sender<Reply>,
         sink: &mut S,
     ) -> bool {
@@ -603,9 +612,34 @@ impl Actor {
             .and_then(|c| c.cooperative)
             && let Some(job) = GenerativeJob::from_request(&request, cooperative.max_total_tokens)
         {
-            self.jobs.insert(id, job);
-            self.descriptors.insert(id, descriptor);
-            self.continuation_of.insert(id, id);
+            if worth_decomposing(&cooperative, &job) {
+                descriptor = decomposed_descriptor(descriptor, id, &job);
+                self.jobs.insert(id, job);
+                self.descriptors.insert(id, descriptor);
+                self.continuation_of.insert(id, id);
+            } else {
+                report_refusal(
+                    &cooperative,
+                    &job,
+                    self.config
+                        .model_names
+                        .get(descriptor.logical_model.get())
+                        .map_or("?", String::as_str),
+                );
+                // Ungeteilt heisst **nicht** unbegrenzt. `max_total_tokens`
+                // ist die Zusage des Betreibers, dass aus fremd kontrollierter
+                // Eingabe keine unbeschraenkte Arbeit entsteht (Spec 8.3), und
+                // durchgesetzt wird sie ausschliesslich beim Bau des Quantums.
+                // Faellt der Job weg, faellt sonst auch die Grenze weg: ein
+                // Client ohne eigenes `max_tokens` bekaeme freie Fahrt, und
+                // der Kern haette die Profillaufzeit der Variante eingeplant.
+                //
+                // Deshalb wird hier **ein** Quantum ueber das volle zulaessige
+                // Budget gebaut und genau das weitergereicht. Ein Lauf am
+                // Stueck, aber innerhalb des Vertrags.
+                *request = job.build_quantum(&request, job.max_total_tokens);
+                self.generative.refused = self.generative.refused.saturating_add(1);
+            }
         }
 
         self.waiting.insert(id, reply);
@@ -1022,8 +1056,7 @@ impl Actor {
 
         self.next_id = self.next_id.saturating_add(1);
         let continuation = RequestId(self.next_id);
-        let mut next = descriptor;
-        next.id = continuation;
+        let next = decomposed_descriptor(descriptor, continuation, &job);
 
         // Die Abbildung wandert mit: Schluessel bleibt die Kennung, die der
         // Client kennt, Wert wird die neue.
@@ -1159,6 +1192,11 @@ impl Actor {
         metrics.quarantined = self.held_credits();
         metrics.consecutive_transport_failures = self.consecutive_transport_failures;
         metrics.rejected_quarantined = self.metrics_rejected_quarantined;
+        metrics.generative_prefill_us = self.generative.prefill_work.as_micros();
+        metrics.generative_decode_us = self.generative.decode_work.as_micros();
+        metrics.generative_fixed_us = self.generative.fixed_work.as_micros();
+        metrics.generative_context_tokens = self.generative.longest_context;
+        metrics.decomposition_refused = self.generative.refused;
         metrics.reconciled = self.reconciled;
         metrics.reconcile_baseline_missing = self.baselines_missing();
         metrics.outstanding_backend_calls = self.outstanding;
@@ -1301,6 +1339,20 @@ impl Actor {
                 .get(&request)
                 .is_some_and(|reply| !reply.is_closed());
             let finished = job.absorb(response);
+            // Gebucht wird hier und nicht in `continue_job`: dort laeuft das
+            // **letzte** Quantum nie durch, und seine Dekodierarbeit fiele aus
+            // der Statistik. Bei n Quanten waeren n-1 gezaehlt, und das
+            // Verhaeltnis Prefill zu Dekodierung — die Groesse, an der sich
+            // entscheidet, ob die Zerlegung noch traegt — waere systematisch
+            // zugunsten des Prefills verzerrt.
+            if let Some(cooperative) = self
+                .config
+                .contracts
+                .get(descriptor_model(self.descriptors.get(&request)))
+                .and_then(|c| c.cooperative)
+            {
+                self.generative.record(&cooperative, &job);
+            }
             if !finished && listening {
                 self.continue_job(request, job);
                 return;
@@ -1505,11 +1557,183 @@ fn spawn_hardware_probe(tx: &mpsc::Sender<Msg>) {
     });
 }
 
+/// Die Fortschrittsbuchhaltung eines Governors ueber alle zerlegten Auftraege
+/// (NV-16).
+///
+/// [`vig_core::generative::Progress`] fuehrt sie je Auftrag; hier werden die
+/// Summen gehalten, die in die Metrik gehen. Der Unterschied zwischen Prefill
+/// und Dekodierung ist der Punkt: nur das eine ist Fortschritt.
+#[derive(Debug, Default)]
+struct GenerativeAccounting {
+    /// Summe der Prefill-Arbeit ueber alle Fortsetzungen.
+    prefill_work: vig_core::Duration,
+    /// Summe der Dekodierarbeit ueber alle Fortsetzungen.
+    decode_work: vig_core::Duration,
+    /// Summe der festen Kosten je Quantum: Round-Trip und Scheduling.
+    ///
+    /// Auf der Messmaschine der **groesste** Einzelterm der Zerlegung. Ihn
+    /// wegzulassen liesse ausgerechnet den dominierenden Kostenanteil aus dem
+    /// exportierten Verhaeltnis heraus.
+    fixed_work: vig_core::Duration,
+    /// Der laengste Kontext, den je eine Fortsetzung getragen hat.
+    longest_context: u32,
+    /// Auftraege, die ungeteilt liefen, weil die Zerlegung zu teuer war.
+    refused: u64,
+}
+
+impl GenerativeAccounting {
+    /// Bucht das Quantum, das dieser Auftrag gerade abgeschlossen hat.
+    ///
+    /// Gebucht wird der **Zuwachs** an Token, nicht der Stand: `job.tokens`
+    /// zaehlt kumulativ und erschiene sonst bei jeder Fortsetzung erneut
+    /// vollstaendig als Fortschritt.
+    ///
+    /// Der Prefill zaehlt erst ab dem **zweiten** Quantum. Der erste faellt
+    /// auch beim ungeteilten Lauf an und ist kein Preis der Zerlegung; was sie
+    /// kostet, sind die Wiederholungen — und nur die stehen in
+    /// `generative_prefill_us`.
+    fn record(&mut self, cooperative: &Cooperative, job: &GenerativeJob) {
+        let cost = cooperative.cost_model();
+        // Der Kontext, mit dem **dieses** Quantum ins Backend gegangen ist:
+        // der Stand davor, nicht der danach.
+        let context_before = job.context_tokens().saturating_sub(job.last_quantum_tokens);
+        let mut progress = Progress::new(context_before);
+        progress.record(job.last_quantum_tokens, cost);
+
+        if job.quanta > 1 {
+            self.prefill_work = add(self.prefill_work, progress.prefill_work);
+        }
+        self.decode_work = add(self.decode_work, progress.decode_work);
+        self.fixed_work = add(self.fixed_work, progress.fixed_work);
+        self.longest_context = self.longest_context.max(job.context_tokens());
+    }
+}
+
+/// Summiert zwei Dauern saettigend.
+fn add(a: vig_core::Duration, b: vig_core::Duration) -> vig_core::Duration {
+    vig_core::Duration::from_nanos_unbounded(a.as_nanos().saturating_add(b.as_nanos()))
+}
+
+/// Der Modellindex eines Deskriptors, oder ein Index ausserhalb jedes
+/// Vertrags, wenn er fehlt.
+///
+/// `usize::MAX` trifft garantiert kein Modell; `contracts.get` liefert dann
+/// `None`, und es wird nichts gebucht. Das ist die richtige Antwort: ohne
+/// Deskriptor ist auch nicht bekannt, nach welchem Kostenmodell zu buchen
+/// waere.
+fn descriptor_model(descriptor: Option<&RequestDescriptor>) -> usize {
+    descriptor.map_or(usize::MAX, |d| d.logical_model.get())
+}
+
+/// Ob dieser Auftrag zerlegt werden soll — oder ungeteilt laufen (NV-16).
+///
+/// Die Zerlegung ist nicht kostenlos: jedes Quantum traegt den gewachsenen
+/// Prompt erneut ins Backend, und ohne wirksames Prefix-Caching wird er jedes
+/// Mal neu berechnet. Bei genug Quanten kostet die Zerlegung mehr Arbeit, als
+/// sie an Blockadezeit spart. ADR-0014 nennt den ungeteilten Lauf als
+/// Rueckfall; hier wird er genommen.
+///
+/// Ohne `max_overhead_permille` im Vertrag bleibt es beim bisherigen
+/// Verhalten: es wird zerlegt, was zerlegbar ist. Das ist Absicht — eine
+/// Grenze, die niemand gesetzt hat, darf keine bestehende Konfiguration
+/// stillschweigend umstellen. Der `doctor` nennt den Preis in jedem Fall.
+///
+/// Gerechnet wird mit Quanten in Mindestgroesse, also dem unguenstigsten
+/// Fall. Die tatsaechliche Groesse haengt an der Luecke zur naechsten
+/// geschuetzten Ankunft und steht hier noch nicht fest; sie kann nur groesser
+/// ausfallen, und dann ist der Aufschlag kleiner als gerechnet.
+fn worth_decomposing(cooperative: &Cooperative, job: &GenerativeJob) -> bool {
+    let Some(limit) = cooperative.max_overhead_permille else {
+        return true;
+    };
+    let plan = Plan::project(
+        cooperative.cost_model(),
+        job.prompt_tokens,
+        job.max_total_tokens,
+        cooperative.min_tokens,
+    );
+    match plan.verdict(limit) {
+        // `Unmeasured` kann aus einem **aufgeloesten** Vertrag nicht kommen:
+        // `is_measured` haengt an der Dekodierrate, und eine Rate von null
+        // lehnt `ModelContract::validate` ab. Der Zweig steht hier trotzdem,
+        // weil `ContextCost` ein oeffentlicher Typ ist und ein Plan auch
+        // ausserhalb dieses Pfades gebaut werden kann. Er ist eine
+        // Vollstaendigkeit, kein Schutz — und soll auch nicht als einer
+        // gelesen werden.
+        Verdict::Decompose | Verdict::Unmeasured => true,
+        Verdict::TooExpensive { .. } => false,
+    }
+}
+
+/// Nennt den Preis, wenn eine Zerlegung abgelehnt wird.
+///
+/// `Verdict::TooExpensive` traegt die Zahl, um die es geht. Sie nur zu zaehlen
+/// und wegzuwerfen hiesse, dem Betreiber zu sagen „ich habe etwas
+/// abgelehnt" — und ihm zu verschweigen, warum. Der Zaehler
+/// `decomposition_refused` sagt, **wie oft**; diese Zeile sagt, **wie teuer**.
+fn report_refusal(cooperative: &Cooperative, job: &GenerativeJob, model: &str) {
+    let plan = Plan::project(
+        cooperative.cost_model(),
+        job.prompt_tokens,
+        job.max_total_tokens,
+        cooperative.min_tokens,
+    );
+    if let Verdict::TooExpensive {
+        overhead_permille,
+        limit_permille,
+    } = plan.verdict(cooperative.max_overhead_permille.unwrap_or(u32::MAX))
+    {
+        tracing::info!(
+            model,
+            quanta = plan.quanta,
+            overhead_permille,
+            limit_permille,
+            "Zerlegung abgelehnt: sie kostet mehr Arbeit, als der Vertrag zulaesst"
+        );
+    }
+}
+
+/// Der Deskriptor eines zerlegten Auftrags: derselbe Auftrag, sein aktueller
+/// Kontext (NV-16).
+///
+/// Beide Pfade laufen hier durch — die erste Annahme in [`Actor::accept`] und
+/// jede Fortsetzung in [`Actor::continue_job`]. Bewusst dieselbe Funktion und
+/// keine zwei Zuweisungen in zwei langen Methoden: der Kontext ist die
+/// einzige Groesse, die sich zwischen zwei Quanten aendert, und sie
+/// entscheidet ueber die Zuschneidung des naechsten. Faellt sie an einer der
+/// beiden Stellen weg, schneidet der Kern dort ein Quantum zu gross zu, und
+/// es zieht ueber seine Luecke hinaus — ohne dass irgendwo ein Fehler sichtbar
+/// wuerde.
+///
+/// Schon das **erste** Quantum traegt Kontext: den Prompt. Er ist in absoluten
+/// Zahlen der groesste einzelne Prefill des ganzen Auftrags, und ihn dort auf
+/// null zu lassen hiesse, ausgerechnet den teuersten Schritt gratis zu planen.
+///
+/// `decomposable` sagt dem Kern, dass dieser Auftrag wirklich in Quanten
+/// laeuft. Ein Vertrag mit `cooperative` sagt nur, dass das **Modell**
+/// zerlegbar ist.
+///
+/// Die Generation Time bleibt die des urspruenglichen Auftrags. Ein Auftrag,
+/// der insgesamt zu lange braucht, altert damit korrekt und wird verworfen,
+/// statt unbegrenzt weiterzulaufen.
+fn decomposed_descriptor(
+    previous: RequestDescriptor,
+    id: RequestId,
+    job: &GenerativeJob,
+) -> RequestDescriptor {
+    RequestDescriptor {
+        id,
+        context_tokens: job.context_tokens(),
+        decomposable: true,
+        ..previous
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::panic)]
 
-    use super::{CancelOnDrop, Msg};
+    use super::{CancelOnDrop, GenerativeJob, Msg, RequestDescriptor, decomposed_descriptor};
     use tokio::sync::mpsc;
     use vig_core::RequestId;
 
@@ -1547,5 +1771,90 @@ mod tests {
             rx.recv().await.is_none(),
             "kein Ereignis, und der Kanal ist geschlossen"
         );
+    }
+
+    /// Jeder zerlegte Auftrag traegt seinen Kontext, vom ersten Quantum an.
+    ///
+    /// Der Kontext ist die einzige Groesse, die sich zwischen zwei Quanten
+    /// aendert. Waere er nicht dabei, schnitte der Kern jedes Quantum gleich
+    /// gross zu — der Fehler, den NV-16 behebt. Und schon das erste traegt
+    /// welchen: den Prompt. Er ist in absoluten Zahlen der groesste einzelne
+    /// Prefill des ganzen Auftrags.
+    #[test]
+    fn every_quantum_carries_its_context_including_the_first() {
+        let mut job = job_with_prompt("Beschreibe das Bild: ");
+        // Die erste Annahme: 21 Zeichen, rund 6 Token Prompt.
+        let first = decomposed_descriptor(descriptor(RequestId(1)), RequestId(1), &job);
+        assert_eq!(first.context_tokens, 6, "der Prompt ist Kontext");
+        assert!(first.decomposable, "und dieser Auftrag wird zerlegt");
+
+        // Nach dem ersten Quantum: Prompt plus das bisher Erzeugte.
+        job.tokens = 16;
+        let second = decomposed_descriptor(first, RequestId(2), &job);
+        assert_eq!(second.id, RequestId(2));
+        assert_eq!(second.context_tokens, job.context_tokens());
+        assert!(
+            second.context_tokens > first.context_tokens,
+            "der Kontext waechst mit jedem Quantum"
+        );
+
+        // Und weiter: monoton, nie zurueck.
+        job.tokens = 32;
+        let third = decomposed_descriptor(second, RequestId(3), &job);
+        assert!(third.context_tokens > second.context_tokens);
+        assert!(third.decomposable);
+    }
+
+    /// Alles ausser Kennung und Kontext bleibt unveraendert.
+    ///
+    /// Insbesondere die Generation Time: an ihr altert der Auftrag. Setzte die
+    /// Fortsetzung sie neu, liefe ein generativer Auftrag unbegrenzt weiter,
+    /// statt irgendwann als veraltet zu enden.
+    #[test]
+    fn a_continuation_changes_nothing_but_its_id_and_context() {
+        let job = job_with_prompt("x");
+        let first = descriptor(RequestId(1));
+        let next = decomposed_descriptor(first, RequestId(2), &job);
+
+        assert_eq!(next.generation_time, first.generation_time);
+        assert_eq!(next.arrival_time, first.arrival_time);
+        assert_eq!(next.absolute_deadline, first.absolute_deadline);
+        assert_eq!(next.criticality, first.criticality);
+        assert_eq!(next.logical_model, first.logical_model);
+        assert_eq!(next.supersession_key, first.supersession_key);
+        assert_eq!(next.payload, first.payload);
+    }
+
+    fn job_with_prompt(prompt: &str) -> GenerativeJob {
+        GenerativeJob {
+            prompt: prompt.to_owned(),
+            generated: String::new(),
+            tokens: 0,
+            prompt_tokens: u32::try_from(prompt.len().div_ceil(4)).unwrap_or(u32::MAX),
+            max_total_tokens: 64,
+            declared_sampling: None,
+            extra_inputs: Vec::new(),
+            quanta: 0,
+            last_quantum_tokens: 0,
+        }
+    }
+
+    fn descriptor(id: RequestId) -> RequestDescriptor {
+        RequestDescriptor {
+            id,
+            logical_model: vig_core::ModelIdx(0),
+            supersession_key: vig_core::SupersessionKey(0),
+            generation_time: vig_core::Instant::ZERO,
+            arrival_time: vig_core::Instant::ZERO,
+            absolute_deadline: None,
+            max_age: None,
+            criticality: vig_core::Criticality::BestEffort,
+            queue_policy: vig_core::QueuePolicy::Fifo,
+            stateful: false,
+            variant: None,
+            payload: vig_core::PayloadRef::default(),
+            context_tokens: 0,
+            decomposable: false,
+        }
     }
 }

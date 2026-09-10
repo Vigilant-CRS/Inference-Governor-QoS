@@ -85,6 +85,8 @@ fn frame(id: u64, model: u16, generated: u64, c: &ModelContract) -> RequestDescr
         stateful: false,
         variant: None,
         payload: PayloadRef(id),
+        context_tokens: 0,
+        decomposable: false,
     }
 }
 

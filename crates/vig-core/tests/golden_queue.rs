@@ -36,6 +36,8 @@ fn frame(id: u64, generated_ms: u64) -> RequestDescriptor {
         stateful: false,
         variant: None,
         payload: PayloadRef(id),
+        context_tokens: 0,
+        decomposable: false,
     }
 }
 

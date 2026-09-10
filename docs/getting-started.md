@@ -190,6 +190,10 @@ The numbers worth watching:
 | `vig_protected_deadline_misses_total` | the number that should stay at zero |
 | `vig_quarantined_slots` | slot credits held because the execution end is not yet proven |
 | `vig_execution_reconciled_total` | ends the governor proved via the backend's own statistics rather than a timer |
+| `vig_generative_prefill_us_total` | work spent re-computing the prompt of a split job — this produces **no tokens** |
+| `vig_generative_decode_us_total` | work that actually produced tokens; only the ratio of the two says whether splitting still pays |
+| `vig_generative_context_tokens` | longest context a continuation carried; if it grows far past what you calibrated, the sizing is no longer backed by a measurement |
+| `vig_decomposition_refused_total` | jobs that ran undivided because splitting them would have cost more work than it saved |
 
 `/healthz` answers "is the process alive". `/readyz` answers "can it currently
 do anything" — they are different questions with different consequences.

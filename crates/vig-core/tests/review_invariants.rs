@@ -9,7 +9,12 @@
 //! dass die Reparaturen nicht die jeweils entgegengesetzte Regel ueberdehnt
 //! haben. Ein Test, der nur bestaetigt, was er messen soll, belegt wenig.
 
-#![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 use vig_core::arrayvec::ArrayVec;
 use vig_core::feasibility::{ExpectedArrival, GuardVerdict, guard_protected};
@@ -85,6 +90,8 @@ fn frame(id: u64, model: u16, generated_ms: u64, c: &ModelContract) -> RequestDe
         stateful: c.stateful,
         variant: None,
         payload: PayloadRef(id),
+        context_tokens: 0,
+        decomposable: c.cooperative.is_some(),
     }
 }
 
@@ -440,6 +447,8 @@ fn the_quantum_is_sized_before_the_guard_evaluates_it() {
         min_tokens: 1,
         max_total_tokens: 100,
         base_cost: Duration::ZERO,
+        prefill_per_token: Duration::from_nanos_unbounded(0),
+        max_overhead_permille: None,
     });
 
     let mut s = scheduler(
@@ -514,6 +523,8 @@ fn an_empty_cooperative_token_range_is_rejected_by_the_contract() {
         min_tokens: 8,
         max_total_tokens: 1,
         base_cost: Duration::ZERO,
+        prefill_per_token: Duration::from_nanos_unbounded(0),
+        max_overhead_permille: None,
     });
     assert!(c.validate().is_err());
 
@@ -522,6 +533,8 @@ fn an_empty_cooperative_token_range_is_rejected_by_the_contract() {
         min_tokens: 1,
         max_total_tokens: 8,
         base_cost: Duration::ZERO,
+        prefill_per_token: Duration::from_nanos_unbounded(0),
+        max_overhead_permille: None,
     });
     assert!(
         c.validate().is_err(),
@@ -533,6 +546,8 @@ fn an_empty_cooperative_token_range_is_rejected_by_the_contract() {
         min_tokens: 1,
         max_total_tokens: 8,
         base_cost: Duration::ZERO,
+        prefill_per_token: Duration::from_nanos_unbounded(0),
+        max_overhead_permille: None,
     });
     c.validate().unwrap();
 }
@@ -552,6 +567,8 @@ fn a_quantum_costs_its_fixed_base_plus_generation_time() {
         min_tokens: 4,
         max_total_tokens: 64,
         base_cost: ms(18),
+        prefill_per_token: Duration::from_nanos_unbounded(0),
+        max_overhead_permille: None,
     };
 
     // 4 Token: 18 ms Sockel + 16,5 ms Erzeugung.
@@ -579,6 +596,8 @@ fn the_scheduler_reserves_the_real_cost_of_a_quantum() {
         min_tokens: 4,
         max_total_tokens: 64,
         base_cost: ms(18),
+        prefill_per_token: Duration::from_nanos_unbounded(0),
+        max_overhead_permille: None,
     };
     let mut protected = contract(Criticality::Protected, QueuePolicy::Fifo, &[15]);
     protected.period = Some(ms(33));
@@ -887,4 +906,306 @@ fn counterexample_runtime_longer_than_period_does_not_imply_starvation() {
     );
     let actions = event(&mut s, 2, Event::Arrival(frame(2, 1, 2, &b)));
     assert_eq!(dispatched(&actions), vec![RequestId(2)]);
+}
+
+// ---------------------------------------------------------------------------
+// Fortschrittskosten (NV-16)
+// ---------------------------------------------------------------------------
+
+/// Das Quantum eines fortgesetzten Auftrags faellt kleiner aus als sein erstes.
+///
+/// Gleiche Luecke, gleicher Vertrag, gleiche Rate — nur der Kontext ist
+/// gewachsen. Bis NV-16 rechnete die Zuschneidung den Sockel als Konstante und
+/// schnitt jedes Quantum gleich gross zu. Das spaete zog dann ueber seine
+/// Luecke hinaus, weil seine erneute Prefill-Berechnung nirgends eingeplant
+/// war. Der Test misst genau diesen Unterschied: dasselbe Budget, zwei
+/// Kontextstaende, zwei Quantengroessen.
+#[test]
+fn a_continued_quantum_is_sized_smaller_than_the_first_one() {
+    let (early_tokens, early_runtime) = quantum_at_context(0);
+    let (late_tokens, late_runtime) = quantum_at_context(2_000);
+
+    assert!(
+        late_tokens < early_tokens,
+        "das spaete Quantum traegt einen laengeren Prompt und muss kuerzer \
+         ausfallen: frueh {early_tokens}, spaet {late_tokens}"
+    );
+    assert!(
+        late_runtime <= early_runtime,
+        "die eingeplante Dauer darf durch den Kontext nicht wachsen — sie \
+         wird vom selben Budget gedeckelt: frueh {early_runtime:?}, spaet \
+         {late_runtime:?}"
+    );
+}
+
+/// Ohne gemessenen Prefill-Anteil aendert der Kontext nichts.
+///
+/// Das Gegenbeispiel zum Test darueber. `prefill_per_token = 0` heisst
+/// „nicht gemessen oder wirksamer Prefix-Cache"; dann darf die Zuschneidung
+/// sich nicht anders verhalten als vor NV-16, sonst waeren alle bestehenden
+/// Konfigurationen still veraendert worden.
+#[test]
+fn without_a_measured_prefill_the_context_changes_nothing() {
+    let cooperative = Cooperative {
+        tokens_per_second: 242,
+        min_tokens: 1,
+        max_total_tokens: 64,
+        base_cost: ms(5),
+        prefill_per_token: Duration::from_nanos_unbounded(0),
+        max_overhead_permille: None,
+    };
+    assert_eq!(
+        dispatch_with_context(cooperative, 0, 50),
+        dispatch_with_context(cooperative, 2_000, 50),
+        "ohne Prefill-Term ist der Kontext keine Groesse"
+    );
+}
+
+/// Ein Kontext, der die ganze Luecke auffrisst, wird dem Guard **gemeldet**.
+///
+/// Die Zuschneidung schneidet nicht auf null: `min_tokens` ist die kleinste
+/// sinnvolle Groesse, und darunter zu gehen hiesse, Arbeit zu leisten, die
+/// sich nicht lohnt. Die Entscheidung „passt gar nicht mehr" faellt eine
+/// Schicht darueber — aber nur, wenn die Zuschneidung die **ehrlichen**
+/// Kosten meldet. Genau das war vor NV-16 nicht der Fall: der Sockel war
+/// konstant, und ein Quantum mit 2000 Token Kontext meldete dieselbe Dauer
+/// wie das erste. Der Guard bekam eine Zahl, gegen die er nicht pruefen
+/// konnte.
+#[test]
+fn a_context_that_eats_the_whole_gap_is_reported_to_the_guard() {
+    let cooperative = Cooperative {
+        tokens_per_second: 242,
+        min_tokens: 1,
+        max_total_tokens: 64,
+        base_cost: ms(5),
+        prefill_per_token: Duration::from_micros(20).unwrap(),
+        max_overhead_permille: None,
+    };
+    // 2000 Token Kontext zu 20 us sind 40 ms Prefill — mehr als die Luecke.
+    let (tokens, runtime) = dispatch_with_context(cooperative, 2_000, 50)
+        .expect("die weite Deadline traegt das Quantum noch");
+    assert_eq!(tokens, 1, "zugeschnitten wird auf die kleinste Groesse");
+    assert!(
+        runtime >= ms(45),
+        "gemeldet werden die Kosten mitsamt Prefill, nicht der blosse \
+         Sockel: {runtime:?}"
+    );
+
+    // Und mit einer Deadline, die diese Dauer nicht mehr traegt, vetoiert der
+    // Guard — mit der konstanten Sockelrechnung haette er sie durchgelassen.
+    assert!(
+        dispatch_with_context(cooperative, 2_000, 20).is_none(),
+        "der Guard muss ein Quantum ablehnen, das die geschuetzte Ankunft \
+         verspaetet"
+    );
+    assert!(
+        dispatch_with_context(cooperative, 0, 20).is_some(),
+        "ohne Kontext passt dasselbe Quantum in dieselbe Deadline — der \
+         Unterschied kommt allein aus der Fortschrittsrechnung"
+    );
+}
+
+/// Die Zuschneidung eines Quantums und die Vorausrechnung des ganzen Auftrags
+/// benutzen dasselbe Kostenmodell.
+///
+/// Zwei Modelle nebeneinander waeren die naechste Fehlerquelle: der Scheduler
+/// plante nach dem einen, die Entscheidung „zerlegen oder nicht" fiele nach
+/// dem anderen. Der Test bindet beide an dieselben Zahlen.
+#[test]
+fn the_quantum_sizing_and_the_projection_share_one_cost_model() {
+    let cooperative = Cooperative {
+        tokens_per_second: 242,
+        min_tokens: 1,
+        max_total_tokens: 64,
+        base_cost: ms(18),
+        prefill_per_token: Duration::from_micros(5).unwrap(),
+        max_overhead_permille: None,
+    };
+    let model = cooperative.cost_model();
+    // Ein Quantum von 8 Token bei 1000 Token Kontext, beide Wege.
+    let sized = cooperative.cost_of_with_context(8, 1_000);
+    let projected = model.quantum(8, 1_000);
+    let delta = sized.as_nanos().abs_diff(projected.as_nanos());
+    assert!(
+        delta < 10_000,
+        "beide Wege muessen dieselbe Dauer nennen (Rundung der Rate \
+         ausgenommen): {sized:?} gegen {projected:?}"
+    );
+}
+
+/// Ein Quantum zuschneiden, dispatchen und Groesse plus Dauer zurueckgeben.
+fn quantum_at_context(context: u32) -> (u32, Duration) {
+    let cooperative = Cooperative {
+        tokens_per_second: 242,
+        min_tokens: 1,
+        max_total_tokens: 64,
+        base_cost: ms(5),
+        prefill_per_token: Duration::from_micros(2).unwrap(),
+        max_overhead_permille: None,
+    };
+    dispatch_with_context(cooperative, context, 50).expect("ein Quantum wurde gestartet")
+}
+
+/// Der gemeinsame Aufbau: eine geschuetzte 33-ms-Periode, dazwischen ein
+/// zerlegbarer Auftrag mit dem angegebenen Kontextstand.
+fn dispatch_with_context(
+    cooperative: Cooperative,
+    context: u32,
+    deadline_ms: u64,
+) -> Option<(u32, Duration)> {
+    let mut protected = contract(Criticality::Protected, QueuePolicy::Fifo, &[15]);
+    protected.period = Some(ms(33));
+    protected.deadline = ms(deadline_ms);
+    let mut llm = contract(Criticality::BestEffort, QueuePolicy::Fifo, &[1_000]);
+    llm.cooperative = Some(cooperative);
+
+    let mut s = scheduler(
+        &[protected.clone(), llm.clone()],
+        SlotSet::homogeneous(1, 0).unwrap(),
+    );
+    event(&mut s, 0, Event::Arrival(frame(1, 0, 0, &protected)));
+    event(
+        &mut s,
+        15,
+        Event::Completion {
+            request: RequestId(1),
+            slot: SlotIdx(0),
+        },
+    );
+
+    let mut job = frame(2, 1, 16, &llm);
+    job.context_tokens = context;
+    let actions = event(&mut s, 16, Event::Arrival(job));
+    actions.iter().find_map(|a| match a {
+        Action::Dispatch {
+            predicted_runtime,
+            quantum: Some(tokens),
+            ..
+        } => Some((*tokens, *predicted_runtime)),
+        _ => None,
+    })
+}
+
+/// Ein Auftrag, der nicht zerlegt wird, wird auch nicht als Quantum geplant.
+///
+/// Ein Vertrag mit `cooperative` sagt, dass das **Modell** zerlegbar ist. Ob
+/// ein einzelner Auftrag es wird, entscheidet die Ausfuehrung: ein Request
+/// ohne Texteingang laesst sich nicht zerlegen, und eine zu teure Zerlegung
+/// wird bewusst nicht gefahren (NV-16).
+///
+/// Schnitte der Kern trotzdem ein Quantum zu, meldete er dessen Dauer an
+/// Look-ahead und Slotbelegung, waehrend das Backend den ganzen Auftrag
+/// rechnet. Beide planten dann mit einer Zahl, die um Groessenordnungen zu
+/// klein ist — und die geschuetzte Ankunft dahinter wuerde verspaetet. Es ist
+/// derselbe Fehler wie in
+/// [`the_scheduler_reserves_the_real_cost_of_a_quantum`], nur eine Ebene
+/// hoeher.
+#[test]
+fn an_undivided_job_is_planned_with_its_full_runtime() {
+    let cooperative = Cooperative {
+        tokens_per_second: 242,
+        min_tokens: 4,
+        max_total_tokens: 64,
+        base_cost: ms(5),
+        prefill_per_token: Duration::from_micros(2).unwrap(),
+        max_overhead_permille: None,
+    };
+    let mut llm = contract(Criticality::BestEffort, QueuePolicy::Fifo, &[1_000]);
+    llm.cooperative = Some(cooperative);
+    let mut s = scheduler(&[llm.clone()], SlotSet::homogeneous(1, 0).unwrap());
+
+    let mut job = frame(1, 0, 0, &llm);
+    job.decomposable = false;
+    let actions = event(&mut s, 0, Event::Arrival(job));
+    let planned = actions.iter().find_map(|a| match a {
+        Action::Dispatch {
+            predicted_runtime,
+            quantum,
+            ..
+        } => Some((*predicted_runtime, *quantum)),
+        _ => None,
+    });
+    let Some((runtime, quantum)) = planned else {
+        panic!("der Auftrag wurde gestartet: {actions:?}");
+    };
+    assert_eq!(quantum, None, "kein Quantum ohne Zerlegung");
+    assert!(
+        runtime >= ms(1_000),
+        "geplant wird die volle Laufzeit von 1000 ms, nicht die eines \
+         Quantums: {runtime:?}"
+    );
+
+    // Die Gegenprobe: derselbe Vertrag, derselbe Auftrag, nur zerlegbar.
+    let mut s = scheduler(&[llm.clone()], SlotSet::homogeneous(1, 0).unwrap());
+    let actions = event(&mut s, 0, Event::Arrival(frame(1, 0, 0, &llm)));
+    let quantum = actions.iter().find_map(|a| match a {
+        Action::Dispatch { quantum, .. } => *quantum,
+        _ => None,
+    });
+    assert!(quantum.is_some(), "zerlegbar heisst zerlegt: {actions:?}");
+}
+
+/// Ab einer bestimmten Kontextlaenge passt kein Quantum mehr in die Luecke.
+///
+/// Die Folge des Fortschrittsmodells, benannt statt entdeckt (NV-16): die
+/// Kosten des kleinstmoeglichen Quantums wachsen mit dem Fortschritt des
+/// Auftrags. Ab dem Punkt, an dem sie die Luecke zur naechsten geschuetzten
+/// Ankunft uebersteigen, vetoiert der Look-ahead jede weitere Fortsetzung —
+/// dauerhaft.
+///
+/// Das ist die ehrliche Antwort und kein Fehler: ohne wirksames
+/// Prefix-Caching gibt es fuer diesen Auftrag ab dieser Laenge keine Luecke,
+/// in die er passt. Vor NV-16 fiel es nicht auf, weil der Sockel konstant war
+/// — der Governor startete Quanten, die ihre Luecke ueberzogen. Der Test
+/// haelt beides fest: dass es passiert, und dass es gezaehlt wird.
+#[test]
+fn beyond_a_certain_context_no_quantum_fits_and_it_is_counted() {
+    let cooperative = Cooperative {
+        tokens_per_second: 1_000,
+        min_tokens: 1,
+        max_total_tokens: 4_000,
+        base_cost: ms(1),
+        prefill_per_token: Duration::from_micros(50).unwrap(),
+        max_overhead_permille: None,
+    };
+    let mut protected = contract(Criticality::Protected, QueuePolicy::Fifo, &[5]);
+    protected.period = Some(ms(20));
+    protected.deadline = ms(20);
+    let mut llm = contract(Criticality::BestEffort, QueuePolicy::Fifo, &[1_000]);
+    llm.cooperative = Some(cooperative);
+
+    let dispatched_at = |context: u32| {
+        let mut s = scheduler(
+            &[protected.clone(), llm.clone()],
+            SlotSet::homogeneous(1, 0).unwrap(),
+        );
+        event(&mut s, 0, Event::Arrival(frame(1, 0, 0, &protected)));
+        event(
+            &mut s,
+            5,
+            Event::Completion {
+                request: RequestId(1),
+                slot: SlotIdx(0),
+            },
+        );
+        let mut job = frame(2, 1, 6, &llm);
+        job.context_tokens = context;
+        let actions = event(&mut s, 6, Event::Arrival(job));
+        let started = !dispatched(&actions).is_empty();
+        (started, s.metrics().deferred_for_protected)
+    };
+
+    // Frueh im Auftrag passt das Quantum.
+    assert!(dispatched_at(0).0, "ohne Kontext passt es");
+    // Spaet im Auftrag frisst allein der Prefill die Luecke auf.
+    let (started, deferred) = dispatched_at(2_000);
+    assert!(
+        !started,
+        "100 ms Prefill passen in keine 20-ms-Periode — der Look-ahead muss \
+         vetoieren, statt die geschuetzte Ankunft zu verspaeten"
+    );
+    assert!(
+        deferred > 0,
+        "und das Veto ist ein Befund, kein stiller Nebeneffekt"
+    );
 }

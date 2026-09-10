@@ -53,6 +53,12 @@ pub struct MockBackend {
     /// Bei einer echten Zerlegung waechst der Prompt von Quantum zu Quantum
     /// um das bisher Erzeugte.
     pub seen_prompts: std::sync::Mutex<Vec<String>>,
+    /// Das `max_tokens` je Aufruf, so wie es am Draht ankam.
+    ///
+    /// Die Obergrenze, die der Governor durchsetzt. Sie muss auch dann
+    /// dastehen, wenn gar nicht zerlegt wird — ungeteilt heisst nicht
+    /// unbegrenzt (NV-16, Spec 8.3).
+    pub seen_max_tokens: std::sync::Mutex<Vec<Option<u32>>>,
     /// Wie viele **Teilantworten mit Nutzlast** der Stream-Endpunkt sendet.
     ///
     /// Ein decoupled Modell darf mehrere senden. Mit `1` verhaelt sich das
@@ -94,6 +100,7 @@ impl MockBackend {
             raw_bytes_seen: AtomicU64::new(0),
             chars_per_call: 0,
             seen_prompts: std::sync::Mutex::new(Vec::new()),
+            seen_max_tokens: std::sync::Mutex::new(Vec::new()),
             stream_payloads: 1,
             stream_final_marker: false,
             hang: false,
@@ -139,6 +146,21 @@ fn length_prefixed(value: &str) -> Vec<u8> {
     out.extend_from_slice(&u32::try_from(bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
     out.extend_from_slice(bytes);
     out
+}
+
+/// Liest `max_tokens` aus den Samplingparametern.
+///
+/// Bewusst eine winzige Textsuche statt eines JSON-Parsers: der Test soll
+/// belegen, was der Governor durchsetzt, nicht eine Abhaengigkeit mehr in die
+/// Testhilfe holen.
+fn read_max_tokens(sampling: &str) -> Option<u32> {
+    let rest = sampling.split("\"max_tokens\"").nth(1)?;
+    let digits: String = rest
+        .trim_start_matches([':', ' '])
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
 }
 
 /// Liest einen laengenpraefigierten String.
@@ -269,6 +291,12 @@ impl GrpcInferenceService for Service {
                 .and_then(|raw| read_length_prefixed(raw))
                 .unwrap_or_default();
             self.inner.seen_prompts.lock().unwrap().push(prompt);
+            let max = request
+                .raw_input_contents
+                .get(1)
+                .and_then(|raw| read_length_prefixed(raw))
+                .and_then(|sampling| read_max_tokens(&sampling));
+            self.inner.seen_max_tokens.lock().unwrap().push(max);
             outputs.push(model_infer_response::InferOutputTensor {
                 name: "text_output".to_owned(),
                 datatype: "BYTES".to_owned(),

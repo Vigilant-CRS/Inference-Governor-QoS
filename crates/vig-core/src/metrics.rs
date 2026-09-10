@@ -202,6 +202,53 @@ pub struct Metrics {
     /// wichtigsten Diagnosewerten: ist er null, wirkt der Look-ahead nicht;
     /// ist er sehr hoch, ist die Konfiguration ueberzeichnet.
     pub deferred_for_protected: u64,
+
+    /// Arbeit, die in wiederholte Prefill-Berechnungen ging, in Mikrosekunden
+    /// (NV-16).
+    ///
+    /// Ein Re-Prefill erzeugt **kein einziges Token**. Er entsteht allein
+    /// daraus, dass ein zerlegter Auftrag seinen Zustand im Prompt mitfuehrt
+    /// und jedes Quantum ihn erneut ins Backend traegt. Ihn als Fortschritt zu
+    /// buchen hiesse, dieselbe Arbeit zweimal zu verkaufen — deshalb steht er
+    /// getrennt.
+    ///
+    /// Null heisst nicht „kostenlos", sondern „nicht gemessen": ohne
+    /// `prefill_per_token_us` im Vertrag kann dieser Zaehler nichts wissen.
+    ///
+    /// Gezaehlt werden **abgeschlossene** Quanten. Ein Quantum, das im
+    /// Backend gescheitert ist oder dessen Ergebnis veraltet ankam, hat
+    /// gerechnet — aber wie lange, ist nicht bekannt. Dafuer einen Modellwert
+    /// zu buchen hiesse, Arbeit zu erfinden; die Gesamtauslastung steht
+    /// ohnehin in den Zaehlern, die dafuer da sind.
+    pub generative_prefill_us: u64,
+    /// Arbeit, die tatsaechlich Token erzeugt hat, in Mikrosekunden (NV-16).
+    ///
+    /// Die Gegengroesse zu [`Self::generative_prefill_us`]. Erst das
+    /// Verhaeltnis der beiden sagt, ob sich die Zerlegung noch lohnt.
+    pub generative_decode_us: u64,
+    /// Feste Kosten der Quanten: Round-Trip und Scheduling im Backend, in
+    /// Mikrosekunden (NV-16).
+    ///
+    /// Auf der Messmaschine der **groesste** Einzelterm der Zerlegung — 18 ms
+    /// je Quantum bei rund 4 ms je Token. Er steht neben Prefill und
+    /// Dekodierung, weil das Verhaeltnis sonst den dominierenden Kostenanteil
+    /// auslaesst.
+    pub generative_fixed_us: u64,
+    /// Der laengste Kontext, den eine Fortsetzung getragen hat, in Token
+    /// (NV-16).
+    ///
+    /// Die Groesse, an der die Zuschneidung des naechsten Quantums haengt. Sie
+    /// waechst ueber die Lebensdauer eines Auftrags und faellt nie — steigt
+    /// sie im Betrieb weit ueber das, womit kalibriert wurde, ist die
+    /// Zuschneidung nicht mehr belegt.
+    pub generative_context_tokens: u32,
+    /// Auftraege, die ungeteilt liefen, weil die Zerlegung zu teuer war
+    /// (NV-16).
+    ///
+    /// Der Rueckfall aus ADR-0014, gezaehlt. Ist er null, obwohl eine Grenze
+    /// gesetzt ist, greift sie nie; ist er hoch, ist die Zerlegung fuer diese
+    /// Vertraege die falsche Betriebsart.
+    pub decomposition_refused: u64,
 }
 
 impl Metrics {

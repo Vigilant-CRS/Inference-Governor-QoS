@@ -30,6 +30,7 @@ pub mod contract_ext;
 pub mod dag;
 pub mod estimator;
 pub mod feasibility;
+pub mod generative;
 pub mod hints;
 pub mod ids;
 pub mod interference;

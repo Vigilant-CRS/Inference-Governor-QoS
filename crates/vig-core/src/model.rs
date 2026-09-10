@@ -249,9 +249,61 @@ pub struct Cooperative {
     ///
     /// Gemessen, nicht geraten — wie `tokens_per_second`.
     pub base_cost: Duration,
+    /// Aufwand je Token **bereits vorhandenen Kontexts**, bei jeder
+    /// Fortsetzung erneut (NV-16).
+    ///
+    /// Null heisst: nicht gemessen oder wirksamer Prefix-Cache — dann
+    /// verhaelt sich die Zuschneidung wie vor NV-16, und alte Konfigurationen
+    /// bleiben unveraendert gueltig.
+    ///
+    /// Ist der Wert gesetzt, wird der Sockel oben **kontextabhaengig**: ein
+    /// spaetes Quantum kostet mehr als ein frueheres, weil sein Prompt
+    /// laenger ist. Der Kommentar am Sockel nennt genau diese Ursache — nur
+    /// behandelte das Modell sie bis NV-16 als Konstante.
+    pub prefill_per_token: Duration,
+    /// Wie viel Mehrarbeit die Zerlegung hoechstens kosten darf, in Promille
+    /// (NV-16).
+    ///
+    /// `None` heisst: keine Grenze — es wird zerlegt, was zerlegbar ist, wie
+    /// vor NV-16. Eine Grenze, die niemand gesetzt hat, darf keine bestehende
+    /// Konfiguration stillschweigend umstellen.
+    ///
+    /// Ist ein Wert gesetzt und der vorausgerechnete Aufschlag ueberschreitet
+    /// ihn, laeuft der Auftrag **ungeteilt** — der Rueckfall aus ADR-0014. Er
+    /// blockiert dann seine Zeit am Stueck, und das ist eine Entscheidung mit
+    /// Preis: sie tauscht Blockadezeit gegen Gesamtarbeit.
+    ///
+    /// 0 heisst „jeder Aufschlag ist zu viel", 1000 heisst „hoechstens
+    /// doppelt so viel Arbeit wie ungeteilt".
+    pub max_overhead_permille: Option<u32>,
 }
 
 impl Cooperative {
+    /// Das Kostenmodell dieser Zerlegung, fuer Vorausrechnungen (NV-16).
+    ///
+    /// **Nicht** fuer die Zuschneidung eines einzelnen Quantums: hier wird die
+    /// Rate auf eine Dauer je Token gerundet, und erst dividieren, dann
+    /// multiplizieren verliert gegenueber der exakten Ratenrechnung. Fuer ein
+    /// Verhaeltnis wie den Zerlegungsaufschlag faellt das nicht ins Gewicht;
+    /// fuer eine Dauer, gegen die der Look-ahead prueft, schon.
+    /// [`Self::cost_of_with_context`] rechnet deshalb exakt.
+    #[must_use]
+    pub fn cost_model(&self) -> crate::generative::ContextCost {
+        crate::generative::ContextCost {
+            fixed: self.base_cost,
+            prefill_per_token: self.prefill_per_token,
+            decode_per_token: if self.tokens_per_second == 0 {
+                Duration::from_nanos_unbounded(0)
+            } else {
+                Duration::from_nanos_unbounded(
+                    1_000_000_000_u64
+                        .checked_div(u64::from(self.tokens_per_second))
+                        .unwrap_or(0),
+                )
+            },
+        }
+    }
+
     /// Wie viele Token in `budget` erzeugt werden koennen.
     ///
     /// Der feste Sockel geht zuerst ab: er faellt je Quantum an, gleich wie
@@ -259,24 +311,63 @@ impl Cooperative {
     /// null — dann gibt es kein Quantum, das in diese Luecke passt.
     #[must_use]
     pub fn tokens_in(&self, budget: Duration) -> u32 {
-        let generating = budget.as_nanos().saturating_sub(self.base_cost.as_nanos());
-        let tokens = generating
-            .saturating_mul(u64::from(self.tokens_per_second))
-            .checked_div(1_000_000_000)
-            .unwrap_or(0);
-        u32::try_from(tokens).unwrap_or(u32::MAX)
+        self.tokens_in_with_context(budget, 0)
     }
 
     /// Die erwartete Dauer eines Quantums dieser Groesse.
     ///
     /// Affin, nicht proportional: Sockel plus Erzeugungszeit.
+    ///
+    /// Ohne Kontext, also fuer das **erste** Quantum. Fuer eine Fortsetzung
+    /// ist [`Cooperative::cost_of_with_context`] die richtige Frage: ihr
+    /// Prompt ist laenger, und das kostet (NV-16).
     #[must_use]
     pub fn cost_of(&self, tokens: u32) -> Duration {
+        self.cost_of_with_context(tokens, 0)
+    }
+
+    /// Die erwartete Dauer eines Quantums bei diesem Kontext (NV-16).
+    ///
+    /// `context` ist Prompt plus alles bisher Erzeugte. Ohne gemessenen
+    /// Prefill-Anteil ist das Ergebnis dasselbe wie bei [`Self::cost_of`].
+    #[must_use]
+    pub fn cost_of_with_context(&self, tokens: u32, context: u32) -> Duration {
+        // Exakt: erst multiplizieren, dann dividieren. Andersherum ginge je
+        // Token eine Nanosekunde verloren, und der Fehler waechst mit der
+        // Tokenzahl.
         let generating = u64::from(tokens)
             .saturating_mul(1_000_000_000)
             .checked_div(u64::from(self.tokens_per_second).max(1))
             .unwrap_or(0);
-        Duration::from_nanos_unbounded(self.base_cost.as_nanos().saturating_add(generating))
+        let prefill = self
+            .prefill_per_token
+            .as_nanos()
+            .saturating_mul(u64::from(context));
+        Duration::from_nanos_unbounded(
+            self.base_cost
+                .as_nanos()
+                .saturating_add(prefill)
+                .saturating_add(generating),
+        )
+    }
+
+    /// Wie viele Token in `budget` passen, wenn `context` schon dasteht.
+    ///
+    /// Der Prefill geht zusammen mit dem Sockel ab: beide fallen an, gleich
+    /// wie klein das Quantum ist.
+    #[must_use]
+    pub fn tokens_in_with_context(&self, budget: Duration, context: u32) -> u32 {
+        let prefill = self
+            .prefill_per_token
+            .as_nanos()
+            .saturating_mul(u64::from(context));
+        let overhead = self.base_cost.as_nanos().saturating_add(prefill);
+        let generating = budget.as_nanos().saturating_sub(overhead);
+        let tokens = generating
+            .saturating_mul(u64::from(self.tokens_per_second))
+            .checked_div(1_000_000_000)
+            .unwrap_or(0);
+        u32::try_from(tokens).unwrap_or(u32::MAX)
     }
 }
 

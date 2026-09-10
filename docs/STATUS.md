@@ -52,6 +52,12 @@ Messfehler, sondern ADR-0012: ein nicht unterbrechbarer Block, der laenger
 dauert als die kuerzeste geschuetzte Periode, startet unter Last nie. Genau
 dafuer gibt es die kooperative Zerlegung (ADR-0014).
 
+Was sie kostet, sagt seit NV-16 `vig doctor`: mit den Zahlen aus WP26 kosten
+allein die Round-Trips 95 % mehr Arbeit als der ungeteilte Lauf, und das ist
+eine Untergrenze. Die Zerlegung tauscht Gesamtarbeit gegen Blockadezeit — eine
+Wahl, die jetzt als Wahl dasteht statt als Selbstverstaendlichkeit
+(ADR-0031).
+
 **Was die Messung ueber sich selbst sagt:** die Karte lief dabei unter einem
 Leistungslimit, 1830 von 2100 MHz. Beide Vergleichsseiten liefen darunter, der
 Vergleich gilt also — aber die absoluten Zahlen gelten fuer diesen Zustand und
@@ -78,7 +84,10 @@ nicht fuer die Karte. `vig doctor` sagt das jetzt vor jeder Messung (ADR-0021).
 | NV-09 TensorRT Direct | **offen**, braucht CUDA SDK | — |
 | NV-10 Semantik der Varianten | fertig | [0025](adr/0025-the-same-shape-is-not-the-same-meaning.md) |
 | NV-11 Gerichtete Interferenz | Tabelle und gerichtete Messung fertig; **nicht** an die Zulassung angeschlossen | [0026](adr/0026-interference-is-directed-and-not-additive.md) |
+| NV-13 Energieregler | fertig, opt-in, beobachtet statt angenommen; auf dieser Maschine fehlen die Rechte | [0030](adr/0030-actuation-is-an-exception-and-must-be-observed.md) |
+| NV-16 Fortschrittskosten | Code fertig; der Prefill-Anteil ist auf dieser Maschine **nicht gemessen** — der `vlm` im Benchmark ist ein ResNet-Platzhalter ohne Texteingang | [0031](adr/0031-a-re-prefill-is-not-free-progress.md) |
 | NV-17 Gueltigkeitsbewusster DAG | Kern fertig; **nicht** an das Gateway angeschlossen | [0028](adr/0028-a-fusion-needs-a-common-capture.md) |
+| NV-18 Anwendungssemantik | fertig: ein Hinweis darf verschaerfen, nie lockern | [0029](adr/0029-a-hint-may-tighten-never-loosen.md) |
 | NV-24 Missbudget in Entscheidungen | fertig, Voreinstellung **aus** | [0027](adr/0027-a-miss-budget-that-decides-not-only-observes.md) |
 
 ## Was ausdruecklich noch nicht angeschlossen ist
@@ -98,6 +107,13 @@ hier, weil „umgesetzt" und „wirksam" verschiedene Aussagen sind:
 - **Der Abhaengigkeitsgraph (NV-17)** braucht eine Zusage vom Client, welche
   Anfrage zu welcher Aufnahme gehoert. Das ist eine Protokollerweiterung, die
   ohne benannten Pilotfall nicht sinnvoll zu entwerfen ist.
+- **Der Kontextanteil der Zerlegung (NV-16)** ist gerechnet und getestet, aber
+  nicht gemessen: der `vlm`-Strom in den Benchmarks ist ein ResNet-50 mit
+  Batch 48 und hat keinen Texteingang. `vig calibrate` sagt das auch so und
+  laesst die vorhandenen Werte stehen. `prefill_per_token_us` steht in jeder
+  Beispielkonfiguration auf null — was hier **nicht gemessen** heisst und
+  nicht „kostenlos". Die erste Installation mit einem echten generativen
+  Backend schliesst diese Luecke in einem Kalibrierlauf.
 
 ## Offen fuer eine Produktionsfreigabe
 

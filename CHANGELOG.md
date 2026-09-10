@@ -3,6 +3,52 @@
 Keep a Changelog-Format, semantische Versionierung. Was „die API" hier
 bedeutet, steht in [docs/releases.md](docs/releases.md).
 
+## [Unveroeffentlicht]
+
+### Hinzugefuegt
+
+- **Kontextabhaengige Fortschrittskosten fuer zerlegte generative Auftraege**
+  (NV-16, ADR-0031). `cooperative.prefill_per_token_us` im Vertrag; die
+  Quantenzuschneidung rechnet mit Prompt plus bisher Erzeugtem statt mit einem
+  konstanten Sockel. Ein spaetes Quantum faellt damit kleiner aus als ein
+  frueheres. Null heisst „gemessen wirkungslos oder nicht gemessen" und
+  verhaelt sich exakt wie vor NV-16.
+- **`cooperative.max_overhead_permille`** — kostet die Zerlegung mehr Arbeit
+  als die Grenze zulaesst, laeuft der Auftrag ungeteilt (ADR-0014, Rueckfall).
+  Ohne gesetzte Grenze aendert sich nichts.
+- **`vig calibrate` misst den Kontextanteil.** Zweite Messreihe mit variabler
+  Promptlaenge; ohne sie kuerzt sich der Prefill-Anteil definitionsgemaess aus
+  der Differenz heraus. Der Sockel wird um den Prefill des Kalibrierprompts
+  bereinigt.
+- **`vig doctor` nennt den Preis der Zerlegung.** Zahl der Quanten, Aufschlag
+  gegenueber dem ungeteilten Lauf (als Untergrenze, gerechnet ohne Prompt),
+  dazu TTFT und groesster Tokenabstand.
+- **Fuenf Prometheus-Kennzahlen:** `vig_generative_prefill_us_total`,
+  `vig_generative_decode_us_total`, `vig_generative_fixed_us_total`,
+  `vig_generative_context_tokens`, `vig_decomposition_refused_total`. Prefill
+  steht getrennt von Dekodierung, weil ein Re-Prefill kein Token erzeugt; der
+  Sockel steht daneben, weil er auf der Messmaschine der groesste Einzelterm
+  ist.
+
+### Behoben
+
+- **Ein nicht zerlegter Auftrag wurde als Quantum eingeplant.** Ein Request
+  ohne Texteingang auf einem `cooperative`-Vertrag bekam vom Kern eine
+  Quantendauer zugewiesen, waehrend das Backend den ganzen Auftrag rechnete;
+  Look-ahead und Slotbelegung planten mit einer Zahl, die um
+  Groessenordnungen zu klein war. Der Deskriptor traegt jetzt `decomposable`.
+- **Der schlimmste Tokenabstand wurde unterschaetzt**, wenn die Quantengroesse
+  den Auftrag nicht glatt teilte, und fuer einen ungeteilten Lauf wurde einer
+  erfunden.
+- **`vig calibrate` konnte den Sockel auf null druecken.** Mittelwert ueber
+  fuenf Runden ohne Warmlaufverwurf: ein einziger Stall reichte, damit der
+  errechnete Kontextterm den ganzen Sockel auffrisst. Jetzt Median, ein
+  verworfener Warmlauf, und ein Widerspruch zwischen beiden verwirft den
+  Kontextterm statt den Sockel.
+- **`vig doctor` und das Gateway urteilten verschieden** ueber denselben
+  Vertrag: `doctor` schwieg bei `prefill_per_token_us == 0`, das Gateway lehnte
+  ab. Jetzt dieselbe Schwelle in beiden.
+
 ## [0.2.0] — 2026-09-10
 
 Erste veroeffentlichte Version. `v0.1.0` war getaggt, aber der Release-Workflow

@@ -1135,6 +1135,7 @@ impl Scheduler {
             let (predicted_runtime, quantum) = self.size_quantum(
                 model,
                 descriptor.criticality,
+                &descriptor,
                 predicted_runtime,
                 now,
                 forecast.iter(),
@@ -1257,6 +1258,7 @@ impl Scheduler {
         &self,
         model: ModelIdx,
         criticality: Criticality,
+        request: &RequestDescriptor,
         full_runtime: Duration,
         now: Instant,
         forecast: I,
@@ -1264,9 +1266,20 @@ impl Scheduler {
     where
         I: IntoIterator<Item = &'a ExpectedArrival>,
     {
+        // Ein Vertrag mit `cooperative` sagt, dass das **Modell** zerlegbar
+        // ist. Ob dieser Auftrag es wird, entscheidet die Ausfuehrung — ein
+        // Request ohne Texteingang wird es nie, und eine zu teure Zerlegung
+        // wird bewusst nicht gefahren. Ohne diese Abfrage schneidet der Kern
+        // ein Quantum zu und meldet dessen Dauer, waehrend das Backend den
+        // ganzen Auftrag rechnet: Look-ahead und Slotbelegung planen dann mit
+        // einer Zahl, die um Groessenordnungen zu klein ist.
+        if !request.decomposable {
+            return (full_runtime, None);
+        }
         let Some(cooperative) = self.contracts.get(model.get()).and_then(|c| c.cooperative) else {
             return (full_runtime, None);
         };
+        let context_tokens = request.context_tokens;
         let budget = Self::best_effort_budget(now, forecast, criticality);
         // `ModelContract::validate` schliesst `min > max` aus. Die Untergrenze
         // wird hier trotzdem noch einmal gedeckelt: `clamp` panickt bei einem
@@ -1274,15 +1287,36 @@ impl Scheduler {
         // `panic = "abort"` den ganzen Governor. Eine Verteidigungslinie, die
         // nur bei einem Fehler an anderer Stelle wirkt, kostet hier nichts.
         let lower = cooperative.min_tokens.min(cooperative.max_total_tokens);
+        // Mit dem Kontext, nicht ohne (NV-16): ein spaetes Quantum traegt einen
+        // laengeren Prompt, und dessen erneute Berechnung geht vom selben
+        // Budget ab. Ohne diesen Term faellt jedes Quantum gleich gross aus,
+        // und die spaeten ziehen ueber ihre Luecke hinaus.
+        //
+        // Das hat eine Folge, die hier benannt sein soll: die Kosten des
+        // kleinstmoeglichen Quantums **wachsen** mit dem Fortschritt des
+        // Auftrags. Ab dem Punkt, an dem sie die Luecke zur naechsten
+        // geschuetzten Ankunft uebersteigen, vetoiert der Look-ahead jede
+        // weitere Fortsetzung — dauerhaft. Der Auftrag zaehlt dann in
+        // `deferred_for_protected` und endet ueber `max_age` oder seine
+        // Deadline, nicht ueber ein Ergebnis.
+        //
+        // Das ist kein Fehler, sondern die ehrliche Antwort: ohne wirksames
+        // Prefix-Caching gibt es fuer diesen Auftrag ab dieser Kontextlaenge
+        // keine Luecke mehr, in die er passt. Vor NV-16 fiel das nicht auf,
+        // weil der Sockel konstant war — der Governor startete Quanten, die
+        // ihre Luecke ueberzogen, und die geschuetzte Ankunft dahinter kam zu
+        // spaet. Wer den Fall vermeiden will, setzt `max_overhead_permille`
+        // und laesst den Auftrag ungeteilt laufen, oder er sorgt fuer einen
+        // Cache. Ein Auftrag ohne `max_age` bleibt sonst stehen.
         let tokens = cooperative
-            .tokens_in(budget)
+            .tokens_in_with_context(budget, context_tokens)
             .clamp(lower, cooperative.max_total_tokens);
         // Sockel plus Erzeugungszeit. Ohne den Sockel meldete die Zuschneidung
         // eine Dauer, die das Quantum nie einhalten kann — und der Look-ahead
         // liesse es starten, weil er mit der falschen Zahl rechnet. Bei einem
         // Sockel in der Groessenordnung des Slack ist das der Unterschied
         // zwischen „passt knapp" und „passt grundsaetzlich nicht".
-        let duration = cooperative.cost_of(tokens);
+        let duration = cooperative.cost_of_with_context(tokens, context_tokens);
         (
             duration.max(Duration::from_nanos_unbounded(1)),
             Some(tokens),

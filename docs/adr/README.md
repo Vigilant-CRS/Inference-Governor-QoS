@@ -39,6 +39,7 @@ Spec-Stelle explizit.
 | [0028](0028-a-fusion-needs-a-common-capture.md) | Eine Zusammenfuehrung braucht eine gemeinsame Aufnahme | NV-17, ADR-0005 | Akzeptiert |
 | [0029](0029-a-hint-may-tighten-never-loosen.md) | Ein Hinweis darf verschaerfen, nie lockern | NV-18 | Akzeptiert |
 | [0030](0030-actuation-is-an-exception-and-must-be-observed.md) | Aktuation ist eine Ausnahme, und sie muss beobachtet werden | NV-13, ADR-0021 | Akzeptiert |
+| [0031](0031-a-re-prefill-is-not-free-progress.md) | Ein Re-Prefill ist kein kostenloser Fortschritt | NV-16, ADR-0012, ADR-0014 | Akzeptiert |
 
 ## Format
 

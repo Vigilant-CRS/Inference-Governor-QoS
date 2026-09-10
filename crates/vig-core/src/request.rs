@@ -238,6 +238,31 @@ pub struct RequestDescriptor {
 
     /// Verweis auf die Payload; der Core dereferenziert ihn nie.
     pub payload: PayloadRef,
+    /// Wie viele Token an Kontext dieser Auftrag bereits mitbringt (NV-16).
+    ///
+    /// Prompt plus alles, was fruehere Quanten desselben Auftrags erzeugt
+    /// haben. Faehrt der Zustand im Prompt mit, rechnet jede Fortsetzung
+    /// diesen Kontext neu — und das kostet, je laenger er wird.
+    ///
+    /// Null fuer alles, was nicht zerlegt wird. Die Zuschneidung verhaelt sich
+    /// dann wie vor NV-16.
+    pub context_tokens: u32,
+    /// Ob dieser Auftrag tatsaechlich in Quanten zerlegt wird (NV-16).
+    ///
+    /// Ein Vertrag mit `cooperative` sagt, dass ein Modell zerlegbar **ist**.
+    /// Ob ein einzelner Auftrag es auch wird, entscheidet die Ausfuehrung: ein
+    /// Request ohne Texteingang laesst sich nicht zerlegen, und eine Zerlegung,
+    /// die mehr Arbeit kostet als sie an Blockadezeit spart, wird bewusst
+    /// nicht gefahren (ADR-0014, Rueckfall auf den ungeteilten Lauf).
+    ///
+    /// Der Kern muss das wissen. Schneidet er ein Quantum zu, meldet er dessen
+    /// Dauer an Look-ahead und Slotbelegung — und wenn das Backend danach den
+    /// ganzen Auftrag rechnet, planen beide mit einer Zahl, die um
+    /// Groessenordnungen zu klein ist. Die geschuetzte Ankunft dahinter wird
+    /// dann verspaetet, und zwar genau bei den teuersten Auftraegen.
+    ///
+    /// `false` heisst: mit der vollen Laufzeit planen, kein Quantum.
+    pub decomposable: bool,
 }
 
 impl RequestDescriptor {

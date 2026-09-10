@@ -294,6 +294,10 @@ fn schedule_arrivals(
                 stateful: false,
                 variant: None,
                 payload: PayloadRef(next_id),
+                context_tokens: 0,
+                // Der Simulator kennt keine Prompts; zerlegbar ist, was der
+                // Vertrag zerlegbar nennt.
+                decomposable: contract.cooperative.is_some(),
             };
             meta.insert(next_id, (model, capture));
             pending.insert(next_id, descriptor);

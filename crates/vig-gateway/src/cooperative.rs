@@ -10,9 +10,17 @@
 //!
 //! Jedes Quantum bekommt den urspruenglichen Prompt plus das bisher Erzeugte.
 //! Das braucht keinen Eingriff in die KV-Cache-Verwaltung des Backends und
-//! funktioniert mit jedem Server, der Textgenerierung anbietet. Die Kosten der
-//! wiederholten Prefill-Berechnung traegt das Backend ueber Prefix-Caching;
-//! ohne dieses Caching ist das Verfahren nicht wirtschaftlich.
+//! funktioniert mit jedem Server, der Textgenerierung anbietet.
+//!
+//! Die Kosten der wiederholten Prefill-Berechnung traegt das Backend ueber
+//! Prefix-Caching. Ob es das tut, entscheidet dieses Modul nicht — und bis
+//! NV-16 nahm es stillschweigend an, dass es das tut. Der Kontext waechst mit
+//! jedem Quantum; ohne wirksamen Cache waechst der Aufwand mit ihm, und ein
+//! Auftrag aus n Quanten kostet quadratisch statt linear. Gemessen wird das
+//! ueber `prefill_per_token` im Vertrag, und [`GenerativeJob::context_tokens`]
+//! liefert die Groesse, gegen die es zaehlt. Steht der Wert auf null, heisst
+//! das „gemessen wirkungslos oder nicht gemessen" — nicht mehr „kommt schon
+//! hin".
 //!
 //! ## Woran das Ende erkannt wird
 //!
@@ -42,6 +50,13 @@ pub struct GenerativeJob {
     pub generated: String,
     /// Geschaetzte Zahl bereits erzeugter Token.
     pub tokens: u32,
+    /// Geschaetzte Zahl der Token im urspruenglichen Prompt (NV-16).
+    ///
+    /// Zusammen mit [`Self::tokens`] der Kontext, den jede Fortsetzung erneut
+    /// rechnen muss. Dieselbe grobe Schaetzung wie fuer die erzeugten Token —
+    /// sie muss nur gut genug sein, um die Zuschneidung in die richtige
+    /// Richtung zu bewegen.
+    pub prompt_tokens: u32,
     /// Obergrenze der insgesamt erzeugten Token.
     pub max_total_tokens: u32,
     /// Die Samplingparameter, die der Client mitgegeben hat.
@@ -59,6 +74,12 @@ pub struct GenerativeJob {
     pub extra_inputs: Vec<(InferInputTensor, Vec<u8>)>,
     /// Wie viele Quanten dieser Auftrag bereits gebraucht hat.
     pub quanta: u32,
+    /// Was das zuletzt aufgenommene Quantum erzeugt hat, in Token (NV-16).
+    ///
+    /// Der Zuwachs, nicht der Stand. Die Buchhaltung braucht ihn, um
+    /// Dekodierarbeit vom Re-Prefill zu trennen: `tokens` zaehlt kumulativ und
+    /// wuerde bei jeder Fortsetzung erneut vollstaendig gebucht.
+    pub last_quantum_tokens: u32,
 }
 
 impl GenerativeJob {
@@ -69,6 +90,7 @@ impl GenerativeJob {
     #[must_use]
     pub fn from_request(request: &ModelInferRequest, max_total_tokens: u32) -> Option<Self> {
         let prompt = read_text_input(request)?;
+        let prompt_tokens = u32::try_from(prompt.len().div_ceil(4)).unwrap_or(u32::MAX);
         // Die Obergrenze des Clients gilt, wenn er eine nennt. Die
         // Konfiguration begrenzt, was der Betreiber zulaesst — sie darf
         // nicht anheben, was der Aufrufer bestellt hat. Wer 4 Token
@@ -80,11 +102,30 @@ impl GenerativeJob {
             prompt,
             generated: String::new(),
             tokens: 0,
+            prompt_tokens,
             max_total_tokens: effective,
             declared_sampling: read_sampling_parameters(request),
             extra_inputs: extra_inputs(request),
             quanta: 0,
+            last_quantum_tokens: 0,
         })
+    }
+
+    /// Der Kontext, den die naechste Fortsetzung neu rechnen muss (NV-16).
+    ///
+    /// Prompt plus alles bisher Erzeugte. Er waechst mit jedem Quantum, und
+    /// genau deshalb kostet ein spaetes Quantum mehr als ein frueheres.
+    ///
+    /// Die Summe der je Quantum aufgerundeten Schaetzungen, nicht die
+    /// Schaetzung ueber die Gesamtlaenge: bei n Quanten liegt sie bis zu n-1
+    /// Token zu **hoch**. Das ist die sichere Richtung — ein ueberschaetzter
+    /// Kontext ergibt ein kleineres Quantum, und ein kleineres Quantum
+    /// gefaehrdet keine geschuetzte Ankunft. Wer eine Zahl braucht, die gegen
+    /// einen echten Tokenizer standhaelt, braucht einen echten Tokenizer;
+    /// diese hier soll die Zuschneidung in die richtige Richtung bewegen.
+    #[must_use]
+    pub const fn context_tokens(&self) -> u32 {
+        self.prompt_tokens.saturating_add(self.tokens)
     }
 
     /// Wie viele Token dieser Auftrag noch erzeugen darf.
@@ -156,6 +197,7 @@ impl GenerativeJob {
     /// Gibt zurueck, ob der Auftrag damit abgeschlossen ist.
     pub fn absorb(&mut self, response: &ModelInferResponse) -> bool {
         self.quanta = self.quanta.saturating_add(1);
+        self.last_quantum_tokens = 0;
         let Some(text) = read_text_output(response) else {
             // Ohne verwertbare Ausgabe ist nichts fortzusetzen.
             return true;
@@ -173,9 +215,9 @@ impl GenerativeJob {
         self.generated.push_str(delta);
         // Grobe Schaetzung: rund vier Zeichen je Token. Sie muss nur gut genug
         // sein, um die Gesamtobergrenze einzuhalten.
-        self.tokens = self
-            .tokens
-            .saturating_add(u32::try_from(delta.len().div_ceil(4)).unwrap_or(u32::MAX));
+        let produced = u32::try_from(delta.len().div_ceil(4)).unwrap_or(u32::MAX);
+        self.last_quantum_tokens = produced;
+        self.tokens = self.tokens.saturating_add(produced);
         self.tokens >= self.max_total_tokens
     }
 
@@ -405,6 +447,30 @@ mod tests {
 
     /// Der Zustand reist im Prompt: jedes Quantum sieht Prompt plus bisher
     /// Erzeugtes.
+    /// Der Kontext waechst mit jedem Quantum — Prompt plus Erzeugtes.
+    ///
+    /// Die Groesse, an der die Zuschneidung des naechsten Quantums haengt
+    /// (NV-16). Der Prompt wird grob geschaetzt: rund vier Zeichen je Token.
+    /// Genauer muss es nicht sein — die Schaetzung muss die Zuschneidung nur
+    /// in die richtige Richtung bewegen, und ein Tokenizer je Backend waere
+    /// ein Preis, den diese Genauigkeit nicht wert ist.
+    #[test]
+    fn the_context_grows_with_every_quantum() {
+        let mut job = GenerativeJob::from_request(&request_with("Beschreibe: "), 64).unwrap();
+        // 12 Zeichen, rund 3 Token.
+        assert_eq!(job.prompt_tokens, 3);
+        assert_eq!(
+            job.context_tokens(),
+            3,
+            "vor dem ersten Quantum nur der Prompt"
+        );
+
+        job.tokens = 8;
+        assert_eq!(job.context_tokens(), 11);
+        job.tokens = 24;
+        assert_eq!(job.context_tokens(), 27);
+    }
+
     #[test]
     fn each_quantum_carries_the_accumulated_text() {
         let template = request_with("Beschreibe die Szene:");

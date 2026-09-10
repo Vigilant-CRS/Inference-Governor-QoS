@@ -508,8 +508,13 @@ async fn measure_all_cooperative(config: &Config) -> Vec<CooperativeMeasurement>
         .await
         {
             Some(m) => {
+                let context = if m.prefill_per_token_us == 0 {
+                    "Kontext kostenlos (wirksamer Prefix-Cache)".to_owned()
+                } else {
+                    format!("{} us je Kontexttoken", m.prefill_per_token_us)
+                };
                 eprintln!(
-                    "\n  {logical}: Sockel {} us je Auftrag, {} Token/s",
+                    "\n  {logical}: Sockel {} us je Auftrag, {} Token/s, {context}",
                     m.base_cost_us, m.tokens_per_second
                 );
                 out.push(m);
@@ -525,10 +530,18 @@ async fn measure_all_cooperative(config: &Config) -> Vec<CooperativeMeasurement>
 
 /// Das gemessene Kostenmodell eines zerlegbaren Modells.
 ///
-/// Affin, nicht proportional: `Dauer = Sockel + Token / Rate`. Der Sockel —
-/// Round-Trip, Scheduling im Backend, erneute Prefill-Berechnung — ist auf der
+/// Affin, nicht proportional, und in zwei Groessen statt einer:
+///
+///     Dauer = Sockel + Kontext / Kontextrate + Token / Erzeugungsrate
+///
+/// Der Sockel — Round-Trip und Scheduling im Backend — ist auf der
 /// Messmaschine so gross wie der Slack zwischen zwei geschuetzten Ankuenften.
 /// Wer ihn nicht misst, plant Quanten, die ihre Luecke sicher ueberziehen.
+///
+/// Der Kontextterm kam mit NV-16 dazu. Bis dahin steckte die erneute
+/// Prefill-Berechnung im Sockel und galt damit als konstant — waehrend der
+/// Kontext mit jedem Quantum waechst. Jetzt steht sie getrennt und wird
+/// getrennt gemessen.
 pub(crate) struct CooperativeMeasurement {
     /// Logischer Modellname.
     pub logical: String,
@@ -536,14 +549,33 @@ pub(crate) struct CooperativeMeasurement {
     pub base_cost_us: u64,
     /// Erzeugungsrate in Token je Sekunde.
     pub tokens_per_second: u32,
+    /// Aufwand je Token bereits vorhandenen Kontexts, in Mikrosekunden (NV-16).
+    ///
+    /// Null heisst hier **gemessen wirkungslos**: das Backend faehrt einen
+    /// Prefix-Cache, der greift. Das ist eine Aussage und keine Annahme —
+    /// genau der Unterschied, um den es bei dieser Zahl geht.
+    pub prefill_per_token_us: u64,
 }
 
-/// Misst Sockel und Erzeugungsrate eines zerlegbaren Modells.
+/// Misst Sockel, Erzeugungsrate und Kontextkosten eines zerlegbaren Modells.
 ///
 /// Zwei Punkte genuegen fuer eine Gerade, aber nicht fuer Vertrauen: gemessen
 /// wird ueber mehrere Tokenzahlen, und die Rate ergibt sich aus der Differenz
-/// zwischen der kleinsten und der groessten. Der Sockel ist die extrapolierte
-/// Dauer bei null Token.
+/// zwischen der kleinsten und der groessten.
+///
+/// Es sind **zwei** Geraden, nicht eine. Die eine variiert die Zahl erzeugter
+/// Token bei festem Prompt und liefert die Erzeugungsrate. Die andere variiert
+/// die **Promptlaenge** bei fester Tokenzahl und liefert die Kontextkosten
+/// (NV-16). Ohne die zweite Messung kuerzt sich der Prefill-Anteil aus der
+/// Differenz definitionsgemaess heraus, und `prefill_per_token_us` bliebe in
+/// jeder erzeugten Konfiguration auf null — die Zerlegung waere im Feld
+/// wirkungslos, obwohl das Kostenmodell sie kennt.
+///
+/// Was dabei herauskommt, ist der **marginale** Aufwand je Kontexttoken, so
+/// wie das Backend ihn liefert: mit wirksamem Prefix-Cache ist er nahe null,
+/// und dann ist null die richtige Antwort. Der Sockel wird anschliessend um
+/// den Prefill des Kalibrierprompts bereinigt, sonst stuende dieser Anteil
+/// zweimal im Modell.
 ///
 /// Gibt `None` zurueck, wenn das Modell keinen Texteingang hat oder das
 /// Backend nicht antwortet — dann ist nichts gemessen, und geraten wird hier
@@ -557,30 +589,69 @@ async fn measure_cooperative(
     const PROMPT: &str = "Beschreibe kurz, was auf dem Bild zu sehen ist.";
     const SMALL: u32 = 4;
     const LARGE: u32 = 32;
+    /// Messrunden je Punkt, **nach** dem Warmlauf.
+    ///
+    /// Ungerade, damit der Median eine gemessene Stichprobe ist und kein
+    /// Mittelwert zweier.
     const ROUNDS: u32 = 5;
+    /// Wie oft der Kalibrierprompt fuer die lange Messung wiederholt wird.
+    ///
+    /// Ein deutlich laengerer Kontext, aber kein anderer Inhalt: gemessen
+    /// werden soll die Laenge und nicht das Thema.
+    ///
+    /// 24 Wiederholungen sind rund 276 Token. Die daraus bestimmte Gerade auf
+    /// mehrere tausend Kontexttoken zu verlaengern unterschaetzt den Aufwand:
+    /// Attention waechst superlinear im Kontext. Der gemessene Wert ist damit
+    /// eine **Untergrenze** der Grenzkosten bei langem Kontext — und die
+    /// Zuschneidung faellt in dieser Richtung zu grosszuegig aus, nicht zu
+    /// knapp. Das ist bekannt und steht in ADR-0031.
+    const LONG_REPEATS: usize = 24;
 
-    let mean_us = |tokens: u32| async move {
-        let mut total = 0_u128;
-        let mut ok = 0_u128;
-        for _ in 0..ROUNDS {
-            let request = vig_backend_triton::text_request(backend_model, PROMPT, tokens);
-            let started = std::time::Instant::now();
-            let result = if decoupled {
-                client.infer_decoupled(request).await
-            } else {
-                client.infer(request).await
-            };
-            if result.is_ok() {
-                total = total.saturating_add(started.elapsed().as_micros());
-                ok = ok.saturating_add(1);
+    let long_prompt = PROMPT.repeat(LONG_REPEATS);
+    // Dieselbe grobe Schaetzung wie im Gateway: rund vier Zeichen je Token.
+    let prompt_tokens = |p: &str| u64::try_from(p.len().div_ceil(4)).unwrap_or(u64::MAX);
+
+    // Median statt Mittelwert, und ein verworfener Warmlauf davor.
+    //
+    // Der Mittelwert ueber fuenf Runden traegt jeden Ausreisser mit einem
+    // Fuenftel weiter: ein einziger Stall im Sekundenbereich verschiebt die
+    // Differenz `long - small` um Hunderte Millisekunden, und der daraus
+    // errechnete Kontextterm frisst dann den ganzen Sockel auf. Der Median
+    // ist dagegen unempfindlich.
+    //
+    // Der Warmlauf muss weg, weil die allererste Anfrage an ein Modell dessen
+    // Initialisierung traegt. Faellt sie in `small`, ist `small` zu gross,
+    // `long - small` zu klein — und die CLI meldet „Kontext kostenlos", wo sie
+    // in Wahrheit einen Warmlauf gemessen hat.
+    let median_us = |prompt: &str, tokens: u32| {
+        let prompt = prompt.to_owned();
+        async move {
+            let mut samples: Vec<u64> = Vec::new();
+            for round in 0..ROUNDS.saturating_add(1) {
+                let request = vig_backend_triton::text_request(backend_model, &prompt, tokens);
+                let started = std::time::Instant::now();
+                let result = if decoupled {
+                    client.infer_decoupled(request).await
+                } else {
+                    client.infer(request).await
+                };
+                if round == 0 {
+                    // Warmlauf: gefahren, nicht gezaehlt.
+                    continue;
+                }
+                if result.is_ok() {
+                    samples.push(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
+                }
             }
+            samples.sort_unstable();
+            samples
+                .get(samples.len().checked_div(2).unwrap_or(0))
+                .copied()
         }
-        let mean = total.checked_div(ok).unwrap_or(0);
-        (ok > 0).then(|| u64::try_from(mean).unwrap_or(u64::MAX))
     };
 
-    let small = Box::pin(mean_us(SMALL)).await?;
-    let large = Box::pin(mean_us(LARGE)).await?;
+    let small = Box::pin(median_us(PROMPT, SMALL)).await?;
+    let large = Box::pin(median_us(PROMPT, LARGE)).await?;
 
     // Steigung aus der Differenz; sie ist gegen einen konstanten Sockel immun.
     let delta_us = large.saturating_sub(small);
@@ -592,13 +663,53 @@ async fn measure_cooperative(
     let tokens_per_second =
         u32::try_from(1_000_000_u64.checked_div(us_per_token).unwrap_or(0)).unwrap_or(u32::MAX);
 
-    // Sockel: die kleine Messung minus ihre eigene Erzeugungszeit.
-    let base_cost_us = small.saturating_sub(us_per_token.saturating_mul(u64::from(SMALL)));
+    // Der Sockel ohne Kontextabzug: er steht auch dann, wenn die dritte
+    // Messreihe scheitert. Vor NV-16 war das das ganze Ergebnis, und es waere
+    // falsch, es an einer zusaetzlichen Messung aufzuhaengen.
+    let generating = us_per_token.saturating_mul(u64::from(SMALL));
+    let base_without_context = small.saturating_sub(generating);
+
+    // Zweite Gerade: derselbe Auftrag, laengerer Prompt. Was hier an Zeit
+    // dazukommt, ist Kontext und nicht Erzeugung.
+    let short_context = prompt_tokens(PROMPT);
+    let long_context = prompt_tokens(&long_prompt);
+    let context_delta = long_context.saturating_sub(short_context).max(1);
+    let measured_prefill = Box::pin(median_us(&long_prompt, SMALL)).await.map(|long| {
+        long.saturating_sub(small)
+            .checked_div(context_delta)
+            .unwrap_or(0)
+    });
+
+    // Der Kontextabzug am Sockel gilt nur, wenn er ihn nicht aufzehrt. Ein
+    // Sockel von null waere genau der Zustand, gegen den ADR-0015 geschrieben
+    // wurde: die Zuschneidung meldete dann eine Dauer, die das Quantum nie
+    // einhaelt. Bleibt vom Sockel nichts uebrig, ist die Messung
+    // widerspruechlich — dann gilt der unbereinigte Sockel und der
+    // Kontextterm wird verworfen, statt beide gemeinsam unbrauchbar zu
+    // machen.
+    let (base_cost_us, prefill_per_token_us) = match measured_prefill {
+        Some(prefill) => {
+            let deduction = prefill.saturating_mul(short_context);
+            if deduction >= base_without_context {
+                eprintln!(
+                    "\n  {logical}: Kontextmessung verworfen — der errechnete \
+                     Prefill ({deduction} us fuer {short_context} Token) \
+                     uebersteigt den Sockel ({base_without_context} us). Das \
+                     ist ein Widerspruch, kein Messwert."
+                );
+                (base_without_context, 0)
+            } else {
+                (base_without_context.saturating_sub(deduction), prefill)
+            }
+        }
+        None => (base_without_context, 0),
+    };
 
     Some(CooperativeMeasurement {
         logical: logical.to_owned(),
         base_cost_us,
         tokens_per_second,
+        prefill_per_token_us,
     })
 }
 
@@ -610,6 +721,7 @@ fn apply_cooperative(config: &mut Config, measured: &[CooperativeMeasurement]) {
         if let Some(cooperative) = model.cooperative.as_mut() {
             cooperative.base_cost_us = m.base_cost_us;
             cooperative.tokens_per_second = m.tokens_per_second;
+            cooperative.prefill_per_token_us = m.prefill_per_token_us;
         }
     }
 }

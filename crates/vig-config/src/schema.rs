@@ -393,6 +393,28 @@ pub struct CooperativeConfig {
     /// passt kein Quantum, egal wie klein. Auf der Messmaschine sind es
     /// 18.000 µs (siehe `docs/benchmark/wp26.md`).
     pub base_cost_us: u64,
+    /// Gemessener Aufwand je Token bereits vorhandenen Kontexts, in
+    /// Mikrosekunden (NV-16).
+    ///
+    /// Faehrt der Zustand im Prompt mit, rechnet **jede** Fortsetzung den
+    /// gesamten bisherigen Kontext neu — und der waechst mit jedem erzeugten
+    /// Token. Ohne diesen Wert plant der Governor jedes Quantum gleich teuer;
+    /// die spaeten ziehen dann ueber ihre Luecke hinaus.
+    ///
+    /// Fehlt er, verhaelt sich die Zuschneidung wie vor NV-16: alte
+    /// Konfigurationen bleiben unveraendert gueltig. Null ist auch der
+    /// richtige Wert fuer ein Backend mit wirksamem Prefix-Cache — nur sollte
+    /// das gemessen und nicht angenommen sein.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub prefill_per_token_us: u64,
+    /// Hoechster zulaessiger Aufschlag der Zerlegung, in Promille (NV-16).
+    ///
+    /// Nicht gesetzt heisst: keine Grenze, es wird zerlegt wie bisher. Ist ein
+    /// Wert gesetzt und der vorausgerechnete Aufschlag ueberschreitet ihn,
+    /// laeuft der Auftrag ungeteilt. `vig doctor` nennt den Aufschlag in jedem
+    /// Fall, auch ohne Grenze.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_overhead_permille: Option<u32>,
 }
 
 impl CooperativeConfig {
@@ -407,6 +429,8 @@ impl CooperativeConfig {
             min_tokens: self.min_tokens,
             max_total_tokens: self.max_total_tokens,
             base_cost: duration_us(self.base_cost_us, "base_cost_us")?,
+            prefill_per_token: duration_us(self.prefill_per_token_us, "prefill_per_token_us")?,
+            max_overhead_permille: self.max_overhead_permille,
         })
     }
 }
