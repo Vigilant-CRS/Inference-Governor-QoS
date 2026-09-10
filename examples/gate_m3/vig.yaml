@@ -4,11 +4,23 @@
 # Die Profile stammen aus `vig profile` und gelten nur fuer die dort
 # vermerkte Umgebung (Spec 13.5):
 #   RTX 3070 Laptop, Treiber 580.173.02, Triton 2.70.0 (26.06-py3),
-#   onnxruntime-Backend, gemessen am 2026-09-01.
+#   onnxruntime-Backend, neu gemessen am 2026-09-10 mit 200 Laeufen je Modell.
 #
-# Geschuetzte serialisierte Auslastung: 92 %. Zusammen mit dem VLM rund 116 %,
-# also echte Ueberlast - der Bereich, in dem sich entscheidet, ob Steuerung
-# etwas bringt.
+# Die Zahlen vom 2026-09-01 lagen niedriger (Detektor 14 916 statt 15 639 us).
+# Dieselbe Karte, dieselben Gewichte — der Unterschied ist der Zustand der
+# Karte, nicht das Modell. Genau dafuer traegt das gemessene Profil ein
+# Manifest (ADR-0019); diese Vorlage traegt nur die Quantile.
+#
+# Geschuetzte serialisierte Auslastung: 103 % mit den Zahlen vom 2026-09-10.
+#
+# **`vig doctor` lehnt diese Datei deshalb ab**, und das ist beabsichtigt: sie
+# beschreibt eine Ueberlast, ueber der ein Slot nicht tragen kann. Genau darum
+# geht es in Gate M3 — der Bereich, in dem sich entscheidet, ob Steuerung etwas
+# bringt. Als Vorlage fuer einen echten Aufbau taugt sie nicht; wer sie
+# uebernimmt, muss Perioden oder Kapazitaet anpassen, bis `doctor` gruen ist.
+#
+# Am 2026-09-01 lag dieselbe Konfiguration bei 92 % und `doctor` warnte nur.
+# Gewechselt hat nicht das Szenario, sondern der Zustand der Karte.
 version: 1
 
 backend:
@@ -31,7 +43,7 @@ models:
       - id: rfdetr
         backend_model: rfdetr
         quality: { value: 1.00, source: user_declared }
-        profile: { p50_us: 14916, p95_us: 17081, p99_us: 17470, samples: 120, fingerprint: "e28f0fd746353b16" }
+        profile: { p50_us: 15639, p95_us: 18074, p99_us: 19596, samples: 200, fingerprint: "e28f0fd746353b16" }
 
   pose:
     class: high
@@ -41,7 +53,7 @@ models:
       - id: main
         backend_model: pose_main
         quality: { value: 1.00, source: user_declared }
-        profile: { p50_us: 3987, p95_us: 4630, p99_us: 5506, samples: 120, fingerprint: "8db797d424217c67" }
+        profile: { p50_us: 4082, p95_us: 5163, p99_us: 5690, samples: 200, fingerprint: "8db797d424217c67" }
 
   depth:
     class: high
@@ -51,9 +63,12 @@ models:
       - id: main
         backend_model: depth_main
         quality: { value: 1.00, source: user_declared }
-        profile: { p50_us: 7908, p95_us: 9367, p99_us: 9534, samples: 120, fingerprint: "655a85407254e2a1" }
+        profile: { p50_us: 9286, p95_us: 10612, p99_us: 11453, samples: 200, fingerprint: "655a85407254e2a1" }
 
-  # Ein langer, nicht unterbrechbarer Block - das Verhalten eines VLM auf der GPU.
+  # Ein langer, nicht unterbrechbarer Block - das Verhalten eines VLM auf der
+  # GPU. **Kein Sprachmodell:** es ist dieselbe ResNet-50 wie `depth`, nur mit
+  # Batch 48 statt 4 — bytegleiches Artefakt, nachpruefbar am Digest. Ein
+  # echtes VLM haette hier dieselbe Wirkung und waere schwerer reproduzierbar.
   vlm:
     class: best_effort
     queue: { policy: fifo, capacity: 4, overflow: backpressure_client }
@@ -62,4 +77,4 @@ models:
       - id: main
         backend_model: vlm_main
         quality: { value: 1.00, source: user_declared }
-        profile: { p50_us: 94547, p95_us: 102136, p99_us: 109791, samples: 120, fingerprint: "af0d78dfb5032a91" }
+        profile: { p50_us: 97902, p95_us: 105105, p99_us: 109996, samples: 200, fingerprint: "af0d78dfb5032a91" }

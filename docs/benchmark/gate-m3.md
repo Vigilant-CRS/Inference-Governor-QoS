@@ -138,3 +138,25 @@ onetimer profile -c examples/gate_m3/onetimer.yaml
 taskset -c 8-15 target/release/gate-m3 examples/gate_m3/onetimer.yaml
 ```
 
+## Nachmessung am 2026-09-10
+
+Dieselben Modelle, dieselbe Karte, 200 Laeufe je Modell:
+
+| Strom | 2026-09-01 | 2026-09-10 |
+|---|---:|---:|
+| detector | 14 916 us | 15 639 us |
+| pose | 3 987 us | 4 082 us |
+| depth | 7 908 us | 9 286 us |
+| vlm | 94 547 us | 97 902 us |
+
+Alle vier Stroeme sind heute langsamer, die geschuetzte serialisierte
+Auslastung steigt damit von 92 % auf 103 %. Dieselben Gewichte, dieselbe GPU —
+gewechselt hat der Zustand der Karte, nicht das Modell. `vig doctor` lehnt die
+Beispielkonfiguration mit den neuen Zahlen ab, weil ein Slot 103 % nicht
+traegt; das ist die richtige Auskunft und der Grund, warum ein Profil ohne
+Angabe seiner Umgebung wenig wert ist (ADR-0019).
+
+Der A/B-Lauf mit den neuen Zahlen bestaetigt das veroeffentlichte Ergebnis
+eher, als es zu schwaechen: Detektor 82 → 99 % (24,7x) und 83 → 99 % (23,9x)
+in zwei Laeufen, gegenueber 22,4x am 2026-09-01. Die Vergleichszahlen fuer
+TensorRT stehen in [tensorrt.md](tensorrt.md).
