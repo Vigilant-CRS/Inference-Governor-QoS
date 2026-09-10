@@ -1129,3 +1129,188 @@ fn the_slack_is_reported_per_model() {
     );
     assert_eq!(scheduler.metrics().weakly_hard_misses_left[0], 0);
 }
+
+// ---------------------------------------------------------------------------
+// NV-18 — Anwendungshinweise innerhalb freigegebener Grenzen
+// ---------------------------------------------------------------------------
+
+#[test]
+fn without_a_policy_the_governor_hears_nobody() {
+    use vig_core::hints::{Authority, Hint, HintKind, Rejection};
+
+    let detector = contract(
+        Criticality::Protected,
+        QueuePolicy::Latest,
+        Some(33),
+        33,
+        66,
+        &[5],
+    );
+    let mut scheduler = build(vec![detector], 1);
+    let hint = Hint {
+        model: ModelIdx(0),
+        authority: Authority(1),
+        kind: HintKind::Elevated { max_age: ms(20) },
+        issued_at: at(0),
+        ttl: ms(100),
+    };
+    assert_eq!(
+        scheduler.offer_hint(hint, at(0)),
+        Err(Rejection::NoAuthorityConfigured),
+        "die Voreinstellung ist geschlossen"
+    );
+    assert_eq!(
+        scheduler.effective_max_age(ModelIdx(0), at(0)),
+        Some(ms(66)),
+        "der Grundvertrag bleibt unberuehrt"
+    );
+}
+
+#[test]
+fn an_authorised_hint_tightens_the_effective_max_age() {
+    use vig_core::hints::{Authority, Hint, HintKind, HintPolicy};
+
+    let detector = contract(
+        Criticality::Protected,
+        QueuePolicy::Latest,
+        Some(33),
+        33,
+        66,
+        &[5],
+    );
+    let mut scheduler = build(vec![detector], 1);
+    scheduler.set_hint_policy(HintPolicy {
+        authority: Some(Authority(7)),
+        allow_loosening: false,
+        approved_modes: 0,
+        min_max_age: Some(ms(10)),
+        max_action_horizon: None,
+    });
+
+    let hint = Hint {
+        model: ModelIdx(0),
+        authority: Authority(7),
+        kind: HintKind::Elevated { max_age: ms(20) },
+        issued_at: at(0),
+        ttl: ms(100),
+    };
+    assert!(scheduler.offer_hint(hint, at(0)).is_ok());
+    assert_eq!(
+        scheduler.effective_max_age(ModelIdx(0), at(0)),
+        Some(ms(20))
+    );
+    assert_eq!(
+        scheduler.effective_max_age(ModelIdx(0), at(101)),
+        Some(ms(66)),
+        "nach der Frist gilt wieder der Vertrag, nicht der letzte Zustand"
+    );
+}
+
+#[test]
+fn a_hint_cannot_loosen_a_contract_the_operator_did_not_open() {
+    use vig_core::hints::{Authority, Hint, HintKind, HintPolicy, Rejection};
+
+    let detector = contract(
+        Criticality::Protected,
+        QueuePolicy::Latest,
+        Some(33),
+        33,
+        66,
+        &[5],
+    );
+    let mut scheduler = build(vec![detector], 1);
+    scheduler.set_hint_policy(HintPolicy {
+        authority: Some(Authority(7)),
+        allow_loosening: false,
+        approved_modes: 0,
+        min_max_age: None,
+        max_action_horizon: None,
+    });
+
+    let hint = Hint {
+        model: ModelIdx(0),
+        authority: Authority(7),
+        kind: HintKind::ActionHorizon { holds_for: ms(500) },
+        issued_at: at(0),
+        ttl: ms(1_000),
+    };
+    assert_eq!(
+        scheduler.offer_hint(hint, at(0)),
+        Err(Rejection::WouldLoosen)
+    );
+    assert_eq!(
+        scheduler.effective_max_age(ModelIdx(0), at(0)),
+        Some(ms(66))
+    );
+}
+
+#[test]
+fn a_hint_does_not_change_what_the_scheduler_dispatches_by_itself() {
+    use vig_core::hints::{Authority, Hint, HintKind, HintPolicy};
+
+    // Ein Hinweis ist eine Aussage ueber Frische, kein Vorrang. Zwei gleiche
+    // Stroeme bleiben gleich, auch wenn einer einen Hinweis traegt — der
+    // Vorrang zwischen Stroemen ist die Betreiberpolicy (dasselbe Argument
+    // wie bei NV-24).
+    let a = contract(
+        Criticality::Protected,
+        QueuePolicy::Fifo,
+        Some(33),
+        100,
+        200,
+        &[10],
+    );
+    let b = a.clone();
+    let blocker = contract(
+        Criticality::Protected,
+        QueuePolicy::Fifo,
+        None,
+        400,
+        800,
+        &[40],
+    );
+    let mut scheduler = build(vec![a.clone(), b.clone(), blocker.clone()], 1);
+    scheduler.set_hint_policy(HintPolicy {
+        authority: Some(Authority(7)),
+        allow_loosening: false,
+        approved_modes: 0,
+        min_max_age: Some(ms(10)),
+        max_action_horizon: None,
+    });
+    scheduler
+        .offer_hint(
+            Hint {
+                model: ModelIdx(1),
+                authority: Authority(7),
+                kind: HintKind::Elevated { max_age: ms(20) },
+                issued_at: at(0),
+                ttl: ms(10_000),
+            },
+            at(0),
+        )
+        .unwrap();
+
+    let mut backend = Backend::default();
+    let mut next_id = 0_u64;
+    run(&mut scheduler, &mut backend, 120, |t| {
+        next_id = next_id.saturating_add(1);
+        match t {
+            0 => vec![frame(next_id, 2, t, &blocker)],
+            5 => vec![frame(next_id, 0, t, &a)],
+            6 => vec![frame(next_id, 1, t, &b)],
+            _ => Vec::new(),
+        }
+    });
+    let after: Vec<ModelIdx> = backend
+        .dispatched_models()
+        .iter()
+        .copied()
+        .filter(|m| *m != ModelIdx(2))
+        .collect();
+    assert_eq!(
+        after.first(),
+        Some(&ModelIdx(0)),
+        "der frueher angekommene geht vor; der Hinweis aendert daran nichts: {:?}",
+        backend.dispatched_models()
+    );
+}

@@ -26,6 +26,7 @@ use crate::arrayvec::ArrayVec;
 use crate::contract_ext::{BudgetSlack, CycleOutcome, MissWindow, WeaklyHardStatus};
 use crate::estimator::{MarginController, RuntimeEstimator};
 use crate::feasibility::{DEFAULT_HORIZON, ExpectedArrival, GuardVerdict, guard_protected};
+use crate::hints::{Effect, Hint, HintPolicy, Hints, Rejection};
 use crate::ids::{MAX_MODELS, ModelIdx, RequestId, SlotIdx, VariantIdx};
 use crate::metrics::Metrics;
 use crate::model::{ContractError, ModelContract};
@@ -252,6 +253,11 @@ pub struct Scheduler {
     hardware_state: StateClass,
     /// Die Revision der Profilidentitaet, unter der gerade geplant wird.
     profile_revision: u32,
+    /// Hinweise der Anwendung innerhalb freigegebener Grenzen (NV-18).
+    ///
+    /// Voreinstellung: geschlossen. Wer Hinweise zulassen will, sagt es dem
+    /// Governor ueber eine Freigabe.
+    hints: Hints,
     /// Ob das Missbudget in die Kandidatenwahl eingeht (NV-24).
     ///
     /// Aus: der Vorrang folgt allein Kritikalitaet und Deadline, wie bisher.
@@ -351,6 +357,7 @@ impl Scheduler {
             hardware_state: StateClass::default(),
             profile_revision: 0,
             miss_aware_policy: false,
+            hints: Hints::new(HintPolicy::closed()),
             slots,
             overload,
             margin,
@@ -633,6 +640,43 @@ impl Scheduler {
             request,
             state: RequestState::Failed,
         });
+    }
+
+    /// Setzt die Freigabe fuer Anwendungshinweise (NV-18).
+    ///
+    /// Voreinstellung ist [`HintPolicy::closed`] — niemand wird gehoert.
+    /// Eine engere Freigabe wirkt sofort auch auf bereits angenommene
+    /// Hinweise; sie muessen dafuer nicht zurueckgenommen werden.
+    pub fn set_hint_policy(&mut self, policy: HintPolicy) {
+        self.hints = Hints::new(policy);
+    }
+
+    /// Nimmt einen Hinweis der Anwendung entgegen.
+    ///
+    /// # Errors
+    ///
+    /// Siehe [`Rejection`]. Ein abgelehnter Hinweis aendert nichts.
+    pub fn offer_hint(&mut self, hint: Hint, now: Instant) -> Result<Effect, Rejection> {
+        self.hints.offer(hint, now)
+    }
+
+    /// Was fuer diesen Strom gerade gilt (NV-18).
+    #[must_use]
+    pub fn hint_effect(&self, model: ModelIdx, now: Instant) -> Effect {
+        self.hints.effect(model, now)
+    }
+
+    /// Das wirksame Hoechstalter eines Stroms, Hinweise eingerechnet.
+    ///
+    /// Ohne Hinweis der Wert aus dem Vertrag. Ein Hinweis kann ihn
+    /// verschaerfen, und lockern nur, wenn der Betreiber es freigegeben hat.
+    #[must_use]
+    pub fn effective_max_age(&self, model: ModelIdx, now: Instant) -> Option<Duration> {
+        let base = self
+            .contracts
+            .get(model.get())
+            .and_then(|contract| contract.max_age);
+        self.hints.effective_max_age(model, base, now)
     }
 
     /// Ob das Missbudget in die Kandidatenwahl eingeht (NV-24).

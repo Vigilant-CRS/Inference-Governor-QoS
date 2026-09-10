@@ -37,6 +37,7 @@ Spec-Stelle explizit.
 | [0026](0026-interference-is-directed-and-not-additive.md) | Interferenz ist gerichtet und nicht additiv | NV-11, ADR-0006 | Akzeptiert |
 | [0027](0027-a-miss-budget-that-decides-not-only-observes.md) | Ein Missbudget, das entscheidet — auf ausdrueckliche Handlung | NV-24, NV-02 | Akzeptiert |
 | [0028](0028-a-fusion-needs-a-common-capture.md) | Eine Zusammenfuehrung braucht eine gemeinsame Aufnahme | NV-17, ADR-0005 | Akzeptiert |
+| [0029](0029-a-hint-may-tighten-never-loosen.md) | Ein Hinweis darf verschaerfen, nie lockern | NV-18 | Akzeptiert |
 
 ## Format
 
