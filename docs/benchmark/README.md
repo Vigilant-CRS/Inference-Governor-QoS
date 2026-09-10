@@ -16,6 +16,7 @@ beschrieben und **nicht** als allgemeingültige Produktleistung zu lesen.
 | [`soak.md`](soak.md) | Haelt es acht Stunden durch? | keine Drift, kein Leck |
 | [`portability.md`](portability.md) | Laeuft es auch vor anderen OIP-Servern? | OVMS: 150/150 ohne Codeaenderung |
 | [`rfdetr-variants.md`](rfdetr-variants.md) | Belegen vier echte RF-DETR-Varianten die Variantenwahl? | **nein** — die Auflaesung bestimmt die Laufzeit, das Modell fast nicht |
+| [`tensorrt.md`](tensorrt.md) | Beseitigt TensorRT den Engpass? | **nein** — Auslastung 103 % → 76 %, Vorsprung halbiert, Engpass bleibt |
 
 ## Regeln, die für jede Zahl hier gelten
 

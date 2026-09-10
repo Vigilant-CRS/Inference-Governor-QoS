@@ -74,7 +74,7 @@ nicht fuer die Karte. `vig doctor` sagt das jetzt vor jeder Messung (ADR-0021).
 | NV-05 Messpfad | fertig: absolutes Freigaberaster, vier Zaehler, Uhrpruefung | [0022](adr/0022-measurement-is-a-method-not-a-loop.md) |
 | NV-06 Prognose v2 | fertig, laeuft im **Schatten**; Scharfschalten ist eine Betreiberhandlung | [0023](adr/0023-state-aware-prediction-runs-in-the-shadow-first.md) |
 | NV-07 Backendnaht | Naht und Fake-Executor fertig; Crate-Verschiebung und OIP-freie Nutzlast bewusst aufgeschoben | [0024](adr/0024-the-backend-is-a-seam-not-a-type.md) |
-| NV-08 TensorRT ueber Triton | **offen**, braucht die GPU und gebaute Engines | — |
+| NV-08 TensorRT ueber Triton | fertig, gemessen — kein Codepfad noetig | [benchmark/tensorrt.md](benchmark/tensorrt.md) |
 | NV-09 TensorRT Direct | **offen**, braucht CUDA SDK | — |
 | NV-10 Semantik der Varianten | fertig | [0025](adr/0025-the-same-shape-is-not-the-same-meaning.md) |
 | NV-11 Gerichtete Interferenz | Tabelle und gerichtete Messung fertig; **nicht** an die Zulassung angeschlossen | [0026](adr/0026-interference-is-directed-and-not-additive.md) |
@@ -136,6 +136,13 @@ Panic. Speicher 12 640 → 15 912 kB, davon 2,5 MB im Anlauf der ersten Stunde;
 danach +748 kB ueber sieben Stunden ohne erkennbaren Trend. Kein unbegrenztes
 Wachstum im beobachteten Fenster; „kein Leck" leiten wir daraus nicht ab.
 Details in [benchmark/soak.md](benchmark/soak.md).
+
+**TensorRT (2026-09-10), NV-08 beantwortet.** Dieselben Gewichte als
+TensorRT-Engine: serialisierte Auslastung 103 % → 76 %, Detektorlaufzeit
+15 639 → 11 488 us. Der Vorsprung des Governors halbiert sich (24,7x → 13,3x),
+weil die Baseline besser wird — der Engpass bleibt: bei 76 % verfehlt ein
+getunter Triton weiter jeden zehnten Detektorzyklus.
+[benchmark/tensorrt.md](benchmark/tensorrt.md)
 
 **RF-DETR-Varianten (2026-09-10), negatives Ergebnis.** Fuenf echte Modelle
 gemessen: die Auflaesung bestimmt die Laufzeit, das Modell fast nicht — bei
