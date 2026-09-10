@@ -38,11 +38,15 @@
 //! ([`snapshot::HardwareSnapshot`]). Erst der Vergleich zweier Aufnahmen
 //! ergibt eine Aenderung — und die traegt dann beide Zeitpunkte.
 
+pub mod actuation;
 pub mod collector;
 pub mod gpu;
 pub mod measure;
 pub mod snapshot;
 
+pub use actuation::{
+    Actuation, ActuationError, ActuationPolicy, ActuationState, Actuator, ClockMhz,
+};
 pub use collector::{Collector, CollectorHealth, Fallback, NvidiaSmi, Recorded};
 pub use gpu::{GpuState, ThrottleReason, parse_query_line};
 pub use measure::{
