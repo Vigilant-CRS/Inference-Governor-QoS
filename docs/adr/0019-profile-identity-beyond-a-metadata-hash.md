@@ -35,8 +35,17 @@ andere Umgebung gemessen wurden — und meldet dabei "Profil passt".
 Revision 2) mit fuenf Bloecken: Artefakt, Runtime, Geraet, Ressourcenaufteilung,
 Messbedingungen — dazu die beanspruchte Gueltigkeitsdomaene.
 
-**Der Artefakt-Digest liest das Dateisystem.** SHA-256 ueber die Dateien des
-Modellverzeichnisses, `config.pbtxt` ausgenommen. Das ist die einzige Stelle,
+**Der Artefakt-Digest liest das Dateisystem.** SHA-256 ueber die Dateien in
+den Versionsverzeichnissen des Modells (`<modell>/<version>/…`).
+
+> **Korrektur vom 10.09.2026.** Zuerst hiess die Regel „alle Dateien des
+> Modellverzeichnisses ausser `config.pbtxt`". Sie hielt genau so lange, bis im
+> Modellverzeichnis eine `PROVENANCE.txt` lag: der Digest aenderte sich, weil
+> jemand eine Notiz bearbeitet hatte. Ein Artefaktdigest, den ein Kommentar
+> verschiebt, ist keiner. Digestiert wird deshalb nur, was unter den rein
+> numerischen Unterverzeichnissen liegt — das ist Tritons eigene Aussage
+> darueber, wo das Artefakt endet und die Verwaltung anfaengt. Gibt es keine
+> Versionsverzeichnisse, gilt die alte Regel weiter. Das ist die einzige Stelle,
 an der Fall 1 ueberhaupt sichtbar ist; ueber das Inferenzprotokoll ist er es
 nicht. Der Pfad steht als `backend.model_repository` in der Konfiguration und
 ist optional: wo der Governor das Repository nicht sieht — entfernter Server,

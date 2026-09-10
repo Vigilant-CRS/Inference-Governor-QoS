@@ -15,6 +15,7 @@ beschrieben und **nicht** als allgemeingültige Produktleistung zu lesen.
 | [`diy-baseline.md`](diy-baseline.md) | Reicht Supersession im Client? | 47x gegen den Eigenbau |
 | [`soak.md`](soak.md) | Haelt es acht Stunden durch? | keine Drift, kein Leck |
 | [`portability.md`](portability.md) | Laeuft es auch vor anderen OIP-Servern? | OVMS: 150/150 ohne Codeaenderung |
+| [`rfdetr-variants.md`](rfdetr-variants.md) | Belegen vier echte RF-DETR-Varianten die Variantenwahl? | **nein** — die Auflaesung bestimmt die Laufzeit, das Modell fast nicht |
 
 ## Regeln, die für jede Zahl hier gelten
 

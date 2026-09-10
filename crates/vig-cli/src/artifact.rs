@@ -16,16 +16,25 @@
 //!
 //! ## Was in den Digest eingeht
 //!
-//! Alle Dateien des Modellverzeichnisses **ausser `config.pbtxt`**, in
-//! sortierter Pfadreihenfolge, jeweils mit laengenpraefixiertem relativem Pfad
-//! und Inhalt.
+//! **Nur die Versionsverzeichnisse.** Ein Triton-Modellverzeichnis hat die
+//! Form `<modell>/<version>/…`; das Artefakt liegt in den
+//! Versionsunterverzeichnissen, alles auf der oberen Ebene ist Konfiguration
+//! oder Dokumentation. Digestiert wird deshalb, was unter den rein
+//! numerischen Unterverzeichnissen liegt — in sortierter Pfadreihenfolge,
+//! jeweils mit laengenpraefixiertem relativem Pfad und Inhalt.
 //!
-//! `config.pbtxt` bleibt bewusst draussen: darin stehen Instanzanzahl,
-//! Batchgrenzen und Rate-Limiter-Ressourcen. Das ist die *Aufteilung* des
-//! Geraets, nicht das Artefakt — sie hat im Manifest ein eigenes Feld
-//! (`resources`). Wuerde sie in den Artefakt-Digest einfliessen, waere jede
-//! Umkonfiguration ein "anderes Modell", und die Unterscheidung, um die es in
-//! NV-03 geht, ginge wieder verloren.
+//! Diese Regel ist eine Korrektur. Zuerst wurde alles ausser `config.pbtxt`
+//! digestiert. Das ging solange gut, bis im Modellverzeichnis eine
+//! `PROVENANCE.txt` lag: der Digest aenderte sich, weil jemand eine Notiz
+//! bearbeitet hatte. Ein Artefaktdigest, den ein Kommentar verschiebt, ist
+//! kein Artefaktdigest.
+//!
+//! `config.pbtxt` bleibt ebenfalls draussen — auch dort, wo es keine
+//! Versionsverzeichnisse gibt und deshalb auf die obere Ebene
+//! zurueckgefallen wird. Darin stehen Instanzanzahl, Batchgrenzen und
+//! Rate-Limiter-Ressourcen: die *Aufteilung* des Geraets, nicht das Artefakt.
+//! Sie hat im Manifest ein eigenes Feld (`resources`). Waere sie im
+//! Artefakt-Digest, waere jede Umkonfiguration ein "anderes Modell".
 //!
 //! Die Laengenpraefixe sind kein Zierrat: ohne sie haetten die Dateipaare
 //! (`ab`, `c`) und (`a`, `bc`) denselben Digest.
@@ -75,8 +84,16 @@ pub(crate) fn digest_of(path: &Path) -> io::Result<ArtifactDigest> {
         });
     }
 
+    // Versionsverzeichnisse eines Triton-Modells: rein numerische Namen.
+    let versions = version_directories(path)?;
     let mut entries = Vec::new();
-    collect(path, Path::new(""), &mut entries)?;
+    if versions.is_empty() {
+        collect(path, Path::new(""), &mut entries)?;
+    } else {
+        for version in &versions {
+            collect(path, version, &mut entries)?;
+        }
+    }
     entries.sort();
 
     let mut hasher = Sha256::new();
@@ -89,10 +106,36 @@ pub(crate) fn digest_of(path: &Path) -> io::Result<ArtifactDigest> {
 
     Ok(ArtifactDigest {
         digest: finish(hasher),
-        source: "directory".to_owned(),
+        source: if versions.is_empty() {
+            "directory".to_owned()
+        } else {
+            "versions".to_owned()
+        },
         bytes,
         files: entries.len(),
     })
+}
+
+/// Die rein numerischen Unterverzeichnisse, sortiert.
+///
+/// Triton nennt Modellversionen so. Ein Verzeichnis mit einem anderen Namen
+/// ist keine Version und gehoert nicht zum Artefakt — es koennte alles sein,
+/// vom Notizordner bis zum Testdatensatz.
+fn version_directories(root: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let text = name.to_string_lossy();
+        if !text.is_empty() && text.chars().all(|c| c.is_ascii_digit()) {
+            out.push(PathBuf::from(name));
+        }
+    }
+    out.sort();
+    Ok(out)
 }
 
 /// Sammelt die einzubeziehenden Dateien, relativ zur Wurzel.
@@ -211,6 +254,68 @@ mod tests {
             before.digest, after.digest,
             "die Aufteilung des Geraets hat im Manifest ein eigenes Feld"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_note_beside_the_version_directory_does_not_change_the_digest() {
+        // Der Fehler, der das ausgeloest hat: eine `PROVENANCE.txt` im
+        // Modellverzeichnis verschob den Digest. Ein Artefaktdigest, den ein
+        // Kommentar bewegt, ist kein Artefaktdigest.
+        let dir = scratch("note");
+        std::fs::create_dir_all(dir.join("1")).unwrap();
+        std::fs::write(dir.join("1/model.onnx"), b"weights").unwrap();
+        std::fs::write(dir.join("config.pbtxt"), b"name: \"x\"").unwrap();
+        let before = digest_of(&dir).unwrap();
+        assert_eq!(before.source, "versions");
+
+        std::fs::write(dir.join("PROVENANCE.txt"), b"Quelle: irgendwo").unwrap();
+        let after = digest_of(&dir).unwrap();
+        assert_eq!(before.digest, after.digest);
+        assert_eq!(before.bytes, after.bytes, "die Notiz zaehlt auch nicht mit");
+
+        std::fs::write(dir.join("PROVENANCE.txt"), b"Quelle: woanders").unwrap();
+        assert_eq!(digest_of(&dir).unwrap().digest, before.digest);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_model_version_changes_the_digest() {
+        let dir = scratch("newversion");
+        std::fs::create_dir_all(dir.join("1")).unwrap();
+        std::fs::write(dir.join("1/model.onnx"), b"weights").unwrap();
+        let one = digest_of(&dir).unwrap();
+        std::fs::create_dir_all(dir.join("2")).unwrap();
+        std::fs::write(dir.join("2/model.onnx"), b"weights").unwrap();
+        let two = digest_of(&dir).unwrap();
+        assert_ne!(
+            one.digest, two.digest,
+            "eine zweite Version ist ein anderes Artefakt"
+        );
+        assert_eq!(two.files, 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_non_numeric_directory_is_not_a_version() {
+        let dir = scratch("notaversion");
+        std::fs::create_dir_all(dir.join("1")).unwrap();
+        std::fs::write(dir.join("1/model.onnx"), b"weights").unwrap();
+        let before = digest_of(&dir).unwrap();
+        std::fs::create_dir_all(dir.join("notizen")).unwrap();
+        std::fs::write(dir.join("notizen/egal.txt"), b"viel Text").unwrap();
+        assert_eq!(digest_of(&dir).unwrap().digest, before.digest);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn without_version_directories_the_old_rule_applies() {
+        let dir = scratch("flat");
+        std::fs::write(dir.join("model.onnx"), b"weights").unwrap();
+        std::fs::write(dir.join("config.pbtxt"), b"name: \"x\"").unwrap();
+        let d = digest_of(&dir).unwrap();
+        assert_eq!(d.source, "directory");
+        assert_eq!(d.files, 1, "die Konfiguration bleibt draussen");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

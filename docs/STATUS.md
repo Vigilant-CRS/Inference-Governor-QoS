@@ -127,9 +127,18 @@ hier, weil „umgesetzt" und „wirksam" verschiedene Aussagen sind:
 - **Die Luecken im Messbild.** Bursts und Lastrampe aus Spec 19.4, ein zweiter
   Betriebspunkt, die Qualitaets-Deadline-Frontier aus Spec 19.7.
 
-## Laeuft gerade
+## Zuletzt gemessen
 
-Ein 8-Stunden-Dauerlauf mit wechselnder Last gegen echtes Triton. Auszuwerten
-mit `python3 tools/soak-report.py <Ausgabeverzeichnis>`. Geprueft wird
-Speicherdrift, Kennzahlendrift und ob eine Vertragsverletzung als solche
-gemeldet wird.
+**8-Stunden-Dauerlauf (2026-09-09/10), bestanden.** Keine Kennzahlendrift:
+erste gegen letzte Stunde alle Werte innerhalb von 1 %, die einzige groessere
+Abweichung ist `depth` mittlere AoI mit −11 % — also besser. Kein Fehler, keine
+Panic. Speicher 12 640 → 15 912 kB, davon 2,5 MB im Anlauf der ersten Stunde;
+danach +748 kB ueber sieben Stunden ohne erkennbaren Trend. Kein unbegrenztes
+Wachstum im beobachteten Fenster; „kein Leck" leiten wir daraus nicht ab.
+Details in [benchmark/soak.md](benchmark/soak.md).
+
+**RF-DETR-Varianten (2026-09-10), negatives Ergebnis.** Fuenf echte Modelle
+gemessen: die Auflaesung bestimmt die Laufzeit, das Modell fast nicht — bei
+gleicher Auflaesung liegen 7 bis 28 Klassen innerhalb von 1,1 %. Variantenwahl
+hat auf dieser Modellfamilie keinen Betriebspunkt.
+[benchmark/rfdetr-variants.md](benchmark/rfdetr-variants.md)

@@ -110,11 +110,20 @@ Then:
 vig doctor -c examples/rfdetr_variants/vig.yaml
 
 vig calibrate -c examples/rfdetr_variants/vig.yaml -o measured.yaml \
-  --model-repository "$VARIANTS" --periodic-us 33000 \
-  --library-version "onnxruntime via Triton 2.70" \
-  --partition exclusive --instances 1 --rate-limiter off \
+  --model-repository "$VARIANTS" \
+  --library-version "onnxruntime via Triton 2.70.0" \
+  --partition exclusive --instances 1 --rate-limiter disabled \
   --independent-runs 2 --valid-up-to-occupancy-pct 92
 ```
+
+`--periodic-us` belongs to `vig profile`, not to `calibrate` — `calibrate`
+measures back to back plus under concurrent load, which is what its interference
+step needs.
+
+`--rate-limiter disabled` and not `off`: YAML 1.1 tools (PyYAML, most
+inspection scripts) read a bare `off` as the boolean `false`. Our parser follows
+YAML 1.2 and reads the string correctly, but a file that means two different
+things to two readers is a trap waiting for whoever edits it next.
 
 Device name, compute capability, driver and memory are filled in from
 `nvidia-smi`; `vig` says what it filled in. If the card is throttled during the
