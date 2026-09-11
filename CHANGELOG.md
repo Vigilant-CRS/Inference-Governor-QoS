@@ -137,12 +137,21 @@ bedeutet, steht in [docs/releases.md](docs/releases.md).
 
 ### Geaendert
 
+- **Die Sicherheitsmarge hat ein Ziel**
+  ([ADR-0034](docs/adr/0034-the-margin-has-a-target.md)). Der Margenregler
+  hielt bisher still, wenn jede elfte Ausfuehrung ihren Plan ueberzog — ein
+  Gleichgewicht, das sich aus zwei Schrittweiten ergab und das niemand
+  gewaehlt hatte. Jetzt regelt er auf einen ausdruecklichen Anteil: ein
+  Prozent, oder das vereinbarte Missbudget des Vertrags (hoechstens fuenf
+  Prozent). Die Planung wird dort vorsichtiger, wo die Laufzeit streut. Der
+  Boden bleibt die konfigurierte Marge.
 - **Kein FFI-Crate im Workspace** ([ADR-0033](docs/adr/0033-native-code-lives-in-the-backend-process.md)).
   Nativer Code gehoert in den Backendprozess; `unsafe_code = "forbid"` bleibt
   ohne Ausnahme. NV-09 wird nicht gebaut, NV-12 und NV-14 sind auf dieser
-  Plattform abgeschlossen. NV-15 ist unter Triton 26.06 blockiert: XSched
-  stuerzt mit der CUDA-13.3-Laufzeit beim Anlegen der ersten Queue ab
-  ([Nachtrag](docs/spikes/nv15-xsched.md)).
+  Plattform abgeschlossen. NV-15: XSched laeuft unter Triton 26.06, nachdem
+  eine zweite `libcuda` im Prozess als Ursache des Absturzes gefunden war
+  (`CUXTRA_CUDA_LIB`) und ein kleiner Patch die Level-2-Queue fuer sm86
+  waehlbar macht — ungemessen ([Nachtraege](docs/spikes/nv15-xsched.md)).
 - **Support-Matrix nachgezogen:** Prognose (NV-06) und
   Abhaengigkeitsgraph (NV-17) erreichbar, TensorRT in Triton und der
   Prefill-Term qualifiziert, Treiber 580.178.04 fuer Gate M3 qualifiziert

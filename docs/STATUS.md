@@ -111,7 +111,7 @@ Vier Zustände, nicht zwei: **gebaut**, **erreichbar**, **angeschlossen**,
 | NV-12 CUDA-Graphs | **abgeschlossen, negativ**: 3,7 % weniger p50, mehrere Modelle mit Graphs laden nicht mehr | [0033](adr/0033-native-code-lives-in-the-backend-process.md), [Messung](benchmark/cuda-graphs.md) |
 | NV-13 Energieregler | erreichbar, opt-in, beobachtet statt angenommen; auf dieser Maschine fehlen die Rechte | [0030](adr/0030-actuation-is-an-exception-and-must-be-observed.md) |
 | NV-14 Green Contexts | **abgeschlossen, negativ für den Engpass**: begrenzt SMs, schützt nicht gegen Bandbreite, löst kein Zeitproblem | [0033](adr/0033-native-code-lives-in-the-backend-process.md), [Qualifikation](spikes/nv14-green-contexts.md) |
-| NV-15 XSched | **blockiert**: Level 2 wirkt auf dieser Karte mit CUDA 12.4; unter Triton 26.06 (CUDA 13.3) stürzt jeder Prozess beim Anlegen der ersten Queue ab | [0033](adr/0033-native-code-lives-in-the-backend-process.md), [Spike und Nachtrag](spikes/nv15-xsched.md) |
+| NV-15 XSched | **funktioniert unter Triton 26.06, ungemessen**: die scheinbare CUDA-13-Blockade war eine zweite `libcuda` im Prozess; mit `CUXTRA_CUDA_LIB` und einem Patch für die Level-2-Queue auf sm86 läuft Präemption. Der Governor plant noch nicht damit | [0033](adr/0033-native-code-lives-in-the-backend-process.md), [Spike und Nachtrag](spikes/nv15-xsched.md) |
 | NV-16 Fortschrittskosten | fertig und gemessen | [0031](adr/0031-a-re-prefill-is-not-free-progress.md), [Messung](benchmark/nv16-prefill.md) |
 | NV-17 Gültigkeitsbewusster DAG | **erreichbar**: der Client nennt `vig_capture_id` und `vig_depends_on`; eine Zusammenführung über Aufnahmegrenzen wird abgelehnt, bevor sie rechnet | [0028](adr/0028-a-fusion-needs-a-common-capture.md), [Clientparameter](getting-started.md#results-from-the-same-capture) |
 | NV-18 Anwendungssemantik | erreichbar: ein Hinweis darf verschärfen, nie lockern | [0029](adr/0029-a-hint-may-tighten-never-loosen.md) |
@@ -134,15 +134,16 @@ Triton, nicht im Governor, und eine FFI im Governor säße im falschen Prozess.
 
 Die Folge für die vier Pakete: NV-09 wird nicht gebaut, NV-12 und NV-14 sind
 auf dieser Plattform mit negativem Ergebnis abgeschlossen, NV-15 ist die
-einzige Präemption, die den Engpass angreift — und sie ist heute blockiert.
+einzige Präemption, die den Engpass angreift — und sie läuft seit dem
+11.09. unter dem qualifizierten Triton.
 
-**Warum blockiert.** XSched wählt für sm86 immer eine Queue, deren
-Konstruktor Befehlsspeicher über nicht dokumentierte Treiberinterna
-(`cuxtra`) anlegt. Mit der CUDA-12.4-Laufzeit geht das; mit der 13.3-Laufzeit
-des qualifizierten Triton stürzt es ab, mit jeder `libcuda` und mit beiden
-Präemptionsimplementierungen. Der Upstream hat seit dem gepinnten Stand
-keinen Commit. Die zwei Wege — ein Triton-Release mit CUDA 12 oder
-CUDA-13-Unterstützung im Upstream — sind beide keine Codezeile im Governor.
+**Wie.** Am Vormittag sah es nach einer Blockade durch CUDA 13.3 aus; das
+war falsch zugeordnet. Die vorkompilierte `cuxtra` lud eine zweite `libcuda`
+in den Prozess — die des Hosts, die CDI in den Container einblendet — neben
+der Compat-Bibliothek, die Triton benutzt. Mit `CUXTRA_CUDA_LIB` auf dieselbe
+Bibliothek und einem Patch von neun Zeilen für die Level-2-Queue auf sm86
+läuft XSched unter Triton 26.06. Keine Zeile davon liegt im Governor —
+genau der Weg, den ADR-0033 beschreibt.
 
 ## Was ausdrücklich noch nicht angeschlossen ist
 
@@ -153,7 +154,7 @@ per Voreinstellung nichts. _Neumessung läuft (11.09.), Ergebnis folgt._
 
 | Paket | Stand | Was fehlt |
 |---|---|---|
-| NV-15 XSched | blockiert | CUDA-13-Unterstützung im Upstream oder ein qualifizierter Stack mit CUDA 12. Das Startskript für zwei Tritonprozesse unter XSched liegt bereit (`InferenceQoS-runtime/xsched-triton.sh`), `gate-m3` fährt mehrere Backendprozesse gleichzeitig. |
+| NV-15 XSched | funktioniert, ungemessen | Die Messung: zwei Tritonprozesse ohne XSched, mit Level 2, mit TSG, je drei Läufe (`InferenceQoS-runtime/xsched-triton-alt.sh`; `gate-m3` fährt mehrere Backendprozesse gleichzeitig). Dann die Planung: präemptierbare Hintergrundlast als gemessene Eigenschaft des Backends (ADR-0033, Punkt 2), damit der Governor das VLM laufen lässt, statt es zu halten. |
 | Zweiter Betriebspunkt | offen | Zwei Ausführungseinheiten (`slots: 2`, Instance Groups mit zwei Instanzen) samt gemessener Parallelprofile. Die Lastrampe sagt selbst, dass sich ihre Kante damit verschiebt. |
 | NV-21/22/23 | optional / Forschung | Ein weiterer Backendadapter, mehrere Ressourcendomänen, formale Analyse. |
 

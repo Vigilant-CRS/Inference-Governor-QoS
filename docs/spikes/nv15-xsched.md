@@ -143,7 +143,11 @@ Was daraus folgt — eine Portierung, ein Shim unter Triton, die
 `unsafe`-Frage — ist ein eigener Auftrag und eine eigene Schätzung. Dieser
 Spike verspricht sie nicht.
 
-## Nachtrag 11.09.2026: unter Triton 26.06 blockiert
+## Nachtrag 11.09.2026 (Vormittag): scheinbar blockiert
+
+> **Die Ursache in diesem Nachtrag ist falsch zugeordnet.** Es lag nicht an
+> CUDA 13, sondern an einer zweiten `libcuda` im Prozess — siehe Nachtrag 2.
+> Der Text bleibt stehen, weil er zeigt, wie die Fehldeutung entstand.
 
 Die `unsafe`-Frage ist mit [ADR-0033](../adr/0033-native-code-lives-in-the-backend-process.md)
 entschieden: nativer Code gehört in den Backendprozess. Für XSched heißt das,
@@ -205,3 +209,67 @@ CUDA-Version. Hätte der Governor eine FFI auf XSched, bräche er mit.
 nebeneinander, und `gate-m3` fährt Modelle mit eigenem Endpunkt jetzt
 gleichzeitig. Der Aufbau steht, sobald eine der beiden Voraussetzungen
 erfüllt ist.
+
+## Nachtrag 2, 11.09.2026 (Mittag): nicht blockiert — die Ursache war eine zweite `libcuda`
+
+CUDA 13 ist unschuldig.
+
+**Zwei `libcuda` in einem Prozess.** `cuxtra` — die vorkompilierte
+Bibliothek, die über die Export-Tabellen des Treibers Befehlsspeicher anlegt
+— sucht sich ihre `libcuda` selbst: über fest einkompilierte Pfade oder die
+eigene Variable `CUXTRA_CUDA_LIB`, **nicht** über `XSCHED_CUDA_LIB`. Im
+Triton-Image benutzen Anwendung und XSched die Forward-Compatibility-
+Bibliothek (610.43); CDI legt die Host-Bibliothek (580.178) nach
+`/lib/x86_64-linux-gnu`, und die fand `cuxtra`. `LD_DEBUG=libs` zeigt beide:
+
+```text
+calling init: /lib/x86_64-linux-gnu/libcuda.so               ← cuxtra
+calling init: /usr/local/cuda/compat/lib.real/libcuda.so.1   ← XSched / Anwendung
+```
+
+Die Export-Tabelle der einen Bibliothek arbeitete auf dem Kontext der
+anderen. Auf dem Host gibt es nur eine `libcuda` — deshalb lief es dort. Die
+Probe „Host-`libcuda` im Container" aus dem ersten Nachtrag hat genau das
+übersehen: sie setzte `XSCHED_CUDA_LIB`, und `cuxtra` lud trotzdem seine
+eigene.
+
+**Ein zweiter Fehler, danach sichtbar.** Mit einer einzigen `libcuda`
+scheitert der Trap-Pfad (Level 3), den XSched für sm86 immer wählt, sauber:
+`invalid device ordinal` in `trap.cpp:20`. Der Level-2-Konstruktor davor
+läuft durch. Ein Patch von neun Zeilen in drei Dateien macht mit
+`XSCHED_CUDA_LV3_IMPL=LV2` die Level-2-Queue für sm86 wählbar — Level 3
+brachte auf dieser Karte ohnehin nichts über Level 2 hinaus (siehe oben).
+
+| Probe | `libcuda` XSched / `cuxtra` | Queue | Ergebnis |
+|---|---|---|---|
+| bisheriger Aufbau | 610 / 580 (ungewollt) | Lv3Trap | SIGSEGV in `cuXtraInstrMemBlockAlloc` |
+| `CUXTRA_CUDA_LIB` gesetzt | 610 / 610 | Lv3Trap | kein Absturz, `invalid device ordinal` |
+| beide auf Host-580 | 580 / 580 | Lv3Trap | Queue angelegt, danach SIGSEGV (13.3-Laufzeit ohne Compat-Treiber) |
+| `TSG`, Level 1 und 2 | 610 / 610 | Lv3Tsg | läuft |
+| `LV2` (Patch), Level 2 | 610 / 610 | Lv2 | läuft |
+
+**Funktionsprobe, keine Messung.** Zwei Prozesse des XSched-Beispiels,
+`xserver HPF`, Aufgabendauer des hoch priorisierten:
+
+| Aufbau | hoch priorisiert |
+|---|---|
+| allein | 96 ms |
+| zwei Prozesse ohne XSched | 182–205 ms |
+| XSched `LV2`, Level 2 | 98–110 ms |
+| XSched `TSG` | 96–116 ms |
+
+Unter Triton 26.06 rechnet Prozess A (RF-DETR, Pose, Tiefe) unter dem Shim
+alle drei Modelle, seine Queues sind bei `xserver` angemeldet. Prozess B mit
+dem VLM passt nur in den Speicher, wenn A und B den Referenz-Triton
+ersetzen, statt neben ihm zu laufen.
+
+**Was daraus folgt.** Präemption auf dem qualifizierten Stack ist
+erreichbar — als Backendkonfiguration nach ADR-0033: zwei
+Umgebungsvariablen und ein kleiner Patch am gepinnten Upstream, keine Zeile
+im Governor. Gemessen ist sie noch nicht. Und sie allein löst das VLM-Problem
+nicht: der Governor hält das VLM mit `slots: 1` und `no_corun` weiter
+zurück, bis die Planung eine präemptierbare Hintergrundlast als gemessene
+Eigenschaft des Backends kennt. Das ist der nächste Schritt.
+
+Laborprotokoll, Patch und Startskript: `InferenceQoS-runtime/xsched-rootcause.md`,
+`xsched-sm86-lv2.patch`, `xsched-triton-alt.sh`.
