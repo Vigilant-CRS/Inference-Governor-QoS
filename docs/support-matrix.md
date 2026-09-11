@@ -34,6 +34,7 @@ Three levels are used throughout, and the difference matters:
 | ONNX Runtime backend in Triton | **Qualified** | The measured configuration. |
 | TensorRT backend in Triton | **Qualified** | Measured as NV-08 with the same weights as TensorRT engines: detector runtime 15.6 → 11.5 ms, the governor's advantage halves (24.7× → 13.3×) because the baseline improves ([tensorrt.md](benchmark/tensorrt.md)). No code path of its own. |
 | TensorRT direct, without Triton | **Not supported** | NV-09 spike measured: 500–730 µs gained per inference, almost entirely Triton's I/O copies. Not built into the product — see [ADR-0033](adr/0033-native-code-lives-in-the-backend-process.md). |
+| XSched preemption (Level 2) under Triton | Untested | Runs under Triton 26.06 (CUDA 13.3) on sm86 with `CUXTRA_CUDA_LIB` and a nine-line patch — setup and pitfalls in [deploy/xsched](../deploy/xsched/README.md). Not measured; the governor does not plan with preemption yet |
 | Any other inference server | **Not supported** | The backend seam exists ([ADR-0024](adr/0024-the-backend-is-a-seam-not-a-type.md)) and has exactly one implementation. |
 | Linux, glibc | **Qualified** | `x86_64-unknown-linux-gnu` |
 | Linux, `aarch64` | Built and tested | Cross-built and unit-tested under emulation in CI. |

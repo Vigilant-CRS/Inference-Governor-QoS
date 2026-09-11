@@ -1,0 +1,49 @@
+diff --git a/platforms/cuda/hal/include/xsched/cuda/hal/common/options.h b/platforms/cuda/hal/include/xsched/cuda/hal/common/options.h
+index 8bdc4c4..c31e22a 100644
+--- a/platforms/cuda/hal/include/xsched/cuda/hal/common/options.h
++++ b/platforms/cuda/hal/include/xsched/cuda/hal/common/options.h
+@@ -7,6 +7,8 @@ enum CudaLv3Implementation
+ {
+     kCudaLv3ImplementationTrap,
+     kCudaLv3ImplementationTsg,
++    // Kein Level 3: Level-2-Queue (Instrumentierung, Deactivate) ohne Trap-Handler.
++    kCudaLv3ImplementationNone,
+ };
+ 
+ bool GetCudaSingleStreamPerProcessEnabled();
+diff --git a/platforms/cuda/hal/src/arch/arch.cpp b/platforms/cuda/hal/src/arch/arch.cpp
+index bd94fb2..d0397c2 100644
+--- a/platforms/cuda/hal/src/arch/arch.cpp
++++ b/platforms/cuda/hal/src/arch/arch.cpp
+@@ -76,6 +76,9 @@ std::shared_ptr<HwQueue> xsched::cuda::CudaQueueCreate(CUstream stream)
+         return std::make_shared<CudaQueueLv2>(stream);
+     case 70: // Volta: V100, GV100
+     case 86: // Ampere: RTX3050 - RTX 3090 Ti
++        if (GetCudaLv3Implementation() == kCudaLv3ImplementationNone) {
++            return std::make_shared<CudaQueueLv2>(stream);
++        }
+         return std::make_shared<CudaQueueLv3Trap>(stream);
+     // NEW_CUDA_ARCH: New CUDA architecture support goes here
+     default:
+@@ -108,6 +111,9 @@ CUresult xsched::cuda::DirectLaunch(std::shared_ptr<CudaKernelCommand> kernel, C
+         return CudaQueueLv2::DirectLaunch(kernel, current_ctx, stream);
+     case 70:
+     case 86:
++        if (GetCudaLv3Implementation() == kCudaLv3ImplementationNone) {
++            return CudaQueueLv2::DirectLaunch(kernel, current_ctx, stream);
++        }
+         return CudaQueueLv3Trap::DirectLaunch(kernel, current_ctx, stream);
+     // NEW_CUDA_ARCH: New CUDA architecture support goes here
+     default:
+diff --git a/platforms/cuda/hal/src/common/options.cpp b/platforms/cuda/hal/src/common/options.cpp
+index 9c7b577..ccdeed2 100644
+--- a/platforms/cuda/hal/src/common/options.cpp
++++ b/platforms/cuda/hal/src/common/options.cpp
+@@ -15,6 +15,7 @@ xsched::cuda::CudaLv3Implementation xsched::cuda::GetCudaLv3Implementation()
+         const std::string str = GetEnv(XSCHED_CUDA_LV3_IMPL_ENV_NAME);
+         if (str.empty()) return kCudaLv3ImplementationTrap;
+         if (str == "TSG") return kCudaLv3ImplementationTsg;
++        if (str == "LV2" || str == "NONE") return kCudaLv3ImplementationNone;
+         XWARN("unknown CUDA Level-3 implementation: %s, use default (TRAP)", str.c_str());
+         return kCudaLv3ImplementationTrap;
+     }();

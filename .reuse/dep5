@@ -6,3 +6,8 @@ Source: https://github.com/Vigilant-CRS/Inference-QoS
 Files: *
 Copyright: 2026 Vigilant e.K.
 License: BUSL-1.1
+
+Files: deploy/xsched/xsched-sm86-lv2.patch
+Copyright: XSched contributors <https://github.com/XpuOS/xsched>
+ 2026 Vigilant e.K.
+License: Apache-2.0
