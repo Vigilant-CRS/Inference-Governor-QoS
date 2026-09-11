@@ -6,7 +6,7 @@
 use vig_core::arrayvec::ArrayVec;
 use vig_core::estimator::RuntimeEstimator;
 use vig_core::feasibility::{
-    DEFAULT_HORIZON, ExpectedArrival, GuardVerdict, absolute_deadline, evaluate, guard_protected,
+    ExpectedArrival, GuardVerdict, absolute_deadline, evaluate, guard_protected,
 };
 use vig_core::model::{ModelContract, Quality, QualitySource, QualityValue, Variant};
 use vig_core::overload::{
@@ -382,7 +382,6 @@ fn g007_best_effort_waits_for_an_expected_protected_arrival() {
         ms(50),
         at(0),
         &forecast,
-        DEFAULT_HORIZON,
     );
 
     match verdict {
@@ -404,15 +403,7 @@ fn g007_short_best_effort_work_is_not_blocked() {
     let forecast = [detector_arrival(8, 28, 10)];
 
     // 5 ms Arbeit ist bei t=5 fertig, der Detector startet weiterhin bei t=8.
-    let verdict = guard_protected(
-        &slots,
-        M1,
-        Criticality::BestEffort,
-        ms(5),
-        at(0),
-        &forecast,
-        DEFAULT_HORIZON,
-    );
+    let verdict = guard_protected(&slots, M1, Criticality::BestEffort, ms(5), at(0), &forecast);
     assert_eq!(verdict, GuardVerdict::Clear);
 }
 
@@ -432,7 +423,6 @@ fn g007_no_veto_when_the_protected_work_was_doomed_anyway() {
         ms(50),
         at(0),
         &forecast,
-        DEFAULT_HORIZON,
     );
     assert_eq!(verdict, GuardVerdict::Clear, "kein Idle ohne Nutzen");
 }
@@ -451,7 +441,6 @@ fn g007_a_second_slot_removes_the_conflict() {
         ms(50),
         at(0),
         &forecast,
-        DEFAULT_HORIZON,
     );
     assert_eq!(verdict, GuardVerdict::Clear);
 }
@@ -469,7 +458,6 @@ fn guard_ignores_arrivals_of_equal_or_lower_criticality() {
         ms(50),
         at(0),
         &forecast,
-        DEFAULT_HORIZON,
     );
     assert_eq!(
         verdict,
@@ -478,8 +466,9 @@ fn guard_ignores_arrivals_of_equal_or_lower_criticality() {
     );
 }
 
+/// Eine Ankunft nach dem Ende des Kandidaten kann er nicht verspaeten.
 #[test]
-fn guard_ignores_arrivals_beyond_the_horizon() {
+fn guard_ignores_arrivals_after_the_candidate_has_finished() {
     let slots = SlotSet::homogeneous(1, 0).unwrap();
     let forecast = [detector_arrival(500, 520, 10)];
 
@@ -490,9 +479,27 @@ fn guard_ignores_arrivals_beyond_the_horizon() {
         ms(50),
         at(0),
         &forecast,
-        DEFAULT_HORIZON,
     );
     assert_eq!(verdict, GuardVerdict::Clear);
+}
+
+/// ADR-0036: kein fester Horizont. Reicht der Kandidat bis an eine Ankunft in
+/// 500 ms heran, ist sie geschuetzt — bis NV-23 lag sie jenseits von 100 ms
+/// und zaehlte nicht.
+#[test]
+fn guard_protects_an_arrival_however_far_away_the_candidate_reaches() {
+    let slots = SlotSet::homogeneous(1, 0).unwrap();
+    let forecast = [detector_arrival(500, 520, 10)];
+
+    let verdict = guard_protected(
+        &slots,
+        M1,
+        Criticality::BestEffort,
+        ms(515),
+        at(0),
+        &forecast,
+    );
+    assert!(matches!(verdict, GuardVerdict::WouldEndanger { .. }));
 }
 
 // ---------------------------------------------------------------------------

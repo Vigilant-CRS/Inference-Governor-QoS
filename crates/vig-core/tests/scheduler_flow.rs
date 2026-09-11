@@ -367,6 +367,82 @@ fn without_look_ahead_the_same_workload_would_lose_protected_deadlines() {
     );
 }
 
+/// ADR-0036: eine Jitterhuelle haelt eine ueberfaellige Ankunft offen — aber
+/// nur so lange, wie die Huelle reicht. Hoert ein bewachter Strom auf, darf
+/// er Hintergrundarbeit nicht fuer immer aufhalten.
+///
+/// Der Detektor liefert bis 297 ms und dann nicht mehr; erwartet war er bei
+/// 330 ms. Mit 2 ms Huelle wandert seine Frist bis 334 ms mit, danach steht
+/// sie bei 364 ms. Der 200-ms-Auftrag darf starten, sobald der Detektor auch
+/// ohne ihn nicht mehr zu retten waere: nach 364 − 10 = 354 ms.
+#[test]
+fn a_stream_that_stops_does_not_hold_background_back() {
+    let mut detector = contract(
+        Criticality::Protected,
+        QueuePolicy::Latest,
+        Some(33),
+        30,
+        66,
+        &[10],
+    );
+    detector.extension = Some(ContractExtension {
+        release_jitter_envelope: Some(ms(2)),
+        ..ContractExtension::default()
+    });
+    let vlm = contract(
+        Criticality::BestEffort,
+        QueuePolicy::Fifo,
+        None,
+        2_000,
+        3_000,
+        &[200],
+    );
+    let mut scheduler = build(vec![detector.clone(), vlm.clone()], 1);
+    let mut backend = Backend::default();
+
+    let mut next_id = 0_u64;
+    let mut vlm_id = None;
+    run(&mut scheduler, &mut backend, 600, |t| {
+        let mut out = Vec::new();
+        if t % 33 == 0 && t <= 297 {
+            next_id = next_id.saturating_add(1);
+            out.push(frame(next_id, 0, t, &detector));
+        }
+        if t == 310 {
+            next_id = next_id.saturating_add(1);
+            vlm_id = Some(RequestId(next_id));
+            out.push(frame(next_id, 1, t, &vlm));
+        }
+        out
+    });
+
+    let vlm_id = vlm_id.unwrap();
+    let Some(position) = backend.dispatched.iter().position(|id| *id == vlm_id) else {
+        panic!("der Auftrag muss laufen, nachdem der Strom aufgehoert hat");
+    };
+    assert_eq!(
+        position,
+        backend.dispatched.len() - 1,
+        "er laeuft nach dem letzten Frame"
+    );
+    assert!(
+        scheduler.metrics().deferred_for_protected > 0,
+        "bis dahin hat der Look-ahead ihn zurueckgehalten"
+    );
+    // Er ist nach spaetestens 355 ms gestartet und nach 200 ms fertig.
+    assert!(
+        backend.count(RequestState::CompletedValid) >= 10,
+        "Detektorframes und der Auftrag sind durchgelaufen"
+    );
+    assert!(
+        backend
+            .terminated
+            .iter()
+            .any(|(id, s)| *id == vlm_id && *s == RequestState::CompletedValid),
+        "und zwar vor 600 ms, also spaetestens bei 355 ms gestartet"
+    );
+}
+
 /// Spec L-003 / G-008: Unter 150 % Angebotslast waechst keine Queue ueber ihre
 /// Kapazitaet, und jeder Request erreicht einen terminalen Zustand.
 #[test]

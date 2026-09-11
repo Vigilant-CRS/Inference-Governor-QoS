@@ -922,7 +922,16 @@ fn spawn_owned(
             continue;
         };
         let model = config.model_names.get(index).map_or("?", String::as_str);
-        for item in extension.unenforced().iter() {
+        let guarded = contract.criticality.is_guarded();
+        if guarded && let Some(envelope) = extension.release_jitter_envelope {
+            tracing::info!(
+                model,
+                envelope_ms = envelope.as_millis(),
+                "Jitterhuelle: der Look-ahead haelt eine ueberfaellige Ankunft \
+                 bis zur doppelten Huelle offen (ADR-0036)"
+            );
+        }
+        for item in extension.unenforced(guarded).iter() {
             tracing::warn!(
                 model,
                 field = item.field,

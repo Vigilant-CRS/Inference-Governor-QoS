@@ -57,7 +57,7 @@ was that no documented configuration step could reach them at all
 
 | Feature | State | How to switch it on |
 |---|---|---|
-| Freshness-aware admission, supersession, look-ahead | **Qualified** | always on |
+| Freshness-aware admission, supersession, look-ahead | **Qualified** | always on. Since [ADR-0036](adr/0036-the-look-ahead-counts-from-the-capture.md) the look-ahead counts deadlines from the capture, sees the next arrival of every guarded stream however far away, and keeps a late frame pending within the contract's `release_jitter_ms`. On the Gate M3 load (no jitter envelope, periods ≤ 66 ms) that moves each protected deadline earlier by the observed time from capture to arrival (on the shared-memory path alone ~160 µs) and changes nothing else; the qualifying measurements ran before the change |
 | Variant selection by quality | **Qualified** | on where variants are interchangeable |
 | Cooperative decomposition of generative jobs | **Qualified** | `cooperative:` on the model |
 | Context-dependent progress cost for generative jobs | **Qualified** | `cooperative.prefill_per_token_us`; measured against vLLM (Qwen): 0–5 µs per context token with prefix caching, 35–39 µs without ([measurement](benchmark/nv16-prefill.md), [ADR-0031](adr/0031-a-re-prefill-is-not-free-progress.md)) |

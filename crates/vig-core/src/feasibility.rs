@@ -24,9 +24,6 @@ use crate::request::Criticality;
 use crate::slots::SlotSet;
 use crate::time::{Duration, Instant, Slack};
 
-/// Standardhorizont des Look-ahead (Spec 10.8).
-pub const DEFAULT_HORIZON: Duration = Duration::from_nanos_unbounded(100_000_000);
-
 /// Das Ergebnis einer Machbarkeitspruefung.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Feasibility {
@@ -60,7 +57,9 @@ impl Feasibility {
 /// Eine erwartete zukuenftige Ankunft eines periodischen Modells.
 ///
 /// Keine Zusage, dass der Request exakt dann eintrifft — eine
-/// Scheduling-Prognose aus der konfigurierten Periode (Spec 10.8).
+/// Scheduling-Prognose aus der konfigurierten Periode (Spec 10.8). Je
+/// bewachtem Modell genau eine: die naechste, gleich wie weit sie weg ist
+/// (ADR-0036).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExpectedArrival {
     /// Das erwartete logische Modell.
@@ -70,6 +69,10 @@ pub struct ExpectedArrival {
     /// Der erwartete Ankunftszeitpunkt.
     pub at: Instant,
     /// Die absolute Deadline, die dieser Request dann haette.
+    ///
+    /// Ab seiner erwarteten **Aufnahme**, nicht ab der Ankunft — wie die
+    /// Deadline, die der Dispatch fuer denselben Frame rechnet (Spec L-010,
+    /// ADR-0036).
     pub deadline: Instant,
     /// Die konservativ prognostizierte Laufzeit seiner besten Variante.
     pub runtime: Duration,
@@ -119,9 +122,14 @@ pub enum GuardVerdict {
 
 /// Prueft, ob der Start eines Kandidaten erwartete wichtigere Arbeit gefaehrdet.
 ///
-/// Nur Ankunftserwartungen innerhalb von `horizon` und mit **hoeherer**
-/// Kritikalitaet als der Kandidat werden betrachtet. Ein Protected-Request
-/// wird nie durch die Erwartung eines anderen Protected-Requests blockiert:
+/// Nur Ankunftserwartungen mit **hoeherer** Kritikalitaet als der Kandidat
+/// werden betrachtet, und nur solche, die er verspaeten kann: die vor seinem
+/// Ende eintreffen. Einen festen Horizont gibt es nicht mehr (ADR-0036) — er
+/// liess einen Strom mit einer Periode ueber dem Horizont gegen jede Arbeit
+/// ungeschuetzt, die ueber seine naechste Ankunft hinwegreichte.
+///
+/// Ein Protected-Request wird nie durch die Erwartung eines anderen
+/// Protected-Requests blockiert:
 /// das waere kein Zulassungsproblem, sondern ein Schedulability-Problem, und
 /// gehoert in den `doctor` (Spec 10.9), nicht in den Hot Path.
 #[must_use]
@@ -132,7 +140,6 @@ pub fn guard_protected<'a, I>(
     candidate_runtime: Duration,
     now: Instant,
     forecast: I,
-    horizon: Duration,
 ) -> GuardVerdict
 where
     I: IntoIterator<Item = &'a ExpectedArrival>,
@@ -144,7 +151,6 @@ where
         candidate_runtime,
         now,
         forecast,
-        horizon,
         Duration::ZERO,
     )
 }
@@ -158,16 +164,12 @@ where
 /// dann nicht mehr „passen 90 ms in die Luecke", sondern „passt die
 /// Restblockierung in den Slack der geschuetzten Arbeit".
 ///
-/// Gerechnet wird fuer **alle** erwarteten Ankuenfte im Horizont, nicht nur
-/// fuer die vor dem geplanten Ende: ein unterbrochener Auftrag endet spaeter,
-/// als seine Laufzeit sagt, und belastet solange jede Ankunft.
+/// Gerechnet wird fuer **alle** erwarteten Ankuenfte, nicht nur fuer die vor
+/// dem geplanten Ende: ein unterbrochener Auftrag endet spaeter, als seine
+/// Laufzeit sagt, und belastet solange jede Ankunft.
 ///
 /// Mit `candidate_residual = 0` ist das exakt [`guard_protected`].
 #[must_use]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "dieselbe Parameterliste wie guard_protected plus die eine Groesse, um die es geht"
-)]
 pub fn guard_protected_with_residual<'a, I>(
     slots: &SlotSet,
     candidate_model: ModelIdx,
@@ -175,16 +177,12 @@ pub fn guard_protected_with_residual<'a, I>(
     candidate_runtime: Duration,
     now: Instant,
     forecast: I,
-    horizon: Duration,
     candidate_residual: Duration,
 ) -> GuardVerdict
 where
     I: IntoIterator<Item = &'a ExpectedArrival>,
 {
     let preemptible = candidate_residual > Duration::ZERO;
-    let Some(limit) = now.checked_add(horizon) else {
-        return GuardVerdict::Clear;
-    };
     let Some(slot) = slots.ready_slot(candidate_model, now) else {
         return GuardVerdict::Clear;
     };
@@ -230,7 +228,7 @@ where
     // einen Slot, der einer frueheren gehoert.
     let mut ordered: ArrayVec<ExpectedArrival, MAX_MODELS> = ArrayVec::new();
     for expected in forecast {
-        if expected.at > limit || expected.criticality <= candidate_criticality {
+        if expected.criticality <= candidate_criticality {
             continue;
         }
         insert_by_arrival(&mut ordered, *expected);
@@ -386,7 +384,6 @@ mod tests {
             ms(90),
             at(0),
             [detector_soon()].iter(),
-            DEFAULT_HORIZON,
         );
         assert!(matches!(verdict, GuardVerdict::WouldEndanger { .. }));
     }
@@ -403,7 +400,6 @@ mod tests {
             ms(90),
             at(0),
             [detector_soon()].iter(),
-            DEFAULT_HORIZON,
             ms(5),
         );
         assert_eq!(verdict, GuardVerdict::Clear);
@@ -420,7 +416,6 @@ mod tests {
             ms(90),
             at(0),
             [detector_soon()].iter(),
-            DEFAULT_HORIZON,
             ms(30),
         );
         assert!(matches!(
@@ -451,7 +446,6 @@ mod tests {
             ms(50),
             at(0),
             [late].iter(),
-            DEFAULT_HORIZON,
             ms(10),
         );
         assert!(matches!(verdict, GuardVerdict::WouldEndanger { .. }));

@@ -96,15 +96,18 @@ Werkzeugen:
   +236 µs gegen den Mock, größenunabhängig; alle budgetierten Zeilen PASS
   ([datapath-budgets.md](datapath-budgets.md)).
 
-**Planbarkeit im begrenzten Modell (NV-23).** Unter neun benannten Annahmen —
-ein Slot, ein geschützter Strom, Laufzeiten innerhalb des Plans, Jitter J,
-Horizont 100 ms — ist das Alter jedes geschützten Frames höchstens
-`δ + 2J + D`, und die längste Versorgungslücke ist nach oben begrenzt.
-Bewiesen, und gegen den echten Scheduler über 176 472 Parametersätze ohne
-Gegenbeispiel geprüft; die Schranke wird exakt erreicht. Die Suche hat die
-erste Fassung des Satzes widerlegt und drei Schwächen des Look-ahead
-gefunden: er gibt verspätete Frames auf, seine Deadline zählt ab Ankunft
-statt Aufnahme, und er sieht fest 100 ms voraus
+**Planbarkeit im begrenzten Modell (NV-23).** Unter benannten Annahmen —
+ein Slot, ein geschützter Strom, Laufzeiten innerhalb des Plans, Jitter J —
+ist das Alter jedes geschützten Frames höchstens `2J + D`, und die längste
+Versorgungslücke ist nach oben begrenzt. Bewiesen, gegen den echten
+Scheduler per Gittersuche ohne Gegenbeispiel geprüft; die Schranke wird
+exakt erreicht. Die Suche hat die erste Fassung des Satzes widerlegt und drei
+Schwächen des Look-ahead gefunden, die seit
+[ADR-0036](adr/0036-the-look-ahead-counts-from-the-capture.md) behoben sind:
+er gab verspätete Frames auf (jetzt nicht mehr, sofern der Vertrag eine
+Jitterhülle nennt), seine Deadline zählte ab Ankunft statt Aufnahme (die
+Schranke verliert damit die Transportzeit `δ`), und er sah fest 100 ms voraus
+(jetzt jede nächste Ankunft eines bewachten Stroms)
 ([Analyse](analysis/nv23-bounded-claim.md)).
 
 **Der Kern auf ARM.** Auf echten ARM-Kernen (Pixel 2 und Pixel 5, A53- bis
@@ -189,7 +192,6 @@ per Voreinstellung nichts. Mit Marge ist `active` sicher, auf Gate M3 aber ohne 
 | Externer Review vom 11.09. | Skriptbefunde behoben, Produktbefunde in Arbeit | R01–R05: Abschlussabgleich nach Backend-Neustart, Identität von Endpunkt und Version, Pufferlebensdauer in Pilot und ROS-Brücke, Sampling-JSON ([Review](reviews/2026-09-11-runtime/REVIEW.md)). R06–R08 behoben. |
 | Zweiter Betriebspunkt | offen | Zwei Ausführungseinheiten (`slots: 2`, Instance Groups mit zwei Instanzen) samt gemessener Parallelprofile. Die Lastrampe sagt selbst, dass sich ihre Kante damit verschiebt. |
 | NV-22 mehrere Ressourcendomänen | **erreichbar, nicht qualifiziert** ([ADR-0037](adr/0037-a-domain-is-a-gpu-with-one-owner.md)) | Gebaut: ein Scheduler je GPU (`backend.domains`, `domain:` am Modell), feste Zuordnung, kein Failover, Kennzahlen je Domäne, `vig doctor` je GPU; mit zwei Fake-Executoren belegt, dass eine belegte oder ausgefallene GPU der anderen weder Slot noch Kredit nimmt. Es fehlt: eine zweite GPU für die Qualifikation (Interferenz über PCIe, Hauptspeicher, Leistungsbudget), Shared-Memory-Registrierung an allen Endpunkten, Domänen in `vig calibrate`. Erledigt aus diesem Block: NV-21 ([ROS-2-Brücke](integrations/ros2.md)) und NV-23 ([begrenzter Nachweis](analysis/nv23-bounded-claim.md)). |
-| Look-ahead nach NV-23 | offen | Die drei Schwächen aus der Gegenbeispielsuche beheben: verspätete Frames nicht aufgeben, Deadline ab Aufnahme, Horizont aus den Perioden ableiten statt fest 100 ms. |
 
 ## Offen für eine Produktionsfreigabe
 

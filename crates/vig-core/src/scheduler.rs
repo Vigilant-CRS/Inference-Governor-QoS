@@ -25,7 +25,7 @@
 use crate::arrayvec::ArrayVec;
 use crate::contract_ext::{BudgetSlack, CycleOutcome, MissWindow, WeaklyHardStatus};
 use crate::estimator::{MarginController, RuntimeEstimator};
-use crate::feasibility::{DEFAULT_HORIZON, ExpectedArrival, GuardVerdict, guard_protected};
+use crate::feasibility::{ExpectedArrival, GuardVerdict, guard_protected};
 use crate::hints::{Effect, Hint, HintPolicy, Hints, Rejection};
 use crate::ids::{MAX_MODELS, ModelIdx, RequestId, SlotIdx, VariantIdx};
 use crate::interference::{Interference, InterferenceVerdict};
@@ -245,6 +245,13 @@ pub struct Scheduler {
     queues: ArrayVec<ModelQueue, MAX_MODELS>,
     variant_states: [VariantState; MAX_MODELS],
     next_expected: [Option<Instant>; MAX_MODELS],
+    /// Die erwartete **Aufnahme** der naechsten Ankunft je Modell.
+    ///
+    /// Vorige Aufnahme plus Periode. Die Deadline eines Frames haengt an
+    /// seiner Aufnahme (Spec L-010); rechnet der Look-ahead sie ab der
+    /// erwarteten Ankunft, laesst er Arbeit zu, bis der Frame um die
+    /// Transportzeit nach seiner Deadline fertig ist (NV-23, ADR-0036).
+    next_capture: [Option<Instant>; MAX_MODELS],
     slots: SlotSet,
     overload: OverloadController,
     /// Die vom Betreiber gesetzte Ausgangsmarge.
@@ -322,7 +329,6 @@ pub struct Scheduler {
     /// er erzwingt nichts. Die Kritikalitaetsklasse `Protected` ist noch kein
     /// Weakly-hard-Vertrag.
     miss_windows: [Option<MissWindow>; MAX_MODELS],
-    horizon: Duration,
     inflight: ArrayVec<Dispatched, MAX_INFLIGHT>,
     metrics: Metrics,
 }
@@ -409,6 +415,7 @@ impl Scheduler {
             queues,
             variant_states: [VariantState::default(); MAX_MODELS],
             next_expected: [None; MAX_MODELS],
+            next_capture: [None; MAX_MODELS],
             arrivals: [crate::arrival::ArrivalTracker::default(); MAX_MODELS],
             interference: Interference::new(),
             last_valid: [None; MAX_MODELS],
@@ -426,15 +433,9 @@ impl Scheduler {
             margins,
             residual: [None; MAX_MODELS],
             estimator: RuntimeEstimator::new(),
-            horizon: DEFAULT_HORIZON,
             inflight: ArrayVec::new(),
             metrics,
         })
-    }
-
-    /// Setzt den Look-ahead-Horizont (Spec 10.8).
-    pub const fn set_horizon(&mut self, horizon: Duration) {
-        self.horizon = horizon;
     }
 
     /// Der Online Runtime Estimator, fuer Diagnose und Tests.
@@ -577,13 +578,20 @@ impl Scheduler {
             }
         }
 
-        // Die naechste Ankunft dieses Modells fortschreiben (Spec 10.8).
+        // Die naechste Ankunft dieses Modells fortschreiben (Spec 10.8), und
+        // mit ihr die naechste Aufnahme. Eine Aufnahme nach der Ankunft kann
+        // es nicht geben; meldet der Client eine, zaehlt die Ankunft — sonst
+        // lieferte eine vorgehende Clientuhr dem Look-ahead eine Frist, die
+        // spaeter liegt als jede, die der Dispatch fuer denselben Frame rechnet.
         if let Some(contract) = self.contracts.get(model.get())
             && let Some(period) = contract.period
             && let Some(expected) = now.checked_add(period)
             && let Some(slot) = self.next_expected.get_mut(model.get())
         {
             *slot = Some(expected);
+            if let Some(capture) = self.next_capture.get_mut(model.get()) {
+                *capture = descriptor.generation_time.min(now).checked_add(period);
+            }
         }
 
         let state = self.overload.state();
@@ -1497,7 +1505,6 @@ impl Scheduler {
                 runtime,
                 now,
                 forecast.iter(),
-                self.horizon,
                 residual,
             ),
             None => guard_protected(
@@ -1507,7 +1514,6 @@ impl Scheduler {
                 runtime,
                 now,
                 forecast.iter(),
-                self.horizon,
             ),
         }
     }
@@ -1881,10 +1887,14 @@ impl Scheduler {
         best.map(|(_, _, _, _, model, id)| (model, id))
     }
 
-    /// Die erwarteten geschuetzten Ankuenfte im Look-ahead-Horizont.
+    /// Die naechste erwartete Ankunft jedes bewachten Modells.
+    ///
+    /// Jede, gleich wie weit sie weg ist: ein fester Horizont liess einen
+    /// Strom mit laengerer Periode gegen Arbeit ungeschuetzt, die ueber seine
+    /// naechste Ankunft hinwegreichte (NV-23, ADR-0036). Mehr als eine je
+    /// Modell gibt es nicht, der Aufwand bleibt derselbe.
     fn build_forecast(&self, now: Instant) -> ArrayVec<ExpectedArrival, MAX_MODELS> {
         let mut out = ArrayVec::new();
-        let limit = now.checked_add(self.horizon);
         for (i, contract) in self.contracts.iter().enumerate() {
             if !contract.criticality.is_guarded() {
                 continue;
@@ -1892,10 +1902,7 @@ impl Scheduler {
             let Some(Some(expected_at)) = self.next_expected.get(i).copied() else {
                 continue;
             };
-            if limit.is_some_and(|l| expected_at > l) {
-                continue;
-            }
-            let Some(deadline) = expected_at.checked_add(contract.deadline) else {
+            let Some(Some(expected_capture)) = self.next_capture.get(i).copied() else {
                 continue;
             };
             // Die beste Variante ist die konservative Annahme: sie ist die
@@ -1940,6 +1947,19 @@ impl Scheduler {
                     .map_or(runtime, |floor| runtime.max(floor))
             } else {
                 runtime
+            };
+            let Some(deadline) = forecast_deadline(
+                now,
+                expected_at,
+                expected_capture,
+                contract.deadline,
+                runtime,
+                contract
+                    .extension
+                    .as_ref()
+                    .and_then(|e| e.release_jitter_envelope),
+            ) else {
+                continue;
             };
             let _ = out.push(ExpectedArrival {
                 model,
@@ -2030,6 +2050,54 @@ impl Scheduler {
     }
 }
 
+/// Die Frist einer erwarteten geschuetzten Ankunft (ADR-0036).
+///
+/// Puenktlich: erwartete Aufnahme plus Deadline — dieselbe Frist, die der
+/// Dispatch fuer diesen Frame rechnen wird. Die Transportzeit `δ` steckt im
+/// Abstand zwischen erwarteter Ankunft und erwarteter Aufnahme.
+///
+/// **Ueberfaellig** (`now` nach der erwarteten Ankunft): ein spaeter Frame ist
+/// spaeter aufgenommen, und seine Frist liegt entsprechend spaeter. Der
+/// Look-ahead laesst sie mitwandern — aber nur um `W`, sonst hielte ein
+/// Strom, der aufgehoert hat, jede andere Arbeit fuer immer auf:
+///
+/// * mit erklaerter Jitterhuelle `J` um `max(δ, 2J)`: zwei Aufnahmen, jede
+///   bis `J` neben ihrem Raster, liegen bis `2J` weiter auseinander als die
+///   Periode;
+/// * ohne Huelle um `δ`. Das ist genau die Frist „erwartete Ankunft plus
+///   Deadline", mit der der Look-ahead bis ADR-0036 jede ueberfaellige Ankunft
+///   plante — ohne Huelle aendert sich an einem verspaeteten Frame nichts.
+///
+/// Danach steht die Frist, und die Ankunft wird, wie bisher, unrettbar und
+/// haelt nichts mehr auf. `δ` zaehlt dabei hoechstens bis zur Deadline: was
+/// darueber liegt, ist keine Transportzeit, sondern eine falsch gehende
+/// Clientuhr, und sie soll keinen Strom beliebig lange offen halten.
+///
+/// **Nie frueher als der Frame allein fertig waere** (`runtime`). Haelt ein
+/// Frame seine Deadline nicht einmal ohne Konkurrenz — `δ + Ĉ > D` —, gaebe
+/// eine Frist ab Aufnahme ihn schon vor seiner Ankunft auf, und der
+/// Look-ahead liesse jede Arbeit vor ihn. Er soll dann so frueh wie moeglich
+/// fertig werden: kein Kandidat darf ihn weiter verspaeten. Innerhalb der
+/// Annahmen von NV-23 greift diese Untergrenze nie.
+fn forecast_deadline(
+    now: Instant,
+    expected_at: Instant,
+    expected_capture: Instant,
+    deadline: Duration,
+    runtime: Duration,
+    envelope: Option<Duration>,
+) -> Option<Instant> {
+    let transport = expected_at.saturating_since(expected_capture);
+    let jitter = envelope.map_or(Duration::ZERO, |j| {
+        Duration::from_nanos_unbounded(j.as_nanos().saturating_mul(2))
+    });
+    let window = transport.min(deadline).max(jitter);
+    let arrival = expected_at.checked_add(now.saturating_since(expected_at).min(window))?;
+    let slack =
+        Duration::from_nanos_unbounded(deadline.as_nanos().saturating_sub(transport.as_nanos()));
+    arrival.checked_add(slack.max(runtime))
+}
+
 /// Rechnet die gemessene Interferenz auf eine Prognose.
 ///
 /// Eine eigene Funktion, weil beide Planzweige sie brauchen und weil sie
@@ -2037,4 +2105,72 @@ impl Scheduler {
 /// niemand einhalten kann.
 fn with_interference(base: Duration, added: Duration) -> Duration {
     Duration::from_nanos_unbounded(base.as_nanos().saturating_add(added.as_nanos()))
+}
+
+#[cfg(test)]
+mod forecast_tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::forecast_deadline;
+    use crate::time::{Duration, Instant};
+
+    fn ms(v: u64) -> Duration {
+        Duration::from_nanos_unbounded(v.saturating_mul(1_000_000))
+    }
+
+    fn at(v: u64) -> Instant {
+        Instant::from_nanos(v.saturating_mul(1_000_000))
+    }
+
+    /// Erwartet bei 100 ms, aufgenommen bei 98 ms (δ = 2), D = 30, Ĉ = 10.
+    fn deadline(now: u64, runtime: u64, envelope: Option<u64>) -> Instant {
+        forecast_deadline(
+            at(now),
+            at(100),
+            at(98),
+            ms(30),
+            ms(runtime),
+            envelope.map(ms),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn on_time_the_deadline_counts_from_the_capture() {
+        assert_eq!(deadline(50, 10, None), at(128));
+        assert_eq!(deadline(50, 10, Some(3)), at(128));
+    }
+
+    #[test]
+    fn without_an_envelope_a_late_arrival_keeps_the_old_deadline() {
+        // Bis δ nach der erwarteten Ankunft wandert sie mit, dann steht sie
+        // bei Ankunft + D — wie bis ADR-0036.
+        assert_eq!(deadline(101, 10, None), at(129));
+        assert_eq!(deadline(102, 10, None), at(130));
+        assert_eq!(deadline(150, 10, None), at(130));
+    }
+
+    #[test]
+    fn with_an_envelope_it_moves_by_twice_the_envelope() {
+        assert_eq!(deadline(104, 10, Some(3)), at(132));
+        assert_eq!(deadline(106, 10, Some(3)), at(134));
+        assert_eq!(deadline(150, 10, Some(3)), at(134));
+    }
+
+    #[test]
+    fn a_frame_that_cannot_make_it_alone_is_not_given_up() {
+        // Ĉ = 29 > D − δ = 28: die Frist ist die fruehestmoegliche
+        // Fertigstellung, nicht eine, die vor ihr liegt.
+        assert_eq!(deadline(50, 29, None), at(129));
+    }
+
+    #[test]
+    fn a_clock_far_off_does_not_hold_a_stream_open() {
+        // „Aufgenommen" 10 s vor der Ankunft: das ist eine Uhr, kein
+        // Transport. Das Fenster endet nach D, nicht nach 10 s.
+        let late =
+            |now| forecast_deadline(at(now), at(10_100), at(100), ms(30), ms(10), None).unwrap();
+        assert_eq!(late(10_200), at(10_140));
+        assert_eq!(late(20_000), at(10_140));
+    }
 }

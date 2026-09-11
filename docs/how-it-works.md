@@ -94,6 +94,14 @@ The governor computes whether the protected arrival would be feasible *without*
 the candidate and *with* it. Only if the answer changes does it hold back. A
 scheduler that idles without rescuing anything is worse than FIFO.
 
+The forecast holds the **next** arrival of every guarded stream, however far
+away it is — a 5 Hz sensor is protected against a 150 ms job just like a
+30 Hz camera against a 40 ms one. Its deadline counts from the expected
+**capture**, exactly like the deadline the dispatcher will compute for that
+frame. A frame that is late is not given up at once: if the contract declares
+a jitter envelope (`release_jitter_ms`), the look-ahead keeps it pending for
+up to twice the envelope ([ADR-0036](adr/0036-the-look-ahead-counts-from-the-capture.md)).
+
 Expected arrivals are reserved **cumulatively** in arrival order: two protected
 jobs can each fit on their own and miss together. The look-ahead uses the same
 runtime estimate the dispatcher uses — the online observation over the offline

@@ -379,7 +379,6 @@ fn the_guard_reserves_the_combined_demand_of_expected_requests() {
         ms(11),
         at(0),
         &forecast,
-        ms(100),
     );
     assert!(
         matches!(verdict, GuardVerdict::WouldEndanger { .. }),

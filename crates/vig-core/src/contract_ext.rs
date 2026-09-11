@@ -220,7 +220,12 @@ pub struct ContractExtension {
     pub consumer_period: Option<Duration>,
     /// Der Versatz des ersten Abtastzeitpunkts gegenueber dem Vertragsbeginn.
     pub phase: Option<Duration>,
-    /// Wie weit ein Abtastzeitpunkt schwanken darf.
+    /// Wie weit die Aufnahme eines Frames hoechstens neben ihrem Raster liegt.
+    ///
+    /// Fuer ein bewachtes Modell nutzt der Look-ahead sie: er haelt eine
+    /// ueberfaellige Ankunft offen, solange sie innerhalb der Huelle noch
+    /// kommen kann, statt den Frame aufzugeben (ADR-0036). Gemessen wird der
+    /// Jitter nicht; die Huelle ist eine Angabe des Betreibers.
     pub release_jitter_envelope: Option<Duration>,
     /// Bis wohin die Zusage reicht.
     pub delivery_boundary: DeliveryBoundary,
@@ -499,6 +504,10 @@ impl ContractExtension {
 
     /// Was dieser Vertrag fordert, ohne dass es durchgesetzt wird (R05).
     ///
+    /// `guarded`: ob das Modell bewacht ist (`protected` oder `high`). Nur
+    /// dort nutzt der Look-ahead die Jitterhuelle (ADR-0036); an jedem
+    /// anderen Modell bleibt sie eine Angabe ohne Wirkung.
+    ///
     /// Kein Fehler, aber auch keine Nebensache: ein gueltiges YAML-Dokument
     /// ist kein angenommener Betriebsvertrag. Was hier steht, hat der
     /// Betreiber aufgeschrieben und bekommt es **nicht**. Der Dienst meldet
@@ -509,13 +518,13 @@ impl ContractExtension {
     /// eine Nachweisstufe, die es nicht gibt, ist keine Ungenauigkeit, sondern
     /// eine falsche Zusage.
     #[must_use]
-    pub fn unenforced(&self) -> ArrayVec<Unenforced, MAX_UNENFORCED> {
+    pub fn unenforced(&self, guarded: bool) -> ArrayVec<Unenforced, MAX_UNENFORCED> {
         let mut out = ArrayVec::new();
-        if self.release_jitter_envelope.is_some() {
+        if self.release_jitter_envelope.is_some() && !guarded {
             let _ = out.push(Unenforced {
                 field: "release_jitter_envelope",
-                reason: "der Jitter der Abtastzeitpunkte wird nicht gemessen \
-                         und gegen nichts geprueft",
+                reason: "nur der Look-ahead eines bewachten Modells nutzt die \
+                         Huelle; an diesem Modell hat sie keine Wirkung",
             });
         }
         if self.delivery_boundary != DeliveryBoundary::Governor {
@@ -1685,10 +1694,17 @@ mod background_progress_tests {
             ..Default::default()
         };
         extension.validate(1).unwrap();
-        let named: Vec<&str> = extension.unenforced().iter().map(|u| u.field).collect();
+        let named: Vec<&str> = extension
+            .unenforced(false)
+            .iter()
+            .map(|u| u.field)
+            .collect();
         assert_eq!(named, vec!["release_jitter_envelope", "delivery_boundary"]);
+        // ADR-0036: an einem bewachten Modell nutzt der Look-ahead die Huelle.
+        let named: Vec<&str> = extension.unenforced(true).iter().map(|u| u.field).collect();
+        assert_eq!(named, vec!["delivery_boundary"]);
         assert!(
-            ContractExtension::default().unenforced().is_empty(),
+            ContractExtension::default().unenforced(false).is_empty(),
             "was nichts fordert, hat nichts Unerfuelltes"
         );
     }

@@ -1047,7 +1047,12 @@ pub struct ContractExtensionConfig {
     /// Versatz des ersten Abtastzeitpunkts in Millisekunden.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase_ms: Option<u64>,
-    /// Zulaessige Schwankung eines Abtastzeitpunkts in Millisekunden.
+    /// Wie weit die Aufnahme eines Frames hoechstens neben ihrem Raster
+    /// liegt, in Millisekunden.
+    ///
+    /// An einem bewachten Modell haelt der Look-ahead eine ueberfaellige
+    /// Ankunft bis zur doppelten Huelle offen, statt den Frame aufzugeben
+    /// (ADR-0036). Gemessen wird der Jitter nicht.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release_jitter_ms: Option<u64>,
     /// Bis wohin die Zusage reicht: `governor` oder `consumer`.

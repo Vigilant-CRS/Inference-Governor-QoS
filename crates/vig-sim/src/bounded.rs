@@ -26,7 +26,7 @@ use crate::event::{SimClock, SimEvent};
 use crate::rng::Pcg32;
 use std::collections::{HashMap, HashSet};
 use vig_core::arrayvec::ArrayVec;
-use vig_core::feasibility::DEFAULT_HORIZON;
+use vig_core::contract_ext::ContractExtension;
 use vig_core::ids::MAX_MODELS;
 use vig_core::model::{ModelContract, Quality, QualitySource, QualityValue, Variant};
 use vig_core::overload::{OverloadConfig, OverloadController};
@@ -97,8 +97,9 @@ pub struct Params {
     pub runtime_us: [u64; 2],
     /// Die konfigurierte Sicherheitsmarge in Prozent.
     pub margin_percent: u32,
-    /// `H` — der Look-ahead-Horizont.
-    pub horizon_us: u64,
+    /// `J_E` — die im Vertrag erklaerte Jitterhuelle
+    /// (`release_jitter_envelope`), falls eine erklaert ist.
+    pub jitter_envelope_us: Option<u64>,
     /// Die Hintergrundstroeme.
     pub background: Vec<Background>,
     /// Laenge des Laufs.
@@ -173,15 +174,15 @@ pub enum Violation {
     Degenerate,
     /// (A3) Eine tatsaechliche Laufzeit liegt ueber ihrem Profil-p99.
     RuntimeAboveProfile,
-    /// (A4) `Ĉ + 2J > D`: ein verspaeteter Frame gilt dem Look-ahead als
-    /// unrettbar, und er gibt ihn auf.
+    /// (A4) `Ĉ + δ + max(0, 2J − W) > D` mit `W = max(δ, 2·J_E)`: ein
+    /// verspaeteter Frame gilt dem Look-ahead als unrettbar, und er gibt ihn
+    /// auf. Mit einer Huelle `J_E ≥ J` bleibt davon `Ĉ + δ ≤ D` — der Frame
+    /// haelt seine Deadline allein.
     NoRoomForLateArrival,
     /// (A5) `Ĉ + 2J > T`: ein Frame kann noch laufen, wenn der naechste faellig ist.
     NoRoomInPeriod,
-    /// (A6) `T > H` und eine geplante Hintergrundlaufzeit `> H`.
-    BackgroundBeyondHorizon,
-    /// (A7) `D + 2J ≥ T + Ĉ`: ein Frame kann noch warten, wenn der naechste
-    /// eintrifft, und wird verdraengt.
+    /// (A7) `D + 2J ≥ T + Ĉ + δ`: ein Frame kann noch warten, wenn der
+    /// naechste eintrifft, und wird verdraengt.
     MaySupersede,
     /// (A8) Hintergrundarbeit trifft vor der ersten geschuetzten Ankunft ein.
     BackgroundBeforeProtected,
@@ -205,21 +206,13 @@ pub fn check(p: &Params) -> Result<(), Violation> {
         return Err(Violation::RuntimeAboveProfile);
     }
     let j2 = 2 * p.jitter_us;
-    if c + j2 > p.deadline_us {
+    if late_room_us(p, c) > p.deadline_us {
         return Err(Violation::NoRoomForLateArrival);
     }
     if c + j2 > p.period_us {
         return Err(Violation::NoRoomInPeriod);
     }
-    if p.period_us > p.horizon_us {
-        for b in &p.background {
-            let planned = planned_us(b.p99_us, p.margin_percent).ok_or(Violation::Degenerate)?;
-            if planned > p.horizon_us {
-                return Err(Violation::BackgroundBeyondHorizon);
-            }
-        }
-    }
-    if p.deadline_us + j2 >= p.period_us + c {
+    if p.deadline_us + j2 >= p.period_us + c + p.transport_us {
         return Err(Violation::MaySupersede);
     }
     let first = p.first_arrival_us();
@@ -232,15 +225,46 @@ pub fn check(p: &Params) -> Result<(), Violation> {
     Ok(())
 }
 
-/// `Δ = δ + 2J + D` — die Schranke fuer das Alter jedes geschuetzten
-/// Ergebnisses bei seiner Auslieferung.
-#[must_use]
-pub const fn delivery_bound_us(p: &Params) -> u64 {
-    p.transport_us + 2 * p.jitter_us + p.deadline_us
+/// Wie viel Deadline (A4) verlangt: `Ĉ + δ + max(0, 2J − W)`.
+///
+/// `W = max(δ, 2·J_E)` ist, wie weit der Look-ahead die Frist einer
+/// ueberfaelligen Ankunft mitwandern laesst (ADR-0036). Reicht `W` ueber die
+/// ganze moegliche Verspaetung `2J`, bleibt `Ĉ + δ`: der Frame muss seine
+/// Deadline allein halten koennen, sonst ist die Frage eine andere.
+const fn late_room_us(p: &Params, planned: u64) -> u64 {
+    late_room(planned, p.transport_us, p.jitter_us, p.jitter_envelope_us)
 }
 
-/// `max(0, T + 2J + Δ − A)` — die Schranke fuer die laengste Versorgungsluecke
-/// nach der ersten Auslieferung.
+const fn late_room(
+    planned: u64,
+    transport_us: u64,
+    jitter_us: u64,
+    envelope_us: Option<u64>,
+) -> u64 {
+    let envelope = match envelope_us {
+        Some(j) => 2 * j,
+        None => 0,
+    };
+    let window = if transport_us > envelope {
+        transport_us
+    } else {
+        envelope
+    };
+    planned + transport_us + (2 * jitter_us).saturating_sub(window)
+}
+
+/// `Δ = 2J + D` — die Schranke fuer das Alter jedes geschuetzten Ergebnisses
+/// bei seiner Auslieferung.
+///
+/// Bis ADR-0036 `δ + 2J + D`: der Look-ahead rechnete die Deadline ab der
+/// erwarteten Ankunft statt ab der Aufnahme.
+#[must_use]
+pub const fn delivery_bound_us(p: &Params) -> u64 {
+    2 * p.jitter_us + p.deadline_us
+}
+
+/// `max(0, T + 2J + Δ − A) = max(0, T + D + 4J − A)` — die Schranke fuer die
+/// laengste Versorgungsluecke nach der ersten Auslieferung.
 ///
 /// `None`, wenn `Δ ≥ A`: dann macht die Aussage **keine** Aussage ueber die
 /// Luecke. Ein Frame, der mit Alter genau `A` ankommt, ist gueltig
@@ -404,17 +428,22 @@ struct Meta {
 pub fn run(p: &Params) -> Option<Outcome> {
     let margin = SafetyMargin::from_percent(p.margin_percent)?;
     let mut contracts: ArrayVec<ModelContract, MAX_MODELS> = ArrayVec::new();
-    contracts
-        .push(contract(
-            Criticality::Protected,
-            QueuePolicy::Latest,
-            1,
-            Some(us(p.period_us)),
-            us(p.deadline_us),
-            us(p.max_age_us),
-            variant(p.p50_us, p.p99_us)?,
-        ))
-        .ok()?;
+    let mut protected = contract(
+        Criticality::Protected,
+        QueuePolicy::Latest,
+        1,
+        Some(us(p.period_us)),
+        us(p.deadline_us),
+        us(p.max_age_us),
+        variant(p.p50_us, p.p99_us)?,
+    );
+    if let Some(envelope) = p.jitter_envelope_us {
+        protected.extension = Some(ContractExtension {
+            release_jitter_envelope: Some(us(envelope)),
+            ..ContractExtension::default()
+        });
+    }
+    contracts.push(protected).ok()?;
     for b in &p.background {
         // Grosszuegige Grenzen: der Hintergrund soll durch nichts anderes
         // verschwinden als durch die Entscheidungen, um die es geht.
@@ -433,7 +462,6 @@ pub fn run(p: &Params) -> Option<Outcome> {
     let slots = SlotSet::homogeneous(1, 0).ok()?;
     let overload = OverloadController::new(OverloadConfig::default(), Instant::ZERO).ok()?;
     let mut scheduler = Scheduler::new(contracts.clone(), slots, overload, margin).ok()?;
-    scheduler.set_horizon(us(p.horizon_us));
 
     let mut clock = SimClock::new();
     let mut pending: HashMap<u64, RequestDescriptor> = HashMap::new();
@@ -711,53 +739,85 @@ fn protected_cases(axes: &Axes) -> Vec<Params> {
                 for &transport_us in axes.transports {
                     for &p99_us in axes.p99s {
                         for &margin_percent in axes.margins {
-                            let Some(c) = planned_us(p99_us, margin_percent) else {
-                                continue;
-                            };
-                            let p50_us = p99_us * 6 / 10;
-                            // Die kleinste Deadline, die (A4) zulaesst, die
-                            // Periode, und die groesste, die (A7) zulaesst.
-                            let lowest = c + 2 * jitter_us;
-                            let highest = (period_us + c).saturating_sub(2 * jitter_us + 1);
-                            let mut deadlines = vec![lowest, period_us, highest];
-                            deadlines.retain(|d| *d >= lowest);
-                            deadlines.sort_unstable();
-                            deadlines.dedup();
-                            let runtimes: &[[u64; 2]] = if axes.mixed_runtime {
-                                &[[p99_us, p99_us], [p50_us, p99_us]]
-                            } else {
-                                &[[p99_us, p99_us]]
-                            };
-                            for deadline_us in deadlines {
-                                let delta = transport_us + 2 * jitter_us + deadline_us;
-                                // Genau auf der Schranke (Auslieferung, keine
-                                // Luecke behauptet), 1 µs darueber (die engste
-                                // Luecke), und so weit, dass keine bleibt.
-                                for max_age_us in
-                                    [delta, delta + 1, period_us + 2 * jitter_us + delta]
-                                {
-                                    for &runtime_us in runtimes {
-                                        out.push(Params {
-                                            period_us,
-                                            jitter_us,
-                                            jitter,
-                                            transport_us,
-                                            deadline_us,
-                                            max_age_us,
-                                            p50_us,
-                                            p99_us,
-                                            runtime_us,
-                                            margin_percent,
-                                            horizon_us: DEFAULT_HORIZON.as_nanos() / 1_000,
-                                            background: Vec::new(),
-                                            duration_us: axes.duration_us,
-                                        });
-                                    }
-                                }
+                            for jitter_envelope_us in envelopes(jitter_us) {
+                                let Some(c) = planned_us(p99_us, margin_percent) else {
+                                    continue;
+                                };
+                                out.extend(deadline_cases(
+                                    axes,
+                                    &Params {
+                                        period_us,
+                                        jitter_us,
+                                        jitter,
+                                        transport_us,
+                                        deadline_us: 0,
+                                        max_age_us: 0,
+                                        p50_us: p99_us * 6 / 10,
+                                        p99_us,
+                                        runtime_us: [p99_us, p99_us],
+                                        margin_percent,
+                                        jitter_envelope_us,
+                                        background: Vec::new(),
+                                        duration_us: axes.duration_us,
+                                    },
+                                    c,
+                                ));
                             }
                         }
                     }
                 }
+            }
+        }
+    }
+    out
+}
+
+/// Ohne Jitter keine Huelle; mit Jitter beides — der Look-ahead mit und
+/// ohne das Wissen, wie spaet ein Frame hoechstens kommt (ADR-0036).
+fn envelopes(jitter_us: u64) -> Vec<Option<u64>> {
+    if jitter_us == 0 {
+        vec![None]
+    } else {
+        vec![None, Some(jitter_us)]
+    }
+}
+
+/// Deadlines, Hoechstalter und Laufzeitmuster zu einem geschuetzten Strom.
+fn deadline_cases(axes: &Axes, template: &Params, c: u64) -> Vec<Params> {
+    let mut out = Vec::new();
+    // Die kleinste Deadline, die (A4) zulaesst, die Periode, und die
+    // groesste, die (A7) zulaesst.
+    let lowest = late_room_us(template, c);
+    let highest =
+        (template.period_us + c + template.transport_us).saturating_sub(2 * template.jitter_us + 1);
+    let mut deadlines = vec![lowest, template.period_us, highest];
+    deadlines.retain(|d| *d >= lowest);
+    deadlines.sort_unstable();
+    deadlines.dedup();
+    let runtimes: &[[u64; 2]] = if axes.mixed_runtime {
+        &[
+            [template.p99_us, template.p99_us],
+            [template.p50_us, template.p99_us],
+        ]
+    } else {
+        &[[template.p99_us, template.p99_us]]
+    };
+    for deadline_us in deadlines {
+        let delta = 2 * template.jitter_us + deadline_us;
+        // Genau auf der Schranke (Auslieferung, keine Luecke behauptet), 1 µs
+        // darueber (die engste Luecke), und so weit, dass keine bleibt.
+        for max_age_us in [
+            delta,
+            delta + 1,
+            template.period_us + 2 * template.jitter_us + delta,
+        ] {
+            for &runtime_us in runtimes {
+                out.push(Params {
+                    deadline_us,
+                    max_age_us,
+                    runtime_us,
+                    ..template.clone()
+                });
             }
         }
     }

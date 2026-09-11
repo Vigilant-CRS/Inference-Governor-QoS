@@ -374,7 +374,18 @@ fn check_unenforced_requirements(resolved: &Resolved) -> Verdict {
             continue;
         };
         let name = resolved.model_names.get(i).map_or("?", String::as_str);
-        for item in extension.unenforced().iter() {
+        let guarded = contract.criticality.is_guarded();
+        if guarded && let Some(envelope) = extension.release_jitter_envelope {
+            ok(&format!(
+                "{name}: release_jitter_ms {} — der Look-ahead haelt eine \
+                 ueberfaellige Ankunft bis zu {} ms ueber die erwartete \
+                 hinaus offen, statt den Frame aufzugeben (ADR-0036). \
+                 Gemessen wird der Jitter nicht.",
+                envelope.as_millis(),
+                envelope.as_millis().saturating_mul(2)
+            ));
+        }
+        for item in extension.unenforced(guarded).iter() {
             warn(&format!(
                 "{name}: {} ist im Vertrag gefordert und wird nicht \
                  durchgesetzt — {}. Die uebrigen Zusagen gelten; diese nicht.",

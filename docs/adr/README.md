@@ -43,6 +43,8 @@ Spec-Stelle explizit.
 | [0032](0032-four-promises-that-fell-apart-between-components.md) | Beendet, frisch, angenommen, verfuegbar — vier Zusagen zwischen den Komponenten | Review 10.09., ADR-0005, ADR-0018 | Akzeptiert |
 | [0033](0033-native-code-lives-in-the-backend-process.md) | Nativer Code gehoert in den Backendprozess, nicht in den Governor | NV-09, NV-12, NV-14, NV-15, ADR-0024 | Akzeptiert |
 | [0034](0034-the-margin-has-a-target.md) | Die Sicherheitsmarge hat ein Ziel | Spec 13.3, NV-06, ADR-0016, ADR-0027 | Akzeptiert |
+| [0035](0035-preemption-is-a-measured-backend-property.md) | Praemption ist eine gemessene Eigenschaft des Backends | NV-15, ADR-0012, ADR-0014, ADR-0033, ADR-0034 | Akzeptiert |
+| [0036](0036-the-look-ahead-counts-from-the-capture.md) | Der Look-ahead rechnet ab der Aufnahme und sieht jede naechste Ankunft | NV-23, Spec 10.7, 10.8, L-010, ADR-0020, ADR-0032 | Akzeptiert |
 | [0037](0037-a-domain-is-a-gpu-with-one-owner.md) | Eine Domaene ist eine GPU mit genau einem Besitzer | NV-22, ADR-0004, ADR-0020, ADR-0024 | Akzeptiert |
 
 ## Format

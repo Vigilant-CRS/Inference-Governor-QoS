@@ -248,6 +248,25 @@ Verbindungsgrenze am Metrikport.
 
 ### Geaendert
 
+- **Der Look-ahead rechnet ab der Aufnahme und sieht jede naechste Ankunft**
+  ([ADR-0036](docs/adr/0036-the-look-ahead-counts-from-the-capture.md)),
+  aus den drei Befunden von NV-23:
+  - Die Frist einer erwarteten geschuetzten Ankunft zaehlt ab ihrer
+    erwarteten **Aufnahme**, wie die Deadline, die der Dispatch rechnet. Die
+    Altersschranke von NV-23 wird damit `2J + D` statt `δ + 2J + D`.
+  - Eine ueberfaellige Ankunft wird nicht mehr aufgegeben, solange sie
+    innerhalb der Jitterhuelle des Vertrags (`release_jitter_ms`) noch kommen
+    kann: ihre Frist wandert mit, hoechstens um die doppelte Huelle. Fuer ein
+    bewachtes Modell ist die Huelle damit keine unerfuellte Forderung mehr
+    (ADR-0032); Start und `vig doctor` nennen sie als genutzt. Ohne Huelle
+    bleibt es beim bisherigen Verhalten.
+  - Kein fester Horizont von 100 ms mehr: die naechste Ankunft jedes
+    bewachten Stroms zaehlt, gleich wie weit sie weg ist. Ein 5-Hz-Strom ist
+    gegen lange Hintergrundarbeit jetzt geschuetzt.
+  - Rust-API: `guard_protected` ohne `horizon`, `Scheduler::set_horizon` und
+    `feasibility::DEFAULT_HORIZON` entfallen,
+    `ContractExtension::unenforced(guarded)`. Konfiguration, OIP und
+    Kennzahlen unveraendert.
 - **Die Sicherheitsmarge hat ein Ziel**
   ([ADR-0034](docs/adr/0034-the-margin-has-a-target.md)). Der Margenregler
   hielt bisher still, wenn jede elfte Ausfuehrung ihren Plan ueberzog — ein
