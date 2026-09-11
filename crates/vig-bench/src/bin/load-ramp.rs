@@ -31,7 +31,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 use vig_bench::shm::Region;
-use vig_bench::workload::{InputSpec, StreamDef, StreamReport, drive};
+use vig_bench::workload::{Burst, InputSpec, StreamDef, StreamReport, drive};
 use vig_config::Config;
 use vig_gateway::{GatewayService, MonotonicClock, actor};
 use vig_protocol_oip::inference::grpc_inference_service_server::GrpcInferenceServiceServer;
@@ -107,11 +107,15 @@ fn config_yaml(load: u64, endpoint: &str) -> String {
     )
 }
 
+/// Eine Lastspitze: Spitzenlast in Prozent, Dauer, Abstand.
+type Peak = (u64, Duration, Duration);
+
 fn streams(
     load: u64,
     cap: usize,
     logical: bool,
     specs: &HashMap<String, InputSpec>,
+    peak: Option<Peak>,
 ) -> Vec<StreamDef> {
     BASE.iter()
         .map(|(name, physical, base_period, base_age)| StreamDef {
@@ -122,8 +126,28 @@ fn streams(
             in_flight_cap: cap,
             input: specs.get(*name).cloned(),
             pump: false,
+            burst: peak.map(|(peak_load, length, every)| Burst {
+                every,
+                length,
+                period: Duration::from_millis(scaled_period(*base_period, peak_load)),
+            }),
         })
         .collect()
+}
+
+/// Der Faktor zwischen zwei Promillewerten, lesbar in beide Richtungen.
+fn factor(direct: u64, governed: u64) -> String {
+    if governed == 0 {
+        if direct == 0 {
+            "—".to_owned()
+        } else {
+            "besser".to_owned()
+        }
+    } else if direct >= governed {
+        format!("{:.1}x", direct as f64 / governed as f64)
+    } else {
+        format!("-{:.1}x", governed as f64 / direct.max(1) as f64)
+    }
 }
 
 /// Der Median einer Messreihe.
@@ -159,6 +183,8 @@ async fn start_gateway(yaml: &str) -> String {
         &resolved.backend_endpoint,
     ));
     let handle = actor::spawn(Arc::clone(&resolved), &triton, clock, &[]).expect("Scheduler");
+    // Wie `vig serve`: der Governor beobachtet die Karte.
+    handle.observe_hardware();
     let service = GatewayService::new(resolved, triton, handle, clock);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -202,12 +228,150 @@ fn worst_uncovered(reports: &[StreamReport]) -> u64 {
         .unwrap_or(0)
 }
 
+/// Die laengste Versorgungsluecke des geschuetzten Stroms, in Millisekunden.
+///
+/// Unter Lastspitzen die entscheidende Groesse: eine Abdeckung von 97 % kann
+/// verstreute Ausfaelle bedeuten oder einen Block, in dem der Regler eine
+/// halbe Sekunde blind ist. Fuer eine Regelung ist das der ganze Unterschied.
+fn protected_gap_ms(reports: &[StreamReport]) -> u64 {
+    reports
+        .iter()
+        .find(|r| r.name == "detector")
+        .map_or(0, |r| r.coverage.longest_gap_ns / 1_000_000)
+}
+
 fn worst_response_age_ms(reports: &[StreamReport]) -> u64 {
     reports
         .iter()
         .map(|r| r.coverage.response_age_p95_ns / 1_000_000)
         .max()
         .unwrap_or(0)
+}
+
+/// Lastspitzen ueber einer Grundlast (Spec 19.4: Bursts).
+///
+/// Die stationaere Rampe beantwortet, ab welcher Dauerlast sich der Governor
+/// lohnt. Ihr eigenes Grenzenkapitel nennt den Fall, den sie nicht abbildet —
+/// und der der realistische ist: ein System, das im Mittel unter der
+/// Saettigung laeuft und Spitzen darueber hat. Eine Mittelwertrechnung sagt
+/// dort „passt". Ob der Regler waehrend der Spitze blind wird, sagt sie nicht.
+///
+/// Der Vertrag bleibt der der Grundlast: der Betreiber hat fuer den
+/// Normalbetrieb konfiguriert, nicht fuer die Spitze. Waehrend der Spitze
+/// liefert die Kamera schneller; der Verbraucher tastet weiter im Takt der
+/// Grundlast ab.
+///
+/// (Grundlast %, Spitzenlast %, Spitzendauer ms, Abstand ms)
+const BURSTS: [(u64, u64, u64, u64); 3] = [
+    (90, 150, 200, 2_000),
+    (90, 150, 500, 2_000),
+    (75, 150, 1_000, 4_000),
+];
+
+/// Laenger als die stationaere Rampe: bei 4 s Abstand sollen es noch
+/// fuenf Spitzen je Lauf sein.
+const BURST_SECONDS: u64 = 20;
+
+#[allow(clippy::similar_names)]
+async fn bursts(triton_endpoint: &str, specs: &HashMap<String, InputSpec>) {
+    println!("load-ramp bursts: Lastspitzen ueber einer Grundlast (Spec 19.4)");
+    println!(
+        "Triton {triton_endpoint} · RF-DETR, Pose, Tiefe · ein Slot · \
+         Shared Memory auf beiden Seiten"
+    );
+    println!(
+        "{BURST_SECONDS} s je Lauf, {REPEATS} Wiederholungen je Profil, \
+         Puffertiefen {CAPS:?} auf beiden Seiten\n"
+    );
+    println!(
+        "  Profil                  | Mittel | Detektor Triton | Vigilant | Faktor | \
+         laengste Luecke T/O | alle Stroeme T/O | Last-Ø"
+    );
+    println!(
+        "  ------------------------|--------|-----------------|----------|--------|\
+         ---------------------|------------------|-------"
+    );
+
+    let duration = Duration::from_secs(BURST_SECONDS);
+    for (base, peak, length_ms, every_ms) in BURSTS {
+        let yaml = config_yaml(base, triton_endpoint);
+        let gateway = start_gateway(&yaml).await;
+        let burst = Some((
+            peak,
+            Duration::from_millis(length_ms),
+            Duration::from_millis(every_ms),
+        ));
+        let mean = base + (peak - base) * length_ms / every_ms;
+
+        let mut direct_unc = Vec::new();
+        let mut gov_unc = Vec::new();
+        let mut direct_gap = Vec::new();
+        let mut gov_gap = Vec::new();
+        let mut direct_all = Vec::new();
+        let mut gov_all = Vec::new();
+        let mut loads = Vec::new();
+
+        for _ in 0..REPEATS {
+            loads.push(load_average());
+            let (mut bd, mut bg) = (u64::MAX, u64::MAX);
+            let (mut bd_gap, mut bg_gap) = (u64::MAX, u64::MAX);
+            let (mut bd_all, mut bg_all) = (u64::MAX, u64::MAX);
+            for cap in CAPS {
+                let d = drive(
+                    triton_endpoint,
+                    &streams(base, cap, false, specs, burst),
+                    duration,
+                    false,
+                )
+                .await;
+                bd = bd.min(protected_uncovered(&d));
+                bd_gap = bd_gap.min(protected_gap_ms(&d));
+                bd_all = bd_all.min(worst_uncovered(&d));
+
+                let g = drive(
+                    &gateway,
+                    &streams(base, cap, true, specs, burst),
+                    duration,
+                    true,
+                )
+                .await;
+                bg = bg.min(protected_uncovered(&g));
+                bg_gap = bg_gap.min(protected_gap_ms(&g));
+                bg_all = bg_all.min(worst_uncovered(&g));
+            }
+            direct_unc.push(bd);
+            gov_unc.push(bg);
+            direct_gap.push(bd_gap);
+            gov_gap.push(bg_gap);
+            direct_all.push(bd_all);
+            gov_all.push(bg_all);
+        }
+
+        let d = median(direct_unc.clone());
+        let g = median(gov_unc.clone());
+        let (dmin, dmax) = spread(&direct_unc);
+        let (gmin, gmax) = spread(&gov_unc);
+        println!(
+            "  {base:>3} → {peak:>3} %, {length_ms:>4}/{every_ms:>4} ms | {mean:>4} % | \
+             {d:>6} ‰ [{dmin}-{dmax}] | {g:>3} ‰ [{gmin}-{gmax}] | {:>6} | \
+             {:>7} / {:>4} ms | {:>5} / {:>5} ‰ | {}",
+            factor(d, g),
+            median(direct_gap),
+            median(gov_gap),
+            median(direct_all),
+            median(gov_all),
+            loads.join(" "),
+        );
+    }
+
+    println!(
+        "\nUnabgedeckte Perioden des geschuetzten Stroms nach ADR-0005, Median und\n\
+         Spannweite ueber {REPEATS} Wiederholungen. Mittel ist die zeitgewichtete\n\
+         Angebotslast. Der Vertrag ist der der Grundlast; waehrend einer Spitze\n\
+         liefert die Kamera schneller, der Verbraucher tastet im Grundtakt ab.\n\
+         Die laengste Luecke ist der Median der Maxima — ein einzelnes Maximum\n\
+         ist keine Aussage (gate-m3-r03.md)."
+    );
 }
 
 fn main() {
@@ -281,6 +445,11 @@ async fn run() {
         regions.push(region);
     }
 
+    if std::env::args().nth(1).as_deref() == Some("bursts") {
+        Box::pin(bursts(triton_endpoint, &specs)).await;
+        return;
+    }
+
     println!("load-ramp: ab welcher Auslastung lohnt sich der Governor?");
     println!(
         "Triton {triton_endpoint} · RF-DETR, Pose, Tiefe · ein Slot · \
@@ -322,7 +491,7 @@ async fn run() {
             for cap in CAPS {
                 let d = drive(
                     triton_endpoint,
-                    &streams(load, cap, false, &specs),
+                    &streams(load, cap, false, &specs, None),
                     duration,
                     false,
                 )
@@ -331,7 +500,13 @@ async fn run() {
                 best_direct_all = best_direct_all.min(worst_uncovered(&d));
                 best_direct_response_age = best_direct_response_age.min(worst_response_age_ms(&d));
 
-                let g = drive(&gateway, &streams(load, cap, true, &specs), duration, true).await;
+                let g = drive(
+                    &gateway,
+                    &streams(load, cap, true, &specs, None),
+                    duration,
+                    true,
+                )
+                .await;
                 best_gov = best_gov.min(protected_uncovered(&g));
                 best_gov_all = best_gov_all.min(worst_uncovered(&g));
                 best_gov_response_age = best_gov_response_age.min(worst_response_age_ms(&g));
@@ -348,17 +523,7 @@ async fn run() {
         let g = median(gov_unc.clone());
         let (dmin, dmax) = spread(&direct_unc);
         let (gmin, gmax) = spread(&gov_unc);
-        let factor = if g == 0 {
-            if d == 0 {
-                "—".to_owned()
-            } else {
-                "besser".to_owned()
-            }
-        } else if d >= g {
-            format!("{:.1}x", d as f64 / g as f64)
-        } else {
-            format!("-{:.1}x", g as f64 / d.max(1) as f64)
-        };
+        let factor = factor(d, g);
         println!(
             "  {load:>3} % | {d:>6} ‰ [{dmin}-{dmax}] | {g:>3} ‰ [{gmin}-{gmax}] | {factor:>6} | \
              {:>5} / {:>5} ‰ | {:>3} / {:>3} ms | {}",

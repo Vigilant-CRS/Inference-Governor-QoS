@@ -137,6 +137,7 @@ impl Scenario {
                 in_flight_cap: cap,
                 input: None,
                 pump: false,
+                burst: None,
             })
             .collect()
     }
@@ -152,6 +153,7 @@ impl Scenario {
                 in_flight_cap: cap,
                 input: None,
                 pump: false,
+                burst: None,
             })
             .collect()
     }

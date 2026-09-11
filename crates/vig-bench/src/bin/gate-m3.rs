@@ -49,6 +49,12 @@ const CAPS: [usize; 2] = [1, 8];
 struct Prepared {
     name: String,
     physical: String,
+    /// Der Triton-Prozess, der dieses Modell bedient.
+    ///
+    /// Meist fuer alle derselbe. Zwei Prozesse auf einer GPU — etwa Vision
+    /// und Sprache getrennt, oder unter XSched mit verschiedenen Prioritaeten
+    /// (NV-15) — sind trotzdem **ein** Lauf und werden gleichzeitig gefahren.
+    endpoint: String,
     period: Duration,
     max_age: Duration,
     input: InputSpec,
@@ -104,14 +110,22 @@ async fn run() {
 
     // --- Vorbereiten: Metadaten holen, Shm-Regionen anlegen und registrieren
     let mut prepared = Vec::new();
+    let mut clients: HashMap<String, Arc<vig_backend_triton::TritonClient>> = HashMap::new();
     for (index, logical) in resolved.model_names.iter().enumerate() {
+        let model = vig_core::ModelIdx(u16::try_from(index).unwrap_or(0));
         let physical = resolved
-            .backend_model(vig_core::ModelIdx(u16::try_from(index).unwrap_or(0)), 0)
+            .backend_model(model, 0)
             .expect("Variante vorhanden")
             .to_owned();
         let contract = resolved.contracts.get(index).expect("Vertrag vorhanden");
+        // Die Region muss bei **dem** Prozess registriert sein, der das Modell
+        // rechnet — sonst faellt der Vergleich still auf den Copy-Pfad zurueck.
+        let endpoint = resolved.endpoint_of(model).to_owned();
+        let client = Arc::clone(clients.entry(endpoint.clone()).or_insert_with(|| {
+            Arc::new(vig_backend_triton::TritonClient::new(endpoint.as_str()))
+        }));
 
-        let metadata = triton
+        let metadata = client
             .raw()
             .await
             .expect("Backend erreichbar")
@@ -137,7 +151,7 @@ async fn run() {
         let region = Region::create(&region_name, byte_size).expect("Shm-Region anlegen");
 
         // Aufraeumen, falls ein frueherer Lauf abgebrochen ist.
-        let _ = triton
+        let _ = client
             .raw()
             .await
             .expect("Backend erreichbar")
@@ -145,7 +159,7 @@ async fn run() {
                 name: region.name.clone(),
             })
             .await;
-        triton
+        client
             .raw()
             .await
             .expect("Backend erreichbar")
@@ -159,14 +173,20 @@ async fn run() {
             .expect("Shm-Region registrieren");
 
         println!(
-            "  {logical:<9} -> {physical:<15} {:>6} KB  Periode {:>4} ms",
+            "  {logical:<9} -> {physical:<15} {:>6} KB  Periode {:>4} ms{}",
             byte_size / 1024,
-            to_std(contract.deadline).as_millis()
+            to_std(contract.deadline).as_millis(),
+            if endpoint == resolved.backend_endpoint {
+                String::new()
+            } else {
+                format!("  @ {endpoint}")
+            }
         );
 
         prepared.push(Prepared {
             name: logical.clone(),
             physical,
+            endpoint,
             period: contract.period.map_or(Duration::from_millis(500), to_std),
             max_age: contract.max_age.map_or(Duration::from_secs(1), to_std),
             input: InputSpec {
@@ -180,9 +200,10 @@ async fn run() {
         });
     }
 
-    let streams = |use_logical: bool, cap: usize| -> Vec<StreamDef> {
+    let streams = |use_logical: bool, cap: usize, only: Option<&str>| -> Vec<StreamDef> {
         prepared
             .iter()
+            .filter(|p| only.is_none_or(|endpoint| p.endpoint == endpoint))
             .map(|p| StreamDef {
                 name: Box::leak(p.name.clone().into_boxed_str()),
                 model: Box::leak(
@@ -198,6 +219,7 @@ async fn run() {
                 in_flight_cap: cap,
                 input: Some(p.input.clone()),
                 pump: false,
+                burst: None,
             })
             .collect()
     };
@@ -205,15 +227,25 @@ async fn run() {
     let duration = Duration::from_secs(RUN_SECONDS);
 
     // --- Baseline: direkt zu Triton --------------------------------------
+    let mut endpoints: Vec<String> = prepared.iter().map(|p| p.endpoint.clone()).collect();
+    endpoints.sort();
+    endpoints.dedup();
     let mut baseline: HashMap<String, StreamReport> = HashMap::new();
     for cap in CAPS {
-        let reports = drive(
-            &resolved.backend_endpoint,
-            &streams(false, cap),
-            duration,
-            false,
-        )
-        .await;
+        // Je Prozess ein Treiber, alle gleichzeitig. Bei einem einzigen
+        // Endpunkt ist das genau der eine Aufruf von frueher.
+        let mut runs = Vec::new();
+        for endpoint in &endpoints {
+            let defs = streams(false, cap, Some(endpoint));
+            let endpoint = endpoint.clone();
+            runs.push(tokio::spawn(async move {
+                drive(&endpoint, &defs, duration, false).await
+            }));
+        }
+        let mut reports = Vec::new();
+        for run in runs {
+            reports.extend(run.await.expect("Treiber beendet"));
+        }
         for report in reports {
             let entry = baseline
                 .entry(report.name.to_owned())
@@ -228,6 +260,9 @@ async fn run() {
     let clock = MonotonicClock::start();
     let handle =
         actor::spawn(Arc::clone(&resolved), &triton, clock, &[]).expect("Scheduler startet");
+    // Wie `vig serve`: der Governor beobachtet die Karte. Ohne das plant er
+    // ohne Geraetezustand, und die Prognose (NV-06) haette nie eine Zelle.
+    handle.observe_hardware();
     let service = GatewayService::new(Arc::clone(&resolved), triton, handle.clone(), clock);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -251,7 +286,7 @@ async fn run() {
 
     let mut governed: HashMap<String, StreamReport> = HashMap::new();
     for cap in CAPS {
-        let reports = drive(&gateway, &streams(true, cap), duration, true).await;
+        let reports = drive(&gateway, &streams(true, cap, None), duration, true).await;
         for report in reports {
             let entry = governed
                 .entry(report.name.to_owned())
@@ -337,6 +372,21 @@ async fn run() {
             m.dispatched_late,
             m.deferred_for_protected,
             m.best_effort_starved,
+        );
+        // NV-06: ob die Prognose mutiger oder nur vorsichtiger war. Eine
+        // Policy, die nur mehr ablehnt, haelt jede Zusage ein und ist
+        // trotzdem wertlos — deshalb beide Richtungen getrennt.
+        println!(
+            "  Prognose ({}): verglichen {} ohne Zelle {} vorsichtiger {} mutiger {}",
+            if m.predictor_active == 1 {
+                "scharf"
+            } else {
+                "Schatten"
+            },
+            m.predictor_comparisons,
+            m.predictor_fallbacks,
+            m.predictor_more_conservative,
+            m.predictor_more_optimistic,
         );
     }
     println!(

@@ -81,6 +81,43 @@ pub struct StreamDef {
     /// haertesten Einwand gegen das ganze Produkt: was kann der Governor, das
     /// eine Stunde Clientcode nicht auch kann?
     pub pump: bool,
+    /// Lastspitzen, falls der Strom welche hat (Spec 19.4).
+    ///
+    /// `None` laesst den Strom im festen Takt laufen, genau wie vor diesem
+    /// Feld — alle frueheren Messungen bleiben damit vergleichbar.
+    pub burst: Option<Burst>,
+}
+
+/// Wiederkehrende Lastspitzen eines Stroms (Spec 19.4).
+///
+/// Alle `every` beginnt eine Spitze, die `length` dauert; waehrenddessen
+/// liefert der Sensor mit `period` statt mit der Grundperiode. Die
+/// Abdeckung wird weiter im Grundtakt bewertet: der Verbraucher tastet nicht
+/// schneller ab, nur weil die Kamera es tut.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Burst {
+    /// Abstand zwischen zwei Spitzenbeginnen.
+    pub every: Duration,
+    /// Dauer einer Spitze.
+    pub length: Duration,
+    /// Periode waehrend der Spitze.
+    pub period: Duration,
+}
+
+impl Burst {
+    /// Die Periode zum Zeitpunkt `elapsed` seit Laufbeginn.
+    #[must_use]
+    pub fn period_at(&self, base: Duration, elapsed: Duration) -> Duration {
+        let phase = elapsed
+            .as_nanos()
+            .checked_rem(self.every.as_nanos())
+            .unwrap_or(0);
+        if phase < self.length.as_nanos() {
+            self.period
+        } else {
+            base
+        }
+    }
 }
 
 /// Das Ergebnis eines Stroms.
@@ -200,13 +237,29 @@ async fn run_stream(
 ) {
     let mut ticker = tokio::time::interval(stream.period);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut next = tokio::time::Instant::now();
     let mut frame = 0_u64;
 
     loop {
-        ticker.tick().await;
+        // Ohne Spitzen der feste Takt wie immer. Mit Spitzen richtet sich der
+        // naechste Takt danach, ob gerade eine laeuft; verpasste Takte werden
+        // wie bei `Skip` nicht nachgeholt.
+        if stream.burst.is_some() {
+            tokio::time::sleep_until(next).await;
+        } else {
+            ticker.tick().await;
+        }
         let capture = Instant::now();
         if capture.duration_since(origin) >= duration {
             break;
+        }
+        if let Some(burst) = stream.burst {
+            let period = burst.period_at(stream.period, capture.duration_since(origin));
+            next = next.checked_add(period).unwrap_or(next);
+            let now = tokio::time::Instant::now();
+            if next < now {
+                next = now;
+            }
         }
         frame = frame.saturating_add(1);
         state.emitted.fetch_add(1, Ordering::Relaxed);
@@ -455,4 +508,43 @@ pub async fn try_connect(
     Ok(GrpcInferenceServiceClient::new(channel)
         .max_decoding_message_size(vig_backend_triton::DEFAULT_MAX_MESSAGE_BYTES)
         .max_encoding_message_size(vig_backend_triton::DEFAULT_MAX_MESSAGE_BYTES))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Burst;
+    use std::time::Duration;
+
+    fn ms(v: u64) -> Duration {
+        Duration::from_millis(v)
+    }
+
+    /// 200 ms Spitze alle 2 s: innerhalb der Spitze die kurze Periode,
+    /// danach die Grundperiode, und in der naechsten Spitze wieder die kurze.
+    #[test]
+    fn a_burst_shortens_the_period_only_inside_its_window() {
+        let burst = Burst {
+            every: ms(2_000),
+            length: ms(200),
+            period: ms(15),
+        };
+        let base = ms(25);
+        assert_eq!(burst.period_at(base, ms(0)), ms(15));
+        assert_eq!(burst.period_at(base, ms(199)), ms(15));
+        assert_eq!(burst.period_at(base, ms(200)), base);
+        assert_eq!(burst.period_at(base, ms(1_999)), base);
+        assert_eq!(burst.period_at(base, ms(2_100)), ms(15));
+    }
+
+    /// Ein Abstand von null ist eine Fehlkonfiguration, keine Panik: der
+    /// Rest ist dann null, und der Strom laeuft im Spitzentakt.
+    #[test]
+    fn a_zero_interval_does_not_panic() {
+        let burst = Burst {
+            every: Duration::ZERO,
+            length: ms(200),
+            period: ms(15),
+        };
+        assert_eq!(burst.period_at(ms(25), ms(5_000)), ms(15));
+    }
 }

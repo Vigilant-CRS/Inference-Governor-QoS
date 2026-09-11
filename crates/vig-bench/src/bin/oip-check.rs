@@ -89,6 +89,7 @@ async fn build_streams(resolved: &vig_config::schema::Resolved) -> Vec<StreamDef
                 byte_size,
             }),
             pump: false,
+            burst: None,
         });
     }
 

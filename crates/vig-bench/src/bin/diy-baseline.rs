@@ -126,6 +126,7 @@ fn streams(load: u64, arm: Arm, specs: &HashMap<String, InputSpec>) -> Vec<Strea
             in_flight_cap: if arm == Arm::Eigenbau { 1 } else { 8 },
             input: specs.get(*name).cloned(),
             pump: arm == Arm::Eigenbau,
+            burst: None,
         })
         .collect()
 }

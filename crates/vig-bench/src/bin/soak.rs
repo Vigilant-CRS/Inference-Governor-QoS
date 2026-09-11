@@ -119,6 +119,7 @@ fn streams(load: u64, specs: &HashMap<String, InputSpec>) -> Vec<StreamDef> {
             in_flight_cap: 8,
             input: specs.get(*name).cloned(),
             pump: false,
+            burst: None,
         })
         .collect()
 }
