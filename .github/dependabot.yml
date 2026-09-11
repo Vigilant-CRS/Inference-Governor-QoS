@@ -1,0 +1,17 @@
+# Die Workflows pinnen Actions und Basisimages auf unveraenderliche Hashes.
+# Das schuetzt vor einem verschobenen Tag — und veraltet, wenn niemand
+# nachzieht. Dependabot schlaegt die Aktualisierungen als Pull Request vor;
+# gemergt wird nach Durchsicht, nicht automatisch.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: docker
+    directory: /deploy/docker
+    schedule:
+      interval: weekly

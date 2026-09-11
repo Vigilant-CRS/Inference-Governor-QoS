@@ -1,0 +1,24 @@
+# Der Build-Kontext des Dockerfiles ist das ganze Repository (`COPY . .`).
+# Was hier nicht ausgeschlossen ist, landet im Build-Kontext, im Build-Cache
+# und — bei einem Fehler im Dockerfile — im Image. Also: nur Quellen.
+
+# Versionsverwaltung, Build-Ausgaben, Werkzeugzustaende
+.git
+.github
+target
+.claude
+.cache
+
+# Lokale Betriebsdateien: Token, Schluessel, Zertifikate, ausgefuellte
+# Konfigurationen. Die Beispiele unter examples/ bleiben erlaubt.
+**/*.token
+**/tokens
+**/*.key
+**/*.pem
+**/*.crt
+/vig.yaml
+/measured.yaml
+/*.local.yaml
+
+# Messdaten und Laufzeitdaten gehoeren nicht ins Image
+docs/benchmark/*.log

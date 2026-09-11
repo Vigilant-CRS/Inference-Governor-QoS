@@ -29,12 +29,17 @@ cargo audit bin vig
 cosign verify-blob \
   --certificate      vig-0.1.0-x86_64-unknown-linux-gnu.tar.gz.pem \
   --signature        vig-0.1.0-x86_64-unknown-linux-gnu.tar.gz.sig \
-  --certificate-identity-regexp 'https://github.com/Vigilant-CRS/Inference-QoS/.*' \
+  --certificate-identity-regexp '^https://github\.com/Vigilant-CRS/Inference-QoS/\.github/workflows/release\.yml@refs/tags/v[0-9].*$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   vig-0.1.0-x86_64-unknown-linux-gnu.tar.gz
 
 sha256sum -c vig-0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
+
+The identity is pinned to the release workflow **on a version tag**. A
+signature produced by any other workflow in the repository, or by the release
+workflow on a branch, does not verify — so a compromised test job cannot mint
+a release signature.
 
 There is no private signing key. We could not leak one, and you do not have to
 trust us to protect it — the signature binds the artifact to the workflow run

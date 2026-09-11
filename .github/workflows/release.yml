@@ -3,14 +3,20 @@ name: Release
 # Ein Release ist ein Versprechen: dieses Binary stammt aus diesem Commit, und
 # das laesst sich ohne uns nachpruefen. Deshalb wird hier signiert, eine
 # Stueckliste erzeugt und alles an den Tag geheftet — nicht nur gebaut.
+#
+# Actions sind auf Commit-SHAs gepinnt, nicht auf Tags: ein verschobener Tag
+# einer Fremd-Action liefe sonst mit den Rechten dieses Workflows. Dependabot
+# (`.github/dependabot.yml`) schlaegt Aktualisierungen vor.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
 
+# Standard fuer jeden Job: lesen, sonst nichts. Nur `publish` bekommt mehr —
+# und nur `publish` fuehrt keinen Fremdcode aus, der das OIDC-Token
+# abgreifen koennte, bevor signiert wird.
 permissions:
-  contents: write   # Release-Artefakte anhaengen
-  id-token: write   # keyless signing ueber OIDC, kein Schluessel im Repo
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -23,11 +29,11 @@ jobs:
     name: fmt / clippy / test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -50,11 +56,11 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             cross: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ${{ matrix.target }}
 
@@ -71,7 +77,8 @@ jobs:
       # `cargo auditable` bettet die Abhaengigkeitsliste ins Binary ein. Damit
       # laesst sich spaeter am ausgelieferten Artefakt selbst pruefen, ob eine
       # Schwachstelle es betrifft — ohne Zugriff auf dieses Repository.
-      - run: cargo install cargo-auditable --locked
+      # Versioniert: ein ungepinntes `cargo install` baut, was gerade neu ist.
+      - run: cargo install cargo-auditable --locked --version 0.7.5
       - run: cargo auditable build --release --locked -p vig-cli --target ${{ matrix.target }}
 
       # Der Kern ohne I/O laeuft im Emulator vollstaendig. Das ist keine
@@ -90,7 +97,7 @@ jobs:
           tar -C dist -czf "dist/$D.tar.gz" "$D"
           ( cd dist && sha256sum "$D.tar.gz" > "$D.tar.gz.sha256" )
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ matrix.target }}
           path: dist/*.tar.gz*
@@ -100,15 +107,15 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo install cargo-cyclonedx --locked
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - run: cargo install cargo-cyclonedx --locked --version 0.5.9
       - run: cargo cyclonedx --format json --all
       - name: Sammeln
         run: |
           mkdir -p dist
           find . -name "*.cdx.json" -not -path "./dist/*" -exec cp {} dist/ \;
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sbom
           path: dist/*.json
@@ -117,9 +124,14 @@ jobs:
     name: sign and publish
     needs: [build, sbom]
     runs-on: ubuntu-latest
+    # Der einzige Job mit Schreibrechten und OIDC-Token. Er baut nichts und
+    # fuehrt keinen Projektcode aus — nur Herunterladen, Signieren, Anheften.
+    permissions:
+      contents: write   # Release-Artefakte anhaengen
+      id-token: write   # keyless signing ueber OIDC, kein Schluessel im Repo
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
       - run: mkdir -p dist && find artifacts -type f -exec cp {} dist/ \;
@@ -127,7 +139,7 @@ jobs:
       # Keyless: die Signatur bindet an die GitHub-Identitaet dieses Workflows,
       # nicht an einen Schluessel, den jemand verwahren muesste. Wer ein
       # Artefakt prueft, prueft damit die Herkunft und nicht unser Wort.
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
       - name: Signieren
         run: |
           for f in dist/*.tar.gz dist/*.json; do
@@ -151,10 +163,14 @@ jobs:
           cosign verify-blob \
             --certificate      vig-<version>-<target>.tar.gz.pem \
             --signature        vig-<version>-<target>.tar.gz.sig \
-            --certificate-identity-regexp 'https://github.com/Vigilant-CRS/Inference-QoS/.*' \
+            --certificate-identity-regexp '^https://github\.com/Vigilant-CRS/Inference-QoS/\.github/workflows/release\.yml@refs/tags/v[0-9].*$' \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             vig-<version>-<target>.tar.gz
           ```
+
+          The identity is pinned to **this workflow on a version tag**. A
+          signature made by any other workflow of the repository, or by this
+          workflow on a branch, does not verify.
 
           Then check the checksum:
 
@@ -177,7 +193,7 @@ jobs:
           ```
           EOF
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: dist/*
           body_path: dist/VERIFY.md
