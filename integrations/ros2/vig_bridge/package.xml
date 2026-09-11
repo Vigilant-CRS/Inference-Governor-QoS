@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>vig_bridge</name>
+  <version>0.1.0</version>
+  <description>
+    Bridge from ROS 2 camera topics to the Vigilant Inference Governor over the
+    Open Inference Protocol, with the freshness parameters the governor needs
+    (age, capture, supersession key).
+  </description>
+  <maintainer email="info@vigilant-crs.de">Vigilant e.K.</maintainer>
+  <license>BUSL-1.1</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-grpcio</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
