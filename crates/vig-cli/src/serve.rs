@@ -147,8 +147,21 @@ pub(crate) async fn run(
         backend = %resolved.backend_endpoint,
         models = resolved.model_names.len(),
         slots = resolved.slots.len(),
+        domains = resolved.domains.len(),
         "Vigilant laeuft"
     );
+    // NV-22: mit Domaenen gilt `slots` oben nur fuer den `backend`-Block; die
+    // Kapazitaet jeder GPU steht hier.
+    for domain in &resolved.domains {
+        tracing::info!(
+            domain = %domain.name,
+            gpu = domain.gpu_index,
+            backend = %domain.resolved.backend_endpoint,
+            models = domain.resolved.model_names.len(),
+            slots = domain.resolved.slots.len(),
+            "Ressourcendomaene"
+        );
+    }
 
     // Dieselben Transportgrenzen wie zum Backend. tonics Voreinstellungen sind
     // fuer Steuernachrichten gedacht: 4 MiB Nachrichtengrenze lehnt einen
@@ -454,9 +467,7 @@ async fn startup_checks(
             "Varianten haben verschiedene I/O-Signaturen; die automatische \
              Variantenwahl ist fuer dieses Modell abgeschaltet"
         );
-        if let Some(contract) = resolved.contracts.get_mut(conflict.model.get()) {
-            contract.variants_interchangeable = false;
-        }
+        resolved.pin_best_variant(conflict.model);
     }
 
     Ok(unverified)

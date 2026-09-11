@@ -66,6 +66,8 @@ const GENERATION_WARNING_INTERVAL_NS: u64 = 10_000_000_000;
 pub struct GatewayService {
     config: Arc<Resolved>,
     backend: Arc<TritonClient>,
+    /// Der Client zum Server jedes konfigurierten Modells, in Indexreihenfolge.
+    model_backends: Vec<Arc<TritonClient>>,
     scheduler: Handle,
     clock: MonotonicClock,
     next_id: AtomicU64,
@@ -160,9 +162,31 @@ impl GatewayService {
     ) -> Self {
         let limit = config.max_inflight_bytes;
         let regions = config.security.max_shm_regions;
+        // Ein Client je Endpunkt, nicht je Modell: Modelle desselben Servers
+        // teilen sich den Kanal.
+        let mut by_endpoint: Vec<(String, Arc<TritonClient>)> =
+            vec![(config.backend_endpoint.clone(), Arc::clone(&backend))];
+        let mut model_backends = Vec::with_capacity(config.model_names.len());
+        for index in 0..config.model_names.len() {
+            let endpoint = u16::try_from(index)
+                .map_or(config.backend_endpoint.as_str(), |i| {
+                    config.endpoint_of(vig_core::ModelIdx(i))
+                })
+                .to_owned();
+            let client = if let Some((_, client)) = by_endpoint.iter().find(|(e, _)| *e == endpoint)
+            {
+                Arc::clone(client)
+            } else {
+                let client = Arc::new(TritonClient::new(&endpoint));
+                by_endpoint.push((endpoint, Arc::clone(&client)));
+                client
+            };
+            model_backends.push(client);
+        }
         Self {
             config,
             backend,
+            model_backends,
             scheduler,
             clock,
             next_id: AtomicU64::new(1),
@@ -279,6 +303,30 @@ impl GatewayService {
         Status,
     > {
         self.backend
+            .raw()
+            .await
+            .map_err(|e| Status::unavailable(e.to_string()))
+    }
+
+    /// Der Kanal zum Backend eines konfigurierten Modells.
+    ///
+    /// Metadaten, Bereitschaft und Konfiguration eines Modells kennt nur der
+    /// Server, der es rechnet — mit Ressourcendomaenen (NV-22) oder einem
+    /// eigenen `backend_endpoint` ist das nicht `backend.grpc_endpoint`.
+    /// Ohne Modell der Standardendpunkt, wie bisher.
+    async fn raw_for(
+        &self,
+        model: Option<vig_core::ModelIdx>,
+    ) -> Result<
+        vig_protocol_oip::inference::grpc_inference_service_client::GrpcInferenceServiceClient<
+            tonic::transport::Channel,
+        >,
+        Status,
+    > {
+        let client = model
+            .and_then(|m| self.model_backends.get(m.get()))
+            .unwrap_or(&self.backend);
+        client
             .raw()
             .await
             .map_err(|e| Status::unavailable(e.to_string()))
@@ -612,13 +660,12 @@ impl GrpcInferenceService for GatewayService {
     ) -> Result<Response<ModelReadyResponse>, Status> {
         self.authorize(&request)?;
         let mut inner = request.into_inner();
-        if let Some(model) = self.config.model_index(&inner.name)
-            && let Some(physical) = self.config.backend_model(model, 0)
-        {
+        let model = self.config.model_index(&inner.name);
+        if let Some(physical) = model.and_then(|m| self.config.backend_model(m, 0)) {
             // Ein logisches Modell ist bereit, wenn seine beste Variante es ist.
             inner.name = physical.to_owned();
         }
-        self.raw().await?.model_ready(inner).await
+        self.raw_for(model).await?.model_ready(inner).await
     }
 
     async fn model_metadata(
@@ -628,14 +675,17 @@ impl GrpcInferenceService for GatewayService {
         self.authorize(&request)?;
         let mut inner = request.into_inner();
         let logical = inner.name.clone();
-        let mapped = self
-            .config
-            .model_index(&logical)
-            .and_then(|model| self.config.backend_model(model, 0).map(ToOwned::to_owned));
+        let model = self.config.model_index(&logical);
+        let mapped = model.and_then(|m| self.config.backend_model(m, 0).map(ToOwned::to_owned));
         if let Some(physical) = mapped {
             inner.name = physical;
         }
-        let mut response = self.raw().await?.model_metadata(inner).await?.into_inner();
+        let mut response = self
+            .raw_for(model)
+            .await?
+            .model_metadata(inner)
+            .await?
+            .into_inner();
         // Der Client hat nach dem logischen Modell gefragt und bekommt es auch
         // zurueck; welche Variante dahinterliegt, ist seine Sache nicht.
         response.name = logical;
@@ -663,11 +713,7 @@ impl GrpcInferenceService for GatewayService {
         request: Request<ServerReadyRequest>,
     ) -> Result<Response<ServerReadyResponse>, Status> {
         self.authorize(&request)?;
-        let ready = self
-            .scheduler
-            .metrics()
-            .await
-            .is_ok_and(|metrics| crate::exporter::readiness(&metrics).is_ok());
+        let ready = crate::exporter::ready(&self.scheduler).await.is_ok();
         Ok(Response::new(ServerReadyResponse { ready }))
     }
 
@@ -687,7 +733,9 @@ impl GrpcInferenceService for GatewayService {
         request: Request<ModelConfigRequest>,
     ) -> Result<Response<ModelConfigResponse>, Status> {
         self.authorize(&request)?;
-        Box::pin(async move { self.raw().await?.model_config(request.into_inner()).await }).await
+        let inner = request.into_inner();
+        let model = self.config.model_index(&inner.name);
+        Box::pin(async move { self.raw_for(model).await?.model_config(inner).await }).await
     }
 
     async fn model_statistics(

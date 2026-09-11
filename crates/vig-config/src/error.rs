@@ -76,6 +76,11 @@ pub enum ConfigError {
         /// Der referenzierte Name.
         name: String,
     },
+    /// Ein Modell nennt eine Ressourcendomaene, die es nicht gibt (NV-22).
+    UnknownDomain {
+        /// Der genannte Name.
+        name: String,
+    },
     /// Der Kern hat den Modellvertrag abgelehnt.
     Contract(ContractError),
     /// Der Kern hat die Queue-Konfiguration abgelehnt.
@@ -111,6 +116,11 @@ impl core::fmt::Display for ConfigError {
             Self::UnknownModelReference { name } => {
                 write!(f, "das Modell {name:?} ist nicht konfiguriert")
             }
+            Self::UnknownDomain { name } => write!(
+                f,
+                "die Domaene {name:?} ist nicht angelegt; backend.domains nennt sie, \
+                 oder das Modell laeuft ohne domain: in der Domaene default"
+            ),
             Self::Contract(e) => write!(f, "{e}"),
             Self::Queue(e) => write!(f, "{e}"),
             Self::Slots(e) => write!(f, "{e}"),

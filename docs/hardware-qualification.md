@@ -17,7 +17,7 @@ before trusting the governor on a device we have never seen.
 | Runtime, throughput, interference on `aarch64` | **Unknown.** Emulation says nothing about how fast a kernel runs or how two models slow each other down. |
 | Jetson (Orin, Xavier) | **Untested.** No measurement exists. Treat every number here as inapplicable. |
 | Datacenter accelerators (A100, L4, H100) | **Untested.** MIG in particular changes the slot model: a MIG instance *is* an independent execution unit, which the current model does not represent. |
-| Multi-GPU | **Not supported.** The slot set models one execution unit. |
+| Multi-GPU | **Reachable, not qualified.** One scheduler per GPU (`backend.domains`, [ADR-0037](adr/0037-a-domain-is-a-gpu-with-one-owner.md)); tested with fake backends only. |
 
 The distinction matters more than it looks: **the logic is portable, the
 numbers are not.** A profile is a measurement under conditions. Change the
@@ -227,9 +227,13 @@ statement that the variants mean the same thing.
 
 ## Known model limits
 
-- **The slot set models one execution unit.** MIG instances and multiple GPUs
-  are genuinely independent units; representing them needs a slot set per unit
-  and a routing decision above it. Neither exists yet.
+- **The slot set models one execution unit.** Multiple GPUs are described as
+  resource domains — a slot set and a scheduler per GPU, and a fixed routing
+  above them ([ADR-0037](adr/0037-a-domain-is-a-gpu-with-one-owner.md)). That
+  is built and tested with fake backends, not measured. It assumes the GPUs
+  do not slow each other; PCIe, host memory bandwidth and a shared power
+  budget can break that, and only a measurement on two GPUs will tell. MIG
+  instances are not domains yet: two domains on one `gpu_index` are refused.
 - **`no_corun` is a declaration, not a measurement.** `vig calibrate` proposes
   pairs from measured mutual slowdown, but the threshold is a judgement call.
 - **Unified memory changes the data-path arithmetic.** On Jetson, host and

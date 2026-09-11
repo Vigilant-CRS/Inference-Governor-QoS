@@ -81,9 +81,7 @@ pub(crate) async fn run(
     };
 
     verdict = verdict.max(check_contracts(&resolved));
-    verdict = verdict.max(check_utilization(&resolved));
-    verdict = verdict.max(check_best_effort_feasibility(&resolved));
-    verdict = verdict.max(check_preemption(&resolved));
+    verdict = verdict.max(check_capacity(&resolved));
     verdict = verdict.max(check_decomposition_cost(&resolved));
     verdict = verdict.max(check_unenforced_requirements(&resolved));
     verdict = verdict.max(check_backend(&resolved, offline).await);
@@ -439,6 +437,46 @@ fn check_preemption(resolved: &Resolved) -> Verdict {
                 verdict = verdict.max(Verdict::ReadyWithWarnings);
             }
         }
+    }
+    verdict
+}
+
+/// Auslastung, Best-Effort-Machbarkeit und Spuren — je GPU (NV-22, ADR-0037).
+///
+/// Eine geschuetzte Auslastung ist eine Eigenschaft **einer** GPU. Ueber zwei
+/// Domaenen gerechnet stuende ein ueberzeichneter Detektor auf GPU 1 neben
+/// einer leeren GPU 0 als halb ausgelastet da.
+fn check_capacity(resolved: &Resolved) -> Verdict {
+    if resolved.domains.is_empty() {
+        return check_utilization(resolved)
+            .max(check_best_effort_feasibility(resolved))
+            .max(check_preemption(resolved));
+    }
+    warn(&format!(
+        "{} Ressourcendomaenen: erreichbar, nicht qualifiziert — geprueft ist die \
+         Logik mit Fake-Backends, nicht das Verhalten zweier GPUs (ADR-0037)",
+        resolved.domains.len()
+    ));
+    let mut verdict = Verdict::ReadyWithWarnings;
+    for domain in &resolved.domains {
+        let models: Vec<&str> = domain
+            .resolved
+            .model_names
+            .iter()
+            .map(String::as_str)
+            .collect();
+        ok(&format!(
+            "Domaene {}: GPU {}, {} Slot(s), Endpunkte {}, Modelle {}",
+            domain.name,
+            domain.gpu_index,
+            domain.resolved.slots.regular_len(),
+            domain.resolved.endpoints().join(", "),
+            models.join(", ")
+        ));
+        verdict = verdict
+            .max(check_utilization(&domain.resolved))
+            .max(check_best_effort_feasibility(&domain.resolved))
+            .max(check_preemption(&domain.resolved));
     }
     verdict
 }
@@ -894,7 +932,60 @@ async fn check_backend(resolved: &Resolved, offline: bool) -> Verdict {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::panic)]
 
-    use super::{Verdict, check_decomposition_cost, check_preemption, check_security};
+    use super::{
+        Verdict, check_capacity, check_decomposition_cost, check_preemption, check_security,
+    };
+
+    /// NV-22: die geschuetzte Auslastung ist eine Eigenschaft einer GPU. Ein
+    /// ueberzeichneter Detektor auf GPU 1 faellt auf, obwohl GPU 0 fast leer
+    /// ist — ueber die Anlage gemittelt waere er durchgerutscht.
+    #[test]
+    fn capacity_is_checked_one_gpu_at_a_time() {
+        let yaml = |p99_us: u64| {
+            format!(
+                r#"
+version: 1
+backend:
+  type: triton
+  grpc_endpoint: "127.0.0.1:9201"
+  slots: 1
+  domains:
+    gpu1:
+      gpu_index: 1
+      grpc_endpoint: "127.0.0.1:9301"
+      slots: 1
+models:
+  detector:
+    class: protected
+    queue: {{ policy: latest, capacity: 1 }}
+    contract: {{ period_ms: 100, deadline_ms: 100, max_age_ms: 200 }}
+    variants:
+      - id: main
+        backend_model: detector_main
+        quality: {{ value: 1.0, source: measured }}
+        profile: {{ p50_us: 1000, p95_us: 1000, p99_us: 1000, samples: 100 }}
+  pose:
+    class: protected
+    domain: gpu1
+    queue: {{ policy: latest, capacity: 1 }}
+    contract: {{ period_ms: 33, deadline_ms: 33, max_age_ms: 66 }}
+    variants:
+      - id: main
+        backend_model: pose_main
+        quality: {{ value: 1.0, source: measured }}
+        profile: {{ p50_us: {p99_us}, p95_us: {p99_us}, p99_us: {p99_us}, samples: 100 }}
+"#
+            )
+        };
+        let fits = Config::from_yaml(&yaml(10_000)).unwrap().resolve().unwrap();
+        assert_eq!(
+            check_capacity(&fits),
+            Verdict::ReadyWithWarnings,
+            "nicht qualifiziert"
+        );
+        let overloaded = Config::from_yaml(&yaml(40_000)).unwrap().resolve().unwrap();
+        assert_eq!(check_capacity(&overloaded), Verdict::NotReady);
+    }
     use vig_config::Config;
     use vig_config::schema::{Resolved, SecurityConfig, TrustMode};
 

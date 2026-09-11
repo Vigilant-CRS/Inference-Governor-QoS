@@ -7,6 +7,24 @@ bedeutet, steht in [docs/releases.md](docs/releases.md).
 
 ### Hinzugefuegt
 
+- **Mehrere Ressourcendomaenen** (NV-22,
+  [ADR-0037](docs/adr/0037-a-domain-is-a-gpu-with-one-owner.md)).
+  `backend.domains.<name>` beschreibt eine weitere GPU mit `gpu_index`,
+  `grpc_endpoint`, `slots` und, wo noetig, `pipelining_depth`, `no_corun`,
+  `preemptible_lanes` und `interference`; `domain:` am Modell ordnet es fest
+  zu. Je Domaene ein eigener Scheduler mit eigenen Krediten, eigener
+  Quarantaene, eigenem Look-ahead und Margenregler; geteilt bleiben
+  Nutzlastbudget, Zugang, Hinweise und Timeouts. Die Konfiguration lehnt
+  Doppelbesitz ab (eine GPU oder ein Endpunkt in zwei Domaenen, Paare ueber
+  Domaenengrenzen). `/metrics` behaelt die Gesamtreihen und ergaenzt
+  `vig_domain_*{domain}`; `/readyz` nennt die Domaene, die nicht bereit ist;
+  `vig doctor` prueft Auslastung, Spuren und Best-Effort-Machbarkeit je GPU.
+  Ohne `domains:` aendert sich nichts. Erreichbar, nicht qualifiziert: auf
+  der Messmaschine gibt es eine GPU.
+- **Metadaten, Bereitschaft und Konfiguration eines Modells** fragt das
+  Gateway bei dem Server, der es rechnet — vorher immer bei
+  `backend.grpc_endpoint`, auch fuer Modelle mit eigenem `backend_endpoint`.
+
 - **Kontextabhaengige Fortschrittskosten fuer zerlegte generative Auftraege**
   (NV-16, ADR-0031). `cooperative.prefill_per_token_us` im Vertrag; die
   Quantenzuschneidung rechnet mit Prompt plus bisher Erzeugtem statt mit einem

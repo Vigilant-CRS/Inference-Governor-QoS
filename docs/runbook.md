@@ -49,6 +49,20 @@ the case above, no slot is stuck — the calls return immediately with an error.
 endpoint, or a network policy. `vig doctor -c your.yaml` names which. One
 successful call resets the counter and the endpoint goes green again.
 
+### `/readyz` red: "domain gpu1: …"
+
+**What happened.** The configuration has several resource domains (one per
+GPU, [ADR-0037](adr/0037-a-domain-is-a-gpu-with-one-owner.md)), and the named
+one is not ready — for one of the reasons above, on its own backend. The
+governor is ready only when every domain is.
+
+**What to do.** Treat it like the symptom after the colon, on that domain's
+endpoint. `vig_domain_ready{domain="…"}` and
+`vig_domain_quarantined_slots{domain="…"}` show which GPU it is. Requests to
+the other domains keep running: a hung GPU takes no credit from another one.
+Decide at the load balancer whether a partially ready governor should still
+get traffic; the governor does not fail over to another GPU on its own.
+
 ### `vig_reconcile_baseline_missing` above zero
 
 **What happened.** The governor could not read the backend's completion
@@ -179,9 +193,10 @@ includes a new Triton or a new driver, re-measure.
 These are engineering limits, stated so that nobody discovers them in
 production:
 
-- **One execution unit.** The slot set models one GPU. Multi-GPU is not
-  supported, and MIG changes the model in a way the current code does not
-  represent.
+- **One execution unit per slot set.** A slot set models one GPU. Several
+  GPUs are resource domains with a scheduler each — reachable, not qualified,
+  and without failover ([ADR-0037](adr/0037-a-domain-is-a-gpu-with-one-owner.md)).
+  MIG changes the model in a way the current code does not represent.
 - **Not functionally safe.** No claim of ISO 26262 / IEC 61508 conformance.
   Do not make a safety function depend on this governor.
 - **Numbers are per hardware configuration.** The logic is portable, the

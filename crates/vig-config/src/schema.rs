@@ -378,6 +378,52 @@ pub struct BackendConfig {
     /// Transport- und Zugangssicherung (TLS, mTLS, Token).
     #[serde(default)]
     pub security: SecurityConfig,
+    /// Weitere Ressourcendomaenen, nach Namen (NV-22, ADR-0037).
+    ///
+    /// Eine Domaene ist eine GPU mit genau einem Kapazitaetsbesitzer. Dieser
+    /// Block selbst ist die Domaene `default` auf GPU 0 und nimmt jedes Modell
+    /// ohne `domain:`. Leer heisst: eine GPU, ein Scheduler, wie immer.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub domains: BTreeMap<String, DomainConfig>,
+}
+
+/// Der Name der Domaene, die der `backend`-Block selbst beschreibt.
+pub const DEFAULT_DOMAIN: &str = "default";
+
+/// Die GPU der Domaene `default`.
+///
+/// Dieselbe, die die Hardwarebeobachtung vor NV-22 immer gelesen hat.
+pub const DEFAULT_GPU_INDEX: u32 = 0;
+
+/// Eine weitere Ressourcendomaene (NV-22, ADR-0037).
+///
+/// Nur was die **Kapazitaet** einer GPU beschreibt. Zugang, Vertrauen,
+/// Hinweise, Timeouts und das Nutzlastbudget gelten fuer den ganzen Governor
+/// und stehen im `backend`-Block.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DomainConfig {
+    /// Die GPU dieser Domaene, wie `nvidia-smi` sie zaehlt.
+    ///
+    /// Zwei Domaenen auf derselben GPU werden abgelehnt: zwei Server auf einer
+    /// GPU sind keine zwei Recheneinheiten (ADR-0004).
+    pub gpu_index: u32,
+    /// Der gRPC-Endpunkt des Backends auf dieser GPU.
+    pub grpc_endpoint: String,
+    /// Ausfuehrungsslots dieser GPU (ADR-0004).
+    pub slots: usize,
+    /// Zusaetzliche Kredite je Slot (ADR-0002).
+    #[serde(default = "default_pipelining")]
+    pub pipelining_depth: usize,
+    /// Modellpaare dieser Domaene, die nicht gleichzeitig laufen duerfen.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub no_corun: Vec<[String; 2]>,
+    /// Spuren fuer praemptierbare Arbeit auf dieser GPU (ADR-0035).
+    #[serde(default, skip_serializing_if = "is_zero_lanes")]
+    pub preemptible_lanes: usize,
+    /// Die gemessene Interferenztabelle dieser GPU (NV-11).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interference: Vec<InterferencePair>,
 }
 
 /// Wie die zustandsabhaengige Prognose wirkt (NV-06).
@@ -820,6 +866,20 @@ pub struct ModelConfig {
     /// `backend_endpoint`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preemptible: Option<PreemptibleConfig>,
+    /// Die Ressourcendomaene, auf deren GPU dieses Modell laeuft (NV-22).
+    ///
+    /// Ohne Angabe die Domaene `default`, also der `backend`-Block. Die
+    /// Zuordnung ist fest: ein Modell wechselt zur Laufzeit nicht die GPU
+    /// (ADR-0037).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+}
+
+impl ModelConfig {
+    /// Die Domaene dieses Modells; `None` fuer `default`.
+    fn domain_name(&self) -> Option<&str> {
+        self.domain.as_deref().filter(|d| *d != DEFAULT_DOMAIN)
+    }
 }
 
 /// Die Angaben eines praemptierbaren Modells (ADR-0035).
@@ -1403,7 +1463,7 @@ pub struct ProfileConfig {
 }
 
 /// Die aufgeloeste, gepruefte Konfiguration.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Resolved {
     /// gRPC-Endpunkt des Backends.
     pub backend_endpoint: String,
@@ -1463,6 +1523,43 @@ pub struct Resolved {
     ///
     /// `None` fuer jedes Modell, dessen Arbeit nicht unterbrochen wird.
     pub preemptible: Vec<Option<ResolvedPreemptible>>,
+    /// Die Ressourcendomaenen (NV-22, ADR-0037); leer ohne `backend.domains`.
+    ///
+    /// **Mit Domaenen beschreiben `slots` und `interference` oben keine
+    /// Kapazitaet mehr**, nur noch die unbelegte Grundform des
+    /// `backend`-Blocks: jede Domaene hat ihre eigene Slotmenge und ihre
+    /// eigene Tabelle, in ihrem eigenen Modellindex. Wer ueber Kapazitaet
+    /// urteilt — der Actor, `vig doctor` —, fragt hier.
+    pub domains: Vec<ResolvedDomain>,
+}
+
+/// Eine aufgeloeste Ressourcendomaene (NV-22, ADR-0037).
+#[derive(Debug, Clone)]
+pub struct ResolvedDomain {
+    /// Der Name; `default` fuer den `backend`-Block.
+    pub name: String,
+    /// Die GPU dieser Domaene.
+    pub gpu_index: u32,
+    /// Die globalen Modellindizes ihrer Modelle, in lokaler Reihenfolge.
+    ///
+    /// `models[i]` ist das Modell, das in `resolved` den Index `i` traegt.
+    pub models: Vec<ModelIdx>,
+    /// Die Konfiguration, die ihr Scheduler sieht: nur ihre Modelle, ihre
+    /// Slots, ihre Endpunkte.
+    pub resolved: std::sync::Arc<Resolved>,
+}
+
+impl ResolvedDomain {
+    /// Der lokale Index eines globalen Modells, falls es zu dieser Domaene
+    /// gehoert.
+    #[must_use]
+    pub fn local(&self, model: ModelIdx) -> Option<ModelIdx> {
+        self.models
+            .iter()
+            .position(|m| *m == model)
+            .and_then(|i| u16::try_from(i).ok())
+            .map(ModelIdx)
+    }
 }
 
 #[expect(
@@ -1523,6 +1620,25 @@ impl Resolved {
         // Arbeit (ADR-0035).
         let slots = u64::try_from(self.slots.regular_len()).unwrap_or(1).max(1);
         total.checked_div(slots).unwrap_or(0)
+    }
+
+    /// Schaltet die automatische Variantenwahl eines Modells ab — in der
+    /// Gesamtsicht und in der Domaene, deren Scheduler es plant (NV-22).
+    ///
+    /// Nur in der Gesamtsicht abgeschaltet, liefe der Scheduler der Domaene
+    /// weiter mit der alten Zusage.
+    pub fn pin_best_variant(&mut self, model: ModelIdx) {
+        if let Some(contract) = self.contracts.get_mut(model.get()) {
+            contract.variants_interchangeable = false;
+        }
+        for domain in &mut self.domains {
+            if let Some(local) = domain.local(model) {
+                let resolved = std::sync::Arc::make_mut(&mut domain.resolved);
+                if let Some(contract) = resolved.contracts.get_mut(local.get()) {
+                    contract.variants_interchangeable = false;
+                }
+            }
+        }
     }
 
     /// Der Backend-Endpunkt eines Modells.
@@ -1826,15 +1942,24 @@ impl Config {
             };
 
         let model_names: Vec<String> = self.models.keys().cloned().collect();
+        // Ohne eigenen Endpunkt laeuft ein Modell am Endpunkt seiner Domaene
+        // (NV-22) — und ohne Domaene am `backend`-Block, wie bisher.
         let model_endpoints: Vec<String> = self
             .models
             .values()
             .map(|m| {
-                m.backend_endpoint
-                    .clone()
-                    .unwrap_or_else(|| self.backend.grpc_endpoint.clone())
+                m.backend_endpoint.clone().unwrap_or_else(|| {
+                    m.domain_name()
+                        .and_then(|d| self.backend.domains.get(d))
+                        .map_or_else(
+                            || self.backend.grpc_endpoint.clone(),
+                            |d| d.grpc_endpoint.clone(),
+                        )
+                })
             })
             .collect();
+        self.check_domain_references(findings);
+        let multi = !self.backend.domains.is_empty();
         let model_decoupled: Vec<bool> = self.models.values().map(|m| m.decoupled).collect();
         let io_signatures: Vec<Option<IoSignature>> = self
             .models
@@ -1868,16 +1993,45 @@ impl Config {
             }
         }
 
-        Self::apply_corun_rules(&self.backend.no_corun, &model_names, &mut slots, findings);
-        let preemptible = self.resolve_preemption(
-            &model_names,
-            &model_endpoints,
-            &contracts,
-            &mut slots,
-            findings,
-        );
+        // Mit Domaenen gehoeren Co-Run-Verbote, Spuren und Interferenz zur
+        // Kapazitaet einer GPU und werden dort geprueft (ADR-0037); hier, in
+        // der Gesamtsicht, gaebe es fuer sie keinen gemeinsamen Modellindex.
+        let mut preemptible = Vec::new();
+        let mut interference = vig_core::interference::Interference::new();
+        if !multi {
+            Self::apply_corun_rules(&self.backend.no_corun, &model_names, &mut slots, findings);
+            preemptible = self.resolve_preemption(
+                &model_names,
+                &model_endpoints,
+                &contracts,
+                &mut slots,
+                findings,
+            );
+            interference = resolve_interference(&self.backend.interference, &model_names, findings);
+        }
 
-        let inference_timeout = self.backend.limits(findings)?;
+        // Die Grenzen vor den Domaenen: deren Aufloesung meldet dieselben
+        // Befunde noch einmal und soll sie als bekannt vorfinden.
+        let limits = self.backend.limits(findings);
+        let domains = if multi {
+            self.resolve_domains(&model_endpoints, findings)
+        } else {
+            Vec::new()
+        };
+        if multi {
+            preemptible = vec![None; model_names.len()];
+            for domain in &domains {
+                for (local, global) in domain.models.iter().enumerate() {
+                    if let (Some(entry), Some(target)) = (
+                        domain.resolved.preemptible.get(local),
+                        preemptible.get_mut(global.get()),
+                    ) {
+                        *target = *entry;
+                    }
+                }
+            }
+        }
+        let inference_timeout = limits?;
 
         Some(Resolved {
             inference_timeout,
@@ -1887,7 +2041,8 @@ impl Config {
             miss_aware_policy: self.backend.miss_aware_policy,
             prediction: self.backend.prediction.to_core(),
             actuation: self.backend.actuation.clone(),
-            interference: resolve_interference(&self.backend.interference, &model_names, findings),
+            interference,
+            domains,
             hint_policy: self
                 .backend
                 .hints
@@ -2063,6 +2218,318 @@ impl Config {
             );
         } else if let Err(e) = slots.add_preemptible_lanes(lanes, mask) {
             findings.push(ConfigError::Slots(e).at("backend.preemptible_lanes"));
+        }
+    }
+}
+
+/// Die Schluessel des `backend`-Blocks, die in einer Domaene eigene Werte
+/// haben (ADR-0037). Ein Befund dazu gehoert an die Domaene, nicht an den
+/// `backend`-Block.
+const DOMAIN_KEYS: [&str; 6] = [
+    "grpc_endpoint",
+    "slots",
+    "pipelining_depth",
+    "no_corun",
+    "preemptible_lanes",
+    "interference",
+];
+
+/// Verlegt einen Befund aus der Aufloesung einer Domaene an ihre Fundstelle.
+fn domain_path(path: &str, domain: Option<&str>) -> String {
+    let (Some(domain), Some(rest)) = (domain, path.strip_prefix("backend.")) else {
+        return path.to_owned();
+    };
+    let key = rest.split(['.', '[']).next().unwrap_or_default();
+    if DOMAIN_KEYS.contains(&key) {
+        format!("backend.domains.{domain}.{rest}")
+    } else {
+        path.to_owned()
+    }
+}
+
+/// Ob ein Domaenenname taugt: er steht als Label in jeder Kennzahl.
+fn valid_domain_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 32
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
+impl Config {
+    /// Nennt jedes Modell eine Domaene, die es gibt? (NV-22)
+    ///
+    /// Auch ohne `backend.domains`: ein `domain: gpu1`, das niemand anlegt,
+    /// liefe sonst still auf GPU 0 — genau die Verwechslung, die das Feld
+    /// verhindern soll.
+    fn check_domain_references(&self, findings: &mut Vec<Located>) {
+        for (name, model) in &self.models {
+            if let Some(domain) = model.domain_name()
+                && !self.backend.domains.contains_key(domain)
+            {
+                findings.push(
+                    ConfigError::UnknownDomain {
+                        name: domain.to_owned(),
+                    }
+                    .at(format!("models.{name}.domain")),
+                );
+            }
+        }
+    }
+
+    /// Loest jede Domaene fuer sich auf (ADR-0037).
+    ///
+    /// Jede Domaene wird als eigene Konfiguration aufgeloest — nur ihre
+    /// Modelle, ihre Kapazitaet —, mit genau den Pruefungen, die ein Governor
+    /// fuer eine GPU immer macht. Befunde, die schon die Gesamtsicht gemeldet
+    /// hat, erscheinen nicht zweimal.
+    fn resolve_domains(
+        &self,
+        model_endpoints: &[String],
+        findings: &mut Vec<Located>,
+    ) -> Vec<ResolvedDomain> {
+        let covered = self.check_domains(model_endpoints, findings);
+        let mut names: Vec<Option<&str>> = vec![None];
+        names.extend(self.backend.domains.keys().map(|k| Some(k.as_str())));
+
+        let mut out = Vec::new();
+        for name in names {
+            let members: Vec<ModelIdx> = self
+                .models
+                .values()
+                .enumerate()
+                .filter(|(_, m)| m.domain_name() == name)
+                .filter_map(|(i, _)| u16::try_from(i).ok().map(ModelIdx))
+                .collect();
+            // Ohne Modell keine Domaene: fuer `default` ist das erlaubt (alle
+            // Modelle stehen in benannten Domaenen), fuer eine benannte ein
+            // Befund aus `check_domains`.
+            if members.is_empty() {
+                continue;
+            }
+            let mut local = Vec::new();
+            let resolved = self.domain_config(name).resolve_collecting(&mut local);
+            for finding in local {
+                let finding = Located {
+                    path: domain_path(&finding.path, name),
+                    error: finding.error,
+                };
+                if !covered.contains(&finding.path) && !findings.contains(&finding) {
+                    findings.push(finding);
+                }
+            }
+            let gpu_index = name
+                .and_then(|n| self.backend.domains.get(n))
+                .map_or(DEFAULT_GPU_INDEX, |d| d.gpu_index);
+            if let Some(resolved) = resolved {
+                out.push(ResolvedDomain {
+                    name: name.unwrap_or(DEFAULT_DOMAIN).to_owned(),
+                    gpu_index,
+                    models: members,
+                    resolved: std::sync::Arc::new(resolved),
+                });
+            }
+        }
+        out
+    }
+
+    /// Die Konfiguration, die der Scheduler einer Domaene sieht.
+    fn domain_config(&self, name: Option<&str>) -> Self {
+        let mut backend = self.backend.clone();
+        backend.domains = BTreeMap::new();
+        if let Some(domain) = name.and_then(|n| self.backend.domains.get(n)) {
+            backend.grpc_endpoint.clone_from(&domain.grpc_endpoint);
+            backend.slots = domain.slots;
+            backend.pipelining_depth = domain.pipelining_depth;
+            backend.no_corun.clone_from(&domain.no_corun);
+            backend.preemptible_lanes = domain.preemptible_lanes;
+            backend.interference.clone_from(&domain.interference);
+        }
+        let models = self
+            .models
+            .iter()
+            .filter(|(_, m)| m.domain_name() == name)
+            .map(|(k, m)| {
+                let mut m = m.clone();
+                m.domain = None;
+                (k.clone(), m)
+            })
+            .collect();
+        Self {
+            version: self.version,
+            backend,
+            models,
+        }
+    }
+
+    /// Kein Doppelbesitz (ADR-0037).
+    ///
+    /// Gibt die Fundstellen zurueck, an denen ein Paar ueber Domaenengrenzen
+    /// gemeldet wurde: die Aufloesung der Domaene faende dort ein
+    /// „unbekanntes Modell", und das waere die falsche Erklaerung.
+    fn check_domains(
+        &self,
+        model_endpoints: &[String],
+        findings: &mut Vec<Located>,
+    ) -> Vec<String> {
+        self.check_domain_entries(findings);
+        self.check_endpoint_owners(model_endpoints, findings);
+
+        // Paare gelten innerhalb einer GPU.
+        let mut covered = Vec::new();
+        let base_corun = self
+            .backend
+            .no_corun
+            .iter()
+            .enumerate()
+            .map(|(i, [a, b])| (format!("backend.no_corun[{i}]"), [a.as_str(), b.as_str()]));
+        let base_interference = self.backend.interference.iter().enumerate().map(|(i, p)| {
+            (
+                format!("backend.interference[{i}]"),
+                [p.victim.as_str(), p.co_tenant.as_str()],
+            )
+        });
+        self.refuse_cross_domain_pairs(
+            base_corun.chain(base_interference),
+            None,
+            findings,
+            &mut covered,
+        );
+        for (name, domain) in &self.backend.domains {
+            let corun = domain.no_corun.iter().enumerate().map(|(i, [a, b])| {
+                (
+                    format!("backend.domains.{name}.no_corun[{i}]"),
+                    [a.as_str(), b.as_str()],
+                )
+            });
+            let interference = domain.interference.iter().enumerate().map(|(i, p)| {
+                (
+                    format!("backend.domains.{name}.interference[{i}]"),
+                    [p.victim.as_str(), p.co_tenant.as_str()],
+                )
+            });
+            self.refuse_cross_domain_pairs(
+                corun.chain(interference),
+                Some(name),
+                findings,
+                &mut covered,
+            );
+        }
+        covered
+    }
+
+    /// Name, Endpunkt, Belegung und GPU jeder benannten Domaene.
+    fn check_domain_entries(&self, findings: &mut Vec<Located>) {
+        let populated =
+            |domain: Option<&str>| self.models.values().any(|m| m.domain_name() == domain);
+
+        let mut gpus: Vec<u32> = Vec::new();
+        if populated(None) {
+            gpus.push(DEFAULT_GPU_INDEX);
+        }
+        for (name, domain) in &self.backend.domains {
+            let path = format!("backend.domains.{name}");
+            if name == DEFAULT_DOMAIN {
+                findings.push(
+                    ConfigError::Inconsistent {
+                        what: "der Name default steht fuer den backend-Block selbst",
+                    }
+                    .at(path.clone()),
+                );
+            } else if !valid_domain_name(name) {
+                findings.push(
+                    ConfigError::OutOfRange {
+                        expected: "Domaenennamen aus Kleinbuchstaben, Ziffern, _ und -, \
+                                   hoechstens 32 Zeichen; der Name steht als Label in \
+                                   jeder Kennzahl",
+                    }
+                    .at(path.clone()),
+                );
+            }
+            if domain.grpc_endpoint.trim().is_empty() {
+                findings.push(
+                    ConfigError::Missing {
+                        what: "eine Domaene braucht den Endpunkt ihres Backends",
+                    }
+                    .at(format!("{path}.grpc_endpoint")),
+                );
+            }
+            if !populated(Some(name)) {
+                findings.push(
+                    ConfigError::Inconsistent {
+                        what: "eine Domaene ohne Modell ist ein Kapazitaetsbesitzer ohne \
+                               Arbeit; models.<name>.domain nennt sie",
+                    }
+                    .at(path.clone()),
+                );
+                continue;
+            }
+            if gpus.contains(&domain.gpu_index) {
+                findings.push(
+                    ConfigError::Inconsistent {
+                        what: "zwei Domaenen auf derselben GPU: eine GPU hat genau einen \
+                               Kapazitaetsbesitzer, und zwei Server auf einer GPU sind \
+                               keine zwei Recheneinheiten (ADR-0004)",
+                    }
+                    .at(format!("{path}.gpu_index")),
+                );
+            } else {
+                gpus.push(domain.gpu_index);
+            }
+        }
+    }
+
+    /// Ein Endpunkt gehoert genau einer Domaene.
+    ///
+    /// Sonst gaeben zwei Scheduler Arbeit an dieselbe Recheneinheit, und
+    /// keiner saehe die des anderen.
+    fn check_endpoint_owners(&self, model_endpoints: &[String], findings: &mut Vec<Located>) {
+        let mut owners: Vec<(&str, Option<&str>)> = Vec::new();
+        for ((name, model), endpoint) in self.models.iter().zip(model_endpoints) {
+            let domain = model.domain_name();
+            match owners.iter().find(|(e, _)| *e == endpoint.as_str()) {
+                Some((_, owner)) if *owner != domain => findings.push(
+                    ConfigError::Inconsistent {
+                        what: "ein Endpunkt gehoert genau einer Domaene: zwei Scheduler, \
+                               die Arbeit an denselben Server geben, sehen einander nicht",
+                    }
+                    .at(format!("models.{name}.backend_endpoint")),
+                ),
+                Some(_) => {}
+                None => owners.push((endpoint.as_str(), domain)),
+            }
+        }
+    }
+
+    /// Meldet Paare, deren Modelle in verschiedenen Domaenen stehen.
+    ///
+    /// Ein Name, den es gar nicht gibt, bleibt der Aufloesung der Domaene
+    /// ueberlassen: dort ist „nicht konfiguriert" die richtige Erklaerung.
+    fn refuse_cross_domain_pairs<'a>(
+        &self,
+        pairs: impl Iterator<Item = (String, [&'a str; 2])>,
+        domain: Option<&str>,
+        findings: &mut Vec<Located>,
+        covered: &mut Vec<String>,
+    ) {
+        for (path, pair) in pairs {
+            let domains: Vec<Option<Option<&str>>> = pair
+                .iter()
+                .map(|m| self.models.get(*m).map(ModelConfig::domain_name))
+                .collect();
+            let known = domains.iter().all(Option::is_some);
+            if known && domains.iter().any(|d| *d != Some(domain)) {
+                findings.push(
+                    ConfigError::Inconsistent {
+                        what: "no_corun und Interferenz gelten innerhalb einer Domaene: \
+                               Modelle auf verschiedenen GPUs laufen ohnehin \
+                               gleichzeitig, und eine Stoerung ueber Geraetegrenzen hat \
+                               niemand gemessen",
+                    }
+                    .at(path.clone()),
+                );
+                covered.push(path);
+            }
         }
     }
 }

@@ -368,3 +368,219 @@ impl Metrics {
         }
     }
 }
+
+impl Metrics {
+    /// Nimmt die Kennzahlen einer Ressourcendomaene in die Gesamtsicht auf
+    /// (NV-22, ADR-0037).
+    ///
+    /// `models[i]` ist der globale Index des Modells, das in `other` den Index
+    /// `i` traegt. Zaehler werden summiert, Werte je Modell an ihren globalen
+    /// Platz geschrieben; wo eine Summe nichts bedeutet — ein Hoechstwert, ein
+    /// Schalter —, gilt der groessere.
+    ///
+    /// Die Zerlegung ist vollstaendig ausgeschrieben: ein neues Feld ohne
+    /// Regel hier ist ein Compilefehler und kein still fehlender Wert in der
+    /// Gesamtsicht.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "eine Regel je Feld, vollstaendig ausgeschrieben"
+    )]
+    pub fn absorb(&mut self, other: &Self, models: &[crate::ids::ModelIdx]) {
+        let Self {
+            received,
+            forwarded,
+            superseded,
+            stale,
+            rejected_infeasible,
+            rejected_capacity,
+            completed_valid,
+            completed_obsolete,
+            backend_failures,
+            backend_timeouts,
+            consecutive_transport_failures,
+            backends,
+            backends_reachable,
+            longest_gap_us,
+            consecutive_misses,
+            weakly_hard_misses,
+            weakly_hard_violated,
+            weakly_hard_misses_left,
+            predictor_comparisons,
+            predictor_fallbacks,
+            predictor_more_conservative,
+            predictor_more_optimistic,
+            predictor_active,
+            reconciled,
+            rejected_quarantined,
+            degraded_profiles,
+            outstanding_backend_calls,
+            quarantined,
+            reconcile_baseline_missing,
+            cancelled,
+            deadline_misses,
+            protected_deadline_misses,
+            stale_compute_nanos,
+            total_compute_nanos,
+            variant_selected,
+            variant_upgrades,
+            variant_downgrades,
+            models: count,
+            slots,
+            arrival_period_us,
+            contract_period_us,
+            margin_percent,
+            best_effort_starved,
+            preemptible_dispatched,
+            protected_overlapped,
+            protected_overlap_extra_us,
+            dispatched_late,
+            deferred_for_protected,
+            generative_prefill_us,
+            generative_decode_us,
+            generative_fixed_us,
+            generative_context_tokens,
+            decomposition_refused,
+        } = *other;
+
+        for (total, part) in [
+            (&mut self.received, received),
+            (&mut self.forwarded, forwarded),
+            (&mut self.superseded, superseded),
+            (&mut self.stale, stale),
+            (&mut self.rejected_infeasible, rejected_infeasible),
+            (&mut self.rejected_capacity, rejected_capacity),
+            (&mut self.completed_valid, completed_valid),
+            (&mut self.completed_obsolete, completed_obsolete),
+            (&mut self.backend_failures, backend_failures),
+            (&mut self.backend_timeouts, backend_timeouts),
+            (&mut self.backends, backends),
+            (&mut self.backends_reachable, backends_reachable),
+            (&mut self.predictor_comparisons, predictor_comparisons),
+            (&mut self.predictor_fallbacks, predictor_fallbacks),
+            (
+                &mut self.predictor_more_conservative,
+                predictor_more_conservative,
+            ),
+            (
+                &mut self.predictor_more_optimistic,
+                predictor_more_optimistic,
+            ),
+            (&mut self.reconciled, reconciled),
+            (&mut self.rejected_quarantined, rejected_quarantined),
+            (&mut self.degraded_profiles, degraded_profiles),
+            (
+                &mut self.outstanding_backend_calls,
+                outstanding_backend_calls,
+            ),
+            (&mut self.quarantined, quarantined),
+            (
+                &mut self.reconcile_baseline_missing,
+                reconcile_baseline_missing,
+            ),
+            (&mut self.cancelled, cancelled),
+            (&mut self.deadline_misses, deadline_misses),
+            (
+                &mut self.protected_deadline_misses,
+                protected_deadline_misses,
+            ),
+            (&mut self.stale_compute_nanos, stale_compute_nanos),
+            (&mut self.total_compute_nanos, total_compute_nanos),
+            (&mut self.slots, slots),
+            (&mut self.best_effort_starved, best_effort_starved),
+            (&mut self.preemptible_dispatched, preemptible_dispatched),
+            (&mut self.protected_overlapped, protected_overlapped),
+            (
+                &mut self.protected_overlap_extra_us,
+                protected_overlap_extra_us,
+            ),
+            (&mut self.dispatched_late, dispatched_late),
+            (&mut self.deferred_for_protected, deferred_for_protected),
+            (&mut self.generative_prefill_us, generative_prefill_us),
+            (&mut self.generative_decode_us, generative_decode_us),
+            (&mut self.generative_fixed_us, generative_fixed_us),
+            (&mut self.decomposition_refused, decomposition_refused),
+        ] {
+            *total = total.saturating_add(part);
+        }
+
+        // Kein Zaehler, sondern ein Zustand je Domaene: die schlimmste zaehlt.
+        self.consecutive_transport_failures = self
+            .consecutive_transport_failures
+            .max(consecutive_transport_failures);
+        self.predictor_active = self.predictor_active.max(predictor_active);
+        self.generative_context_tokens = self
+            .generative_context_tokens
+            .max(generative_context_tokens);
+
+        for (total, part) in self.variant_selected.iter_mut().zip(variant_selected) {
+            *total = total.saturating_add(part);
+        }
+
+        for (total, part) in [
+            (&mut self.longest_gap_us, &longest_gap_us),
+            (&mut self.consecutive_misses, &consecutive_misses),
+            (&mut self.weakly_hard_misses, &weakly_hard_misses),
+            (&mut self.weakly_hard_violated, &weakly_hard_violated),
+            (&mut self.weakly_hard_misses_left, &weakly_hard_misses_left),
+            (&mut self.variant_upgrades, &variant_upgrades),
+            (&mut self.variant_downgrades, &variant_downgrades),
+            (&mut self.arrival_period_us, &arrival_period_us),
+            (&mut self.contract_period_us, &contract_period_us),
+            (&mut self.margin_percent, &margin_percent),
+        ] {
+            for (local, global) in models.iter().take(count).enumerate() {
+                if let (Some(slot), Some(value)) = (total.get_mut(global.get()), part.get(local)) {
+                    *slot = *value;
+                }
+            }
+        }
+        for global in models.iter().take(count) {
+            self.models = self.models.max(global.get().saturating_add(1));
+        }
+    }
+}
+
+#[cfg(test)]
+mod domain_tests {
+    #![allow(clippy::indexing_slicing)]
+
+    use super::Metrics;
+    use crate::ids::ModelIdx;
+
+    #[test]
+    fn two_domains_add_up_and_keep_each_model_at_its_global_place() {
+        let mut a = Metrics {
+            received: 10,
+            slots: 1,
+            quarantined: 1,
+            consecutive_transport_failures: 3,
+            models: 1,
+            ..Metrics::default()
+        };
+        a.longest_gap_us[0] = 111;
+        a.variant_selected[0] = 4;
+        let mut b = Metrics {
+            received: 5,
+            slots: 2,
+            consecutive_transport_failures: 1,
+            models: 2,
+            ..Metrics::default()
+        };
+        b.longest_gap_us[0] = 220;
+        b.longest_gap_us[1] = 221;
+        b.variant_selected[0] = 1;
+
+        let mut total = Metrics::default();
+        // Domaene a traegt das globale Modell 1, Domaene b die Modelle 0 und 2.
+        total.absorb(&a, &[ModelIdx(1)]);
+        total.absorb(&b, &[ModelIdx(0), ModelIdx(2)]);
+
+        assert_eq!(total.received, 15);
+        assert_eq!(total.slots, 3);
+        assert_eq!(total.quarantined, 1);
+        assert_eq!(total.consecutive_transport_failures, 3, "die schlimmste");
+        assert_eq!(total.variant_selected[0], 5);
+        assert_eq!(total.models, 3);
+        assert_eq!(total.longest_gap_us[..3], [220, 111, 221]);
+    }
+}

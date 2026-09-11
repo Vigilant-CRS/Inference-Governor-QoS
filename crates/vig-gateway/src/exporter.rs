@@ -20,7 +20,7 @@
 //! Beides ist bewusst offen und nicht halb umgesetzt: eine Metrik, die
 //! aussieht wie ein Quantil und keines ist, waere schlimmer als keine.
 
-use crate::actor::Handle;
+use crate::actor::{DomainMetrics, Handle};
 use axum::Router;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -466,9 +466,192 @@ fn ratio(permille: u64) -> String {
     format!("{whole}.{rest:03}")
 }
 
+/// Eine Kennzahlfamilie je Domaene: Name, Typ, Hilfetext, Wert.
+type DomainFamily = (
+    &'static str,
+    &'static str,
+    &'static str,
+    fn(&Metrics) -> u64,
+);
+
+/// Was je Domaene exportiert wird (NV-22).
+///
+/// Bereitschaft, Kapazitaet und die Zaehler, an denen man sieht, ob eine GPU
+/// die andere beeinflusst — und das soll sie nach ADR-0037 nicht.
+fn domain_families() -> [DomainFamily; 13] {
+    [
+        (
+            "vig_domain_ready",
+            "gauge",
+            "1, wenn diese Ressourcendomaene Arbeit annehmen kann.",
+            |m| u64::from(readiness(m).is_ok()),
+        ),
+        (
+            "vig_domain_slots",
+            "gauge",
+            "Ausfuehrungsslots dieser Domaene.",
+            |m| m.slots,
+        ),
+        (
+            "vig_domain_quarantined_slots",
+            "gauge",
+            "Slotkredite dieser Domaene in Quarantaene.",
+            |m| m.quarantined,
+        ),
+        (
+            "vig_domain_backends",
+            "gauge",
+            "Backendendpunkte dieser Domaene.",
+            |m| m.backends,
+        ),
+        (
+            "vig_domain_backends_reachable",
+            "gauge",
+            "Endpunkte dieser Domaene, die die letzte Probe beantwortet haben.",
+            |m| m.backends_reachable,
+        ),
+        (
+            "vig_domain_outstanding_backend_calls",
+            "gauge",
+            "Offene Backendaufrufe dieser Domaene.",
+            |m| m.outstanding_backend_calls,
+        ),
+        (
+            "vig_domain_requests_received_total",
+            "counter",
+            "Angenommene Requests dieser Domaene.",
+            |m| m.received,
+        ),
+        (
+            "vig_domain_requests_forwarded_total",
+            "counter",
+            "Weitergereichte Requests dieser Domaene.",
+            |m| m.forwarded,
+        ),
+        (
+            "vig_domain_requests_completed_valid_total",
+            "counter",
+            "Gueltig fertiggestellte Requests dieser Domaene.",
+            |m| m.completed_valid,
+        ),
+        (
+            "vig_domain_requests_rejected_infeasible_total",
+            "counter",
+            "Als nicht mehr machbar abgelehnte Requests dieser Domaene.",
+            |m| m.rejected_infeasible,
+        ),
+        (
+            "vig_domain_requests_rejected_quarantined_total",
+            "counter",
+            "Wegen vollstaendiger Quarantaene abgewiesene Requests dieser Domaene.",
+            |m| m.rejected_quarantined,
+        ),
+        (
+            "vig_domain_protected_deadline_misses_total",
+            "counter",
+            "Verletzte Deadlines geschuetzter Klassen in dieser Domaene.",
+            |m| m.protected_deadline_misses,
+        ),
+        (
+            "vig_domain_deferred_for_protected_total",
+            "counter",
+            "Veto-Ereignisse des Look-ahead in dieser Domaene.",
+            |m| m.deferred_for_protected,
+        ),
+    ]
+}
+
+/// Die Kennzahlen je Ressourcendomaene (NV-22, ADR-0037).
+///
+/// Nur mit mehr als einer Domaene: die Reihen ohne Label bleiben die
+/// Gesamtsicht, und ohne Domaenen aendert sich an der Seite nichts. Der
+/// Domaenenname ist beim Laden der Konfiguration auf Kleinbuchstaben,
+/// Ziffern, `_` und `-` beschraenkt und braucht hier kein Escaping.
+#[must_use]
+pub fn render_domains(parts: &[DomainMetrics]) -> String {
+    let mut out = String::with_capacity(2_048);
+    if parts.len() < 2 {
+        return out;
+    }
+    for (name, kind, help, value) in domain_families() {
+        let _ = writeln!(out, "# HELP {name} {help}");
+        let _ = writeln!(out, "# TYPE {name} {kind}");
+        for part in parts {
+            let _ = writeln!(
+                out,
+                "{name}{{domain=\"{}\"}} {}",
+                part.name,
+                value(&part.metrics)
+            );
+        }
+    }
+    let _ = writeln!(
+        out,
+        "# HELP vig_domain_info Die GPU jeder Ressourcendomaene.\n# TYPE vig_domain_info gauge"
+    );
+    for part in parts {
+        let _ = writeln!(
+            out,
+            "vig_domain_info{{domain=\"{}\",gpu=\"{}\"}} 1",
+            part.name, part.gpu_index
+        );
+    }
+    out
+}
+
+/// Die Bereitschaft ueber alle Ressourcendomaenen (NV-22).
+///
+/// Bereit ist der Governor, wenn **jede** Domaene bereit ist: ein Modell,
+/// dessen GPU nichts ausrichten kann, bekommt sonst Verkehr, den niemand
+/// bedient. Der Grund nennt die Domaene; Auftraege an die gesunden laufen
+/// davon unberuehrt weiter.
+///
+/// # Errors
+///
+/// Der Grund, aus dem kein Verkehr geschickt werden sollte.
+pub fn domain_readiness(parts: &[DomainMetrics]) -> Result<(), String> {
+    if let [only] = parts {
+        return readiness(&only.metrics);
+    }
+    if parts.is_empty() {
+        return Err("scheduler: keine Domaene".to_owned());
+    }
+    let reasons: Vec<String> = parts
+        .iter()
+        .filter_map(|p| {
+            readiness(&p.metrics)
+                .err()
+                .map(|r| format!("domain {}: {r}", p.name))
+        })
+        .collect();
+    if reasons.is_empty() {
+        Ok(())
+    } else {
+        Err(reasons.join("; "))
+    }
+}
+
+/// Die Bereitschaft des Governors, wie `/readyz` und `ServerReady` sie
+/// melden.
+///
+/// # Errors
+///
+/// Der Grund, aus dem kein Verkehr geschickt werden sollte.
+pub async fn ready(handle: &Handle) -> Result<(), String> {
+    let parts = handle
+        .domain_metrics()
+        .await
+        .map_err(|_| "scheduler: keine Antwort".to_owned())?;
+    domain_readiness(&parts)
+}
+
 async fn metrics_endpoint(State(handle): State<Handle>) -> (StatusCode, String) {
-    match handle.metrics().await {
-        Ok(metrics) => (StatusCode::OK, render(&metrics)),
+    match handle.domain_metrics().await {
+        Ok(parts) => {
+            let mut out = render(&handle.merge(&parts));
+            out.push_str(&render_domains(&parts));
+            (StatusCode::OK, out)
+        }
         // Antwortet der Scheduler nicht, ist das selbst die wichtigste
         // Information. Ein leerer Erfolg waere hier eine Luege.
         Err(status) => (
@@ -501,13 +684,7 @@ async fn health_endpoint(State(handle): State<Handle>) -> StatusCode {
 /// nicht bereit — aber ein Neustart hilft ihm nicht, denn das haengende
 /// Backend startet dabei nicht mit.
 async fn ready_endpoint(State(handle): State<Handle>) -> (StatusCode, String) {
-    let Ok(metrics) = handle.metrics().await else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "scheduler: keine Antwort\n".to_owned(),
-        );
-    };
-    match readiness(&metrics) {
+    match ready(&handle).await {
         Ok(()) => (StatusCode::OK, "ready\n".to_owned()),
         Err(reason) => (StatusCode::SERVICE_UNAVAILABLE, format!("{reason}\n")),
     }
@@ -779,6 +956,54 @@ mod tests {
     )]
 
     use super::*;
+
+    fn domain(name: &str, gpu_index: u32, slots: u64, quarantined: u64) -> DomainMetrics {
+        DomainMetrics {
+            name: name.to_owned(),
+            gpu_index,
+            metrics: Metrics {
+                slots,
+                quarantined,
+                backends: 1,
+                backends_reachable: 1,
+                ..Metrics::default()
+            },
+        }
+    }
+
+    /// NV-22: je Domaene ein Label, und nur, wenn es mehr als eine gibt —
+    /// ohne Domaenen bleibt die Seite, wie sie war.
+    #[test]
+    fn domain_series_carry_their_label_and_appear_only_with_two_domains() {
+        assert!(render_domains(&[domain("default", 0, 1, 0)]).is_empty());
+
+        let text = render_domains(&[domain("default", 0, 1, 0), domain("gpu1", 1, 2, 2)]);
+        assert!(text.contains("vig_domain_slots{domain=\"gpu1\"} 2"));
+        assert!(text.contains("vig_domain_quarantined_slots{domain=\"gpu1\"} 2"));
+        assert!(text.contains("vig_domain_ready{domain=\"default\"} 1"));
+        assert!(text.contains("vig_domain_ready{domain=\"gpu1\"} 0"));
+        assert!(text.contains("vig_domain_info{domain=\"gpu1\",gpu=\"1\"} 1"));
+
+        // Jede Familie genau einmal mit HELP und TYPE, jede Probe danach.
+        let families = text.lines().filter(|l| l.starts_with("# TYPE")).count();
+        assert_eq!(families, domain_families().len() + 1);
+        let samples = text.lines().filter(|l| !l.starts_with('#')).count();
+        assert_eq!(samples, families * 2);
+    }
+
+    /// NV-22: bereit nur, wenn jede Domaene es ist — und der Grund nennt die,
+    /// die es nicht ist, und keine andere.
+    #[test]
+    fn readiness_names_the_domain_that_is_not_ready() {
+        assert!(domain_readiness(&[domain("default", 0, 1, 0), domain("gpu1", 1, 1, 0)]).is_ok());
+        let reason =
+            domain_readiness(&[domain("default", 0, 1, 0), domain("gpu1", 1, 1, 1)]).unwrap_err();
+        assert!(reason.contains("domain gpu1"), "{reason}");
+        assert!(!reason.contains("domain default"), "{reason}");
+        // Eine einzige Domaene antwortet wie vor NV-22, ohne Namen.
+        let single = domain_readiness(&[domain("default", 0, 1, 1)]).unwrap_err();
+        assert!(!single.contains("domain"), "{single}");
+    }
 
     #[test]
     fn the_rendered_format_is_parseable_prometheus() {

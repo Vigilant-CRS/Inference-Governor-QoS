@@ -1,0 +1,63 @@
+# Beispielkonfiguration: zwei GPUs, ein Governor (NV-22, ADR-0037).
+#
+# GPU 0 traegt die geschuetzte Wahrnehmung, GPU 1 Tiefe und Sprachmodell.
+# Jede GPU hat ihren eigenen Scheduler: eine erwartete Detektorankunft haelt
+# auf GPU 1 nichts zurueck, und ein haengendes Backend auf GPU 1 nimmt GPU 0
+# keinen Slot weg.
+#
+# Erreichbar, nicht qualifiziert: auf der Messmaschine gibt es eine GPU.
+#
+# Pruefen mit:  vig doctor -c vig.yaml --offline
+version: 1
+
+backend:
+  type: triton
+  # Der backend-Block ist selbst eine Domaene: `default`, GPU 0. Jedes
+  # Modell ohne `domain:` laeuft hier.
+  grpc_endpoint: "127.0.0.1:8001"
+  slots: 1
+  pipelining_depth: 1
+  safety_margin_percent: 110
+
+  domains:
+    gpu1:
+      gpu_index: 1                      # wie nvidia-smi sie zaehlt
+      grpc_endpoint: "127.0.0.1:8101"   # ein Triton, das nur GPU 1 sieht
+      slots: 1
+      pipelining_depth: 1
+      # Co-Run-Verbote und Interferenz gelten innerhalb einer GPU.
+      no_corun:
+        - [depth, vlm]
+
+models:
+  detector:
+    class: protected
+    queue: { policy: latest, capacity: 1, overflow: reject_new }
+    contract: { period_ms: 33, deadline_ms: 33, max_age_ms: 66 }
+    variants:
+      - id: main
+        backend_model: detector_main
+        quality: { value: 1.0, source: measured }
+        profile: { p50_us: 10000, p95_us: 13000, p99_us: 16000, samples: 2000 }
+
+  depth:
+    class: high
+    domain: gpu1
+    queue: { policy: latest, capacity: 1, overflow: reject_new }
+    contract: { period_ms: 66, deadline_ms: 66, max_age_ms: 132 }
+    variants:
+      - id: main
+        backend_model: depth_main
+        quality: { value: 1.0, source: measured }
+        profile: { p50_us: 12000, p95_us: 15000, p99_us: 18000, samples: 2000 }
+
+  vlm:
+    class: best_effort
+    domain: gpu1
+    queue: { policy: fifo, capacity: 4, overflow: backpressure_client }
+    contract: { deadline_ms: 800, max_age_ms: 1500 }
+    variants:
+      - id: main
+        backend_model: vlm_main
+        quality: { value: 1.0, source: user_declared }
+        profile: { p50_us: 200000, p95_us: 280000, p99_us: 320000, samples: 500 }

@@ -294,6 +294,54 @@ models (priority is per process), a protected class marked preemptible, and a
 The governor never triggers preemption itself; the backend does
 ([ADR-0033](adr/0033-native-code-lives-in-the-backend-process.md)).
 
+### Two GPUs
+
+A slot is one execution unit on one GPU. If your machine has two GPUs,
+describe the second one as a **resource domain** — a GPU with its own
+scheduler — instead of adding slots:
+
+```yaml
+backend:
+  grpc_endpoint: "127.0.0.1:8001"      # GPU 0: the domain `default`
+  slots: 1
+  domains:
+    gpu1:
+      gpu_index: 1                     # as nvidia-smi counts it
+      grpc_endpoint: "127.0.0.1:8101"  # a Triton that only sees GPU 1
+      slots: 1
+
+models:
+  detector:                            # no `domain:` — runs on GPU 0
+    class: protected
+    # ...
+  vlm:
+    class: best_effort
+    domain: gpu1                       # runs on GPU 1, always
+    # ...
+```
+
+Each domain plans on its own: slots, credits, quarantine, safety margin,
+look-ahead and miss budget. An expected detector frame on GPU 0 does not hold
+back the language model on GPU 1, and a hung backend on GPU 1 takes no credit
+from GPU 0. Shared are what belongs to the process: the payload budget, access
+control, hints and timeouts. The assignment is fixed — a model never moves to
+another GPU at runtime, and there is no automatic failover
+([ADR-0037](adr/0037-a-domain-is-a-gpu-with-one-owner.md)). A complete
+example is in [`examples/domains/`](../examples/domains/vig.yaml).
+
+The configuration refuses two domains on the same GPU, one endpoint used by
+two domains, a domain without models, a model naming a domain that does not
+exist, and `no_corun` or interference pairs across domains. `/readyz` is red
+while any domain is not ready and names it (`domain gpu1: …`); requests to the
+healthy domains keep running. `/metrics` keeps its series as a total and adds
+`vig_domain_*{domain="…"}`.
+
+Three things to know before you rely on it: it is **reachable, not
+qualified** — the logic is tested with fake backends, not on two GPUs; a
+fusion (`vig_depends_on`) must run in the domain of its parents; and shared
+memory registered through the governor reaches only `backend.grpc_endpoint`,
+so models on other GPUs use the copy path for now.
+
 ## Step 5 — see what it decided
 
 ```bash

@@ -366,12 +366,69 @@ const fn graph_reason(error: &vig_core::dag::GraphError) -> &'static str {
 }
 
 /// Der Griff, ueber den das Gateway den Actor erreicht.
+///
+/// Mit Ressourcendomaenen (NV-22, ADR-0037) erreicht er einen Actor je
+/// Domaene und leitet jeden Auftrag an den Besitzer seiner GPU. Ohne Domaenen
+/// ist es genau ein Actor, und der Modellindex bleibt, wie er ist.
 #[derive(Debug, Clone)]
 pub struct Handle {
+    domains: Arc<[DomainLink]>,
+    /// Je globalem Modell die Domaene und der Index dort. Leer bei einer
+    /// einzigen Domaene: dann ist der Index derselbe.
+    route: Arc<[(usize, vig_core::ModelIdx)]>,
+}
+
+/// Die Verbindung zum Actor einer Domaene.
+#[derive(Debug)]
+struct DomainLink {
+    name: String,
+    gpu_index: u32,
     tx: mpsc::Sender<Msg>,
+    /// Die globalen Indizes ihrer Modelle, in lokaler Reihenfolge; leer ohne
+    /// Domaenen.
+    models: Vec<vig_core::ModelIdx>,
+}
+
+/// Die Kennzahlen einer Ressourcendomaene (NV-22).
+#[derive(Debug, Clone)]
+pub struct DomainMetrics {
+    /// Ihr Name; `default` fuer den `backend`-Block.
+    pub name: String,
+    /// Ihre GPU.
+    pub gpu_index: u32,
+    /// Die Zaehler ihres Schedulers, in **ihrem** Modellindex.
+    pub metrics: Metrics,
 }
 
 impl Handle {
+    /// Ein Griff auf genau einen Actor, ohne Domaenen.
+    fn single(tx: mpsc::Sender<Msg>) -> Self {
+        Self {
+            domains: Arc::from([DomainLink {
+                name: vig_config::schema::DEFAULT_DOMAIN.to_owned(),
+                gpu_index: vig_config::schema::DEFAULT_GPU_INDEX,
+                tx,
+                models: Vec::new(),
+            }]),
+            route: Arc::from([]),
+        }
+    }
+
+    /// Wohin ein Auftrag fuer dieses Modell geht, und unter welchem Index.
+    fn target(&self, model: vig_core::ModelIdx) -> Option<(&DomainLink, vig_core::ModelIdx)> {
+        if self.route.is_empty() {
+            return self.domains.first().map(|link| (link, model));
+        }
+        let (domain, local) = *self.route.get(model.get())?;
+        self.domains.get(domain).map(|link| (link, local))
+    }
+
+    /// Wie viele Ressourcendomaenen dieser Griff erreicht.
+    #[must_use]
+    pub fn domain_count(&self) -> usize {
+        self.domains.len()
+    }
+
     /// Reicht einen Request ein und wartet auf sein Ergebnis.
     ///
     /// # Errors
@@ -400,11 +457,20 @@ impl Handle {
     /// Wie [`Handle::submit`], dazu die Ablehnungen des Graphen.
     pub async fn submit_with_graph(
         &self,
-        descriptor: RequestDescriptor,
+        mut descriptor: RequestDescriptor,
         request: ModelInferRequest,
         permit: crate::budget::PayloadPermit,
         graph: Option<GraphRequest>,
     ) -> Reply {
+        // Der Besitzer der GPU dieses Modells, und der Index, unter dem sein
+        // Scheduler es kennt (NV-22).
+        let Some((link, local)) = self.target(descriptor.logical_model) else {
+            return Err(Status::internal(
+                "fuer dieses Modell ist keine Ressourcendomaene zustaendig",
+            ));
+        };
+        descriptor.logical_model = local;
+        let tx = &link.tx;
         let id = descriptor.id;
         let (reply, wait) = oneshot::channel();
         let msg = Msg::Arrival {
@@ -414,7 +480,7 @@ impl Handle {
             permit,
             graph,
         };
-        self.tx.try_send(msg).map_err(|e| match e {
+        tx.try_send(msg).map_err(|e| match e {
             mpsc::error::TrySendError::Full(_) => {
                 Status::resource_exhausted("Vigilant nimmt derzeit keine weiteren Requests an")
             }
@@ -429,7 +495,7 @@ impl Handle {
         // gibt — und zwar genau die Kapazitaet, um die noch wartende Stroeme
         // konkurrieren.
         let mut cancel = CancelOnDrop {
-            tx: self.tx.clone(),
+            tx: tx.clone(),
             request: Some(id),
         };
         let outcome = wait
@@ -451,12 +517,23 @@ impl Handle {
     ///
     /// Wenn der Actor bereits beendet ist.
     pub async fn drain(&self, deadline: std::time::Duration) -> Result<bool, Status> {
-        let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(Msg::Shutdown(tx))
-            .await
-            .map_err(|_| Status::internal("der Scheduler ist nicht mehr aktiv"))?;
-        Ok(tokio::time::timeout(deadline, rx).await.is_ok())
+        // Jede Domaene faehrt fuer sich herunter; fertig ist der Governor,
+        // wenn es alle sind — innerhalb **einer** Frist.
+        let mut done = Vec::with_capacity(self.domains.len());
+        for link in self.domains.iter() {
+            let (tx, rx) = oneshot::channel();
+            link.tx
+                .send(Msg::Shutdown(tx))
+                .await
+                .map_err(|_| Status::internal("der Scheduler ist nicht mehr aktiv"))?;
+            done.push(rx);
+        }
+        let all = async {
+            for rx in done {
+                let _ = rx.await;
+            }
+        };
+        Ok(tokio::time::timeout(deadline, all).await.is_ok())
     }
 
     /// Liest die aktuellen Zaehler.
@@ -470,11 +547,15 @@ impl Handle {
     /// Hinweis macht, entscheidet die Policy des Betreibers, und eine
     /// Ablehnung ist eine Betriebsmeldung. Ein Hinweis darf die Zulassung des
     /// Requests, der ihn mitgebracht hat, nicht scheitern lassen.
-    pub fn offer_hint(&self, hint: vig_core::hints::Hint) {
+    pub fn offer_hint(&self, mut hint: vig_core::hints::Hint) {
+        let Some((link, local)) = self.target(hint.model) else {
+            return;
+        };
+        hint.model = local;
         // `try_send`: ein voller Kanal heisst, dass gerade Wichtigeres
         // ansteht. Ein Hinweis, der dafuer Platz verdraengt, waere die
         // falsche Reihenfolge.
-        let _ = self.tx.try_send(Msg::Hint {
+        let _ = link.tx.try_send(Msg::Hint {
             hint: Box::new(hint),
         });
     }
@@ -492,8 +573,16 @@ impl Handle {
     /// Ohne diesen Aufruf plant der Governor ohne Geraetezustand. Das ist die
     /// dokumentierte Rueckfallbetriebsart aus ADR-0022 und keine Notlage:
     /// unbekannt heisst unbekannt, und die Prognose bleibt beim Profil.
+    ///
+    /// Auch mit mehreren Domaenen **ein** Waechter: eine Abfrage je Takt, und
+    /// jede Domaene bekommt den Zustand ihrer GPU (ADR-0037).
     pub fn observe_hardware(&self) {
-        spawn_hardware_probe(&self.tx);
+        spawn_hardware_probe(
+            self.domains
+                .iter()
+                .map(|link| (link.gpu_index, link.tx.clone()))
+                .collect(),
+        );
     }
 
     /// Der aktuelle Metrikabzug.
@@ -502,13 +591,51 @@ impl Handle {
     ///
     /// Wenn der Actor beendet wurde.
     pub async fn metrics(&self) -> Result<Metrics, Status> {
-        let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(Msg::Snapshot(tx))
-            .await
-            .map_err(|_| Status::internal("der Scheduler ist nicht mehr aktiv"))?;
-        rx.await
-            .map_err(|_| Status::internal("der Scheduler hat nicht geantwortet"))
+        let parts = self.domain_metrics().await?;
+        Ok(self.merge(&parts))
+    }
+
+    /// Die Kennzahlen je Ressourcendomaene (NV-22), in Domaenenreihenfolge.
+    ///
+    /// Ohne Domaenen genau ein Eintrag, `default`.
+    ///
+    /// # Errors
+    ///
+    /// Wenn der Actor einer Domaene beendet wurde.
+    pub async fn domain_metrics(&self) -> Result<Vec<DomainMetrics>, Status> {
+        let mut parts = Vec::with_capacity(self.domains.len());
+        for link in self.domains.iter() {
+            let (tx, rx) = oneshot::channel();
+            link.tx
+                .send(Msg::Snapshot(tx))
+                .await
+                .map_err(|_| Status::internal("der Scheduler ist nicht mehr aktiv"))?;
+            let metrics = rx
+                .await
+                .map_err(|_| Status::internal("der Scheduler hat nicht geantwortet"))?;
+            parts.push(DomainMetrics {
+                name: link.name.clone(),
+                gpu_index: link.gpu_index,
+                metrics,
+            });
+        }
+        Ok(parts)
+    }
+
+    /// Die Gesamtsicht ueber alle Domaenen, im globalen Modellindex.
+    ///
+    /// Ohne Domaenen der eine Abzug, unveraendert.
+    #[must_use]
+    pub fn merge(&self, parts: &[DomainMetrics]) -> Metrics {
+        if self.route.is_empty() {
+            return parts.first().map(|p| p.metrics).unwrap_or_default();
+        }
+        let mut total = Metrics::default();
+        for (link, part) in self.domains.iter().zip(parts) {
+            total.absorb(&part.metrics, &link.models);
+        }
+        total.models = self.route.len();
+        total
     }
 }
 
@@ -655,7 +782,11 @@ pub fn spawn(
     // Fuer jeden in der Konfiguration genannten Endpunkt ein Client. Der
     // uebergebene deckt den Standardendpunkt ab.
     let mut backends: HashMap<String, Arc<dyn Executor>> = HashMap::new();
-    for endpoint in config.endpoints() {
+    let domain_endpoints = config.domains.iter().flat_map(|d| d.resolved.endpoints());
+    for endpoint in config.endpoints().into_iter().chain(domain_endpoints) {
+        if backends.contains_key(&endpoint) {
+            continue;
+        }
         let client = if endpoint == config.backend_endpoint {
             Arc::clone(backend)
         } else {
@@ -685,7 +816,58 @@ pub fn spawn_with<S: std::hash::BuildHasher>(
     // Der Actor fuehrt seine eigene Tabelle; der Hasher des Aufrufers geht
     // ihn nichts an.
     let backends: HashMap<String, Arc<dyn Executor>> = backends.into_iter().collect();
-    spawn_owned(config, backends, clock, unverified)
+    if config.domains.is_empty() {
+        return spawn_owned(config, backends, clock, unverified).map(Handle::single);
+    }
+    spawn_domains(&config, &backends, clock, unverified)
+}
+
+/// Ein Actor je Ressourcendomaene (NV-22, ADR-0037).
+///
+/// Jeder bekommt nur seine Modelle, seine Slots und die Executoren seiner
+/// Endpunkte. Was sie teilen, teilen sie ausserhalb: das Nutzlastbudget im
+/// Dienst, die Hardwarebeobachtung im Griff.
+fn spawn_domains(
+    config: &Resolved,
+    backends: &HashMap<String, Arc<dyn Executor>>,
+    clock: MonotonicClock,
+    unverified: &[vig_core::ModelIdx],
+) -> Result<Handle, SchedulerError> {
+    let mut links = Vec::with_capacity(config.domains.len());
+    let mut route = vec![None; config.model_names.len()];
+    for (index, domain) in config.domains.iter().enumerate() {
+        let own: HashMap<String, Arc<dyn Executor>> = domain
+            .resolved
+            .endpoints()
+            .into_iter()
+            .filter_map(|endpoint| {
+                let executor = Arc::clone(backends.get(&endpoint)?);
+                Some((endpoint, executor))
+            })
+            .collect();
+        let local_unverified: Vec<vig_core::ModelIdx> =
+            unverified.iter().filter_map(|m| domain.local(*m)).collect();
+        let tx = spawn_owned(Arc::clone(&domain.resolved), own, clock, &local_unverified)?;
+        for (local, global) in domain.models.iter().enumerate() {
+            if let (Some(slot), Ok(local)) = (route.get_mut(global.get()), u16::try_from(local)) {
+                *slot = Some((index, vig_core::ModelIdx(local)));
+            }
+        }
+        links.push(DomainLink {
+            name: domain.name.clone(),
+            gpu_index: domain.gpu_index,
+            tx,
+            models: domain.models.clone(),
+        });
+    }
+    // Ein Modell ohne Besitzer gibt es nach der Aufloesung nicht; gaebe es
+    // eines, liefe es nirgends, und das waere ein stiller Ausfall.
+    let route: Option<Vec<(usize, vig_core::ModelIdx)>> = route.into_iter().collect();
+    let route = route.ok_or(SchedulerError::NoModels)?;
+    Ok(Handle {
+        domains: Arc::from(links),
+        route: Arc::from(route),
+    })
 }
 
 fn spawn_owned(
@@ -693,7 +875,7 @@ fn spawn_owned(
     backends: HashMap<String, Arc<dyn Executor>>,
     clock: MonotonicClock,
     unverified: &[vig_core::ModelIdx],
-) -> Result<Handle, SchedulerError> {
+) -> Result<mpsc::Sender<Msg>, SchedulerError> {
     let overload = OverloadController::new(OverloadConfig::default(), clock.now())
         .map_err(|_| SchedulerError::NoModels)?;
     let mut scheduler = Scheduler::new(
@@ -804,7 +986,7 @@ fn spawn_owned(
         warned_arrival: [None; vig_core::ids::MAX_MODELS],
     };
     tokio::spawn(actor.run(rx));
-    Ok(Handle { tx })
+    Ok(tx)
 }
 
 impl Actor {
@@ -2228,8 +2410,7 @@ const HARDWARE_PROBE_INTERVAL_MS: u64 = 2_000;
 /// bleibt der Zustand im Kern „unbekannt". Das ist der sichere Fall: die
 /// zustandsabhaengige Prognose gibt dann gar keine Aussage statt der
 /// guenstigsten.
-fn spawn_hardware_probe(tx: &mpsc::Sender<Msg>) {
-    let tx = tx.clone();
+fn spawn_hardware_probe(targets: Vec<(u32, mpsc::Sender<Msg>)>) {
     // Ein **eigener Betriebssystem-Thread**, nicht `spawn_blocking`.
     //
     // Der Unterschied ist nicht akademisch: `Runtime::drop` wartet auf
@@ -2255,7 +2436,7 @@ fn spawn_hardware_probe(tx: &mpsc::Sender<Msg>) {
                 // Vor der Abfrage nachsehen, ob noch jemand zuhoert. Ein
                 // Unterprozess fuer einen geschlossenen Kanal ist verschwendete
                 // Zeit — und im Test verschwendete Sekunden.
-                if tx.is_closed() {
+                if targets.iter().all(|(_, tx)| tx.is_closed()) {
                     return;
                 }
 
@@ -2266,29 +2447,16 @@ fn spawn_hardware_probe(tx: &mpsc::Sender<Msg>) {
                 let backoff = interval
                     .saturating_mul(1_u32.saturating_add(health.consecutive_failures().min(15)));
 
-                let state = match collector.snapshot() {
+                let states: Vec<StateClass> = match collector.snapshot() {
                     Ok(snapshot) => {
                         health.record_success(snapshot.taken_at_ms);
-                        snapshot.gpu(0).map_or_else(StateClass::default, |gpu| {
-                            StateClass {
-                                // Der Belegungsgrad kommt vom Kern, nicht von hier.
-                                occupancy: 0,
-                                throttle: if gpu.limiting_reasons().is_empty() {
-                                    ThrottleClass::Nominal
-                                } else {
-                                    ThrottleClass::Limited
-                                },
-                                // Beide Takte, nicht nur das Rechenwerk: eine
-                                // Karte, die den Speicher heruntertaktet, sah
-                                // sonst aus wie eine bei vollem Takt (R07).
-                                clock: ClockClass::from_two_clocks(
-                                    gpu.clock_sm_mhz.value().copied(),
-                                    gpu.clock_sm_max_mhz.value().copied(),
-                                    gpu.clock_mem_mhz.value().copied(),
-                                    gpu.clock_mem_max_mhz.value().copied(),
-                                ),
-                            }
-                        })
+                        // Jede Domaene bekommt ihre GPU (ADR-0037): eine
+                        // gedrosselte GPU 0 macht die Prognose fuer GPU 1
+                        // nicht vorsichtiger.
+                        targets
+                            .iter()
+                            .map(|(gpu, _)| state_of(&snapshot, *gpu))
+                            .collect()
                     }
                     Err(reason) => {
                         health.record_failure(&reason);
@@ -2304,12 +2472,14 @@ fn spawn_hardware_probe(tx: &mpsc::Sender<Msg>) {
                             failures = health.consecutive_failures(),
                             "Hardwarezustand nicht lesbar; es wird ohne Geraetezustand geplant"
                         );
-                        StateClass::default()
+                        vec![StateClass::default(); targets.len()]
                     }
                 };
 
-                if tx.blocking_send(Msg::HardwareState { state }).is_err() {
-                    return;
+                // Ein geschlossener Kanal ist ein beendeter Actor; die anderen
+                // hoeren weiter zu. Sind alle zu, endet die Schleife oben.
+                for ((_, tx), state) in targets.iter().zip(states) {
+                    let _ = tx.blocking_send(Msg::HardwareState { state });
                 }
                 std::thread::sleep(backoff);
             }
@@ -2323,6 +2493,33 @@ fn spawn_hardware_probe(tx: &mpsc::Sender<Msg>) {
             },
             |_handle| (),
         );
+}
+
+/// Der beobachtete Zustand einer GPU, ohne Belegungsgrad.
+///
+/// Fehlt die GPU im Abzug, ist ihr Zustand unbekannt — nicht der einer
+/// anderen.
+fn state_of(snapshot: &vig_platform::HardwareSnapshot, gpu_index: u32) -> StateClass {
+    snapshot
+        .gpu(gpu_index)
+        .map_or_else(StateClass::default, |gpu| StateClass {
+            // Der Belegungsgrad kommt vom Kern, nicht von hier.
+            occupancy: 0,
+            throttle: if gpu.limiting_reasons().is_empty() {
+                ThrottleClass::Nominal
+            } else {
+                ThrottleClass::Limited
+            },
+            // Beide Takte, nicht nur das Rechenwerk: eine Karte, die den
+            // Speicher heruntertaktet, sah sonst aus wie eine bei vollem Takt
+            // (R07).
+            clock: ClockClass::from_two_clocks(
+                gpu.clock_sm_mhz.value().copied(),
+                gpu.clock_sm_max_mhz.value().copied(),
+                gpu.clock_mem_mhz.value().copied(),
+                gpu.clock_mem_max_mhz.value().copied(),
+            ),
+        })
 }
 
 /// Die Fortschrittsbuchhaltung eines Governors ueber alle zerlegten Auftraege
