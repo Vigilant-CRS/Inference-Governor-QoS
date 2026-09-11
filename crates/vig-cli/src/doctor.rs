@@ -550,11 +550,21 @@ fn check_security(resolved: &Resolved) -> Verdict {
     let s = &resolved.security;
     let mut verdict = Verdict::Ready;
 
+    let identity_checked = s.client_ca.is_some() || s.token_file.is_some();
     if s.tls_enabled() {
         if s.client_ca.is_some() {
             ok("TLS mit Clientzertifikaten (mTLS)");
+        } else if s.token_file.is_some() {
+            ok("TLS aktiv; Clients werden per Token geprueft");
         } else {
-            ok("TLS aktiv; Clients werden nicht per Zertifikat geprueft");
+            // Security-Review M3: TLS allein galt hier als geschuetzt.
+            warn(
+                "TLS aktiv, aber niemand wird geprueft: TLS verschluesselt, es \
+                 authentifiziert nicht. `serve` verweigert damit einen Start \
+                 ausserhalb von Loopback (ohne --insecure-open); `client_ca` oder \
+                 `token_file` einrichten.",
+            );
+            verdict = verdict.max(Verdict::ReadyWithWarnings);
         }
     }
     if s.token_file.is_some() {
@@ -563,11 +573,25 @@ fn check_security(resolved: &Resolved) -> Verdict {
     if !s.tls_enabled() && s.token_file.is_none() {
         warn(
             "Keine Zugangspruefung eingerichtet. Das ist fuer Loopback in Ordnung — \
-             `serve` bindet dort per Voreinstellung. Wird der Endpunkt geoeffnet, \
-             uebernimmt jeder im Netz die Steuerung der GPU: dann `backend.security` \
-             einrichten oder eine authentifizierende Instanz davorstellen.",
+             `serve` bindet dort per Voreinstellung und verweigert ohne \
+             Identitaetspruefung jeden anderen Start (ausser mit --insecure-open). \
+             Soll der Endpunkt ins Netz, `backend.security` einrichten.",
         );
         verdict = verdict.max(Verdict::ReadyWithWarnings);
+    }
+    if s.admin_token_file.is_some() {
+        ok("Administrationsendpunkte nur mit Administrationstoken");
+    } else {
+        ok("Administrationsendpunkte gesperrt (kein admin_token_file)");
+    }
+    if !identity_checked && resolved.trust == vig_config::schema::TrustMode::Strict {
+        fail(
+            "trust: strict ohne Identitaetspruefung: der strikte Modus schuetzt vor \
+             fremden Aufrufern, kann sie ohne mTLS (`client_ca`) oder Token \
+             (`token_file`) aber nicht unterscheiden — auch Shared-Memory-Regionen \
+             gehoeren dann allen gemeinsam.",
+        );
+        verdict = verdict.max(Verdict::NotReady);
     }
     if resolved.trust == vig_config::schema::TrustMode::Open {
         warn(
@@ -870,9 +894,44 @@ async fn check_backend(resolved: &Resolved, offline: bool) -> Verdict {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::panic)]
 
-    use super::{Verdict, check_decomposition_cost, check_preemption};
+    use super::{Verdict, check_decomposition_cost, check_preemption, check_security};
     use vig_config::Config;
-    use vig_config::schema::Resolved;
+    use vig_config::schema::{Resolved, SecurityConfig, TrustMode};
+
+    /// Security-Review M3: TLS allein verschluesselt, prueft aber niemanden.
+    /// Der `doctor` darf das nicht als geschuetzt melden — und `strict` ohne
+    /// Identitaetspruefung ist nicht bereit, weil der Modus Aufrufer
+    /// unterscheiden soll, die er gar nicht kennt.
+    #[test]
+    fn tls_alone_is_not_an_identity_check() {
+        // Strikt, damit die Warnung zu `trust: open` nichts ueberdeckt.
+        let mut resolved = resolved_with(200, 4);
+        resolved.trust = TrustMode::Strict;
+
+        resolved.security.tls_cert = Some("server.pem".into());
+        resolved.security.tls_key = Some("server.key".into());
+        assert_eq!(
+            check_security(&resolved),
+            Verdict::NotReady,
+            "TLS allein prueft niemanden"
+        );
+
+        resolved.security.client_ca = Some("clients.pem".into());
+        assert_eq!(check_security(&resolved), Verdict::Ready, "mTLS prueft");
+
+        resolved.security = SecurityConfig::default();
+        assert_eq!(check_security(&resolved), Verdict::NotReady, "gar nichts");
+
+        resolved.security.token_file = Some("tokens".into());
+        assert_eq!(check_security(&resolved), Verdict::Ready, "Token pruefen");
+
+        // Offen und nur TLS: bereit, aber nicht ohne Warnung.
+        resolved.trust = TrustMode::Open;
+        resolved.security = SecurityConfig::default();
+        resolved.security.tls_cert = Some("server.pem".into());
+        resolved.security.tls_key = Some("server.key".into());
+        assert_eq!(check_security(&resolved), Verdict::ReadyWithWarnings);
+    }
 
     /// Ein Detektor (15 ms p99 bei 110 % Marge, 33 ms Frist) und ein
     /// praemptierbares VLM mit dieser Restblockierung und Herkunft.

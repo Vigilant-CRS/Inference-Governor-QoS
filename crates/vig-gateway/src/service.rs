@@ -4,6 +4,11 @@
 //!
 //! * **Konfiguriert.** Der Request laeuft durch den Scheduler: Frische,
 //!   Deadline, Zulassung, Variantenwahl.
+//! * **Unkonfiguriert.** Der Request wird unveraendert durchgereicht
+//!   (Spec L-002). Das ist keine Notloesung, sondern die Integrationszusage:
+//!   ein Kunde stellt den Endpunkt um und konfiguriert erst danach Modell fuer
+//!   Modell die QoS-Regeln. Auch dort gilt das Nutzlastbudget.
+//!
 //! ## Warum die Methodenkoerper geboxt sind
 //!
 //! Die generierten OIP-Typen sind gross; ein Dienstfuture, das mehrere davon
@@ -13,14 +18,19 @@
 //! Folge. `Box::pin` legt den Koerper auf den Heap und laesst im aeusseren
 //! Future nur einen Zeiger zurueck.
 //!
-//! * **Unkonfiguriert.** Der Request wird unveraendert durchgereicht
-//!   (Spec L-002). Das ist keine Notloesung, sondern die Integrationszusage:
-//!   ein Kunde stellt den Endpunkt um und konfiguriert erst danach Modell fuer
-//!   Modell die QoS-Regeln.
+//! ## Was dieser Dienst schuetzt (docs/security.md)
+//!
+//! * **Zugang** — [`Gate`], als Interceptor vor dem Dekodieren und hier noch
+//!   einmal.
+//! * **Administration** — Endpunkte, die den Zustand des Backends aendern,
+//!   nur mit Administrationstoken (Security-Review H3).
+//! * **Shared Memory** — Schluesselpraefix, Besitz, Obergrenze, und unter
+//!   `trust: strict` nur eigene Regionen in Inferenzen (H2, M4, N7).
 
-use crate::actor::Handle;
+use crate::actor::{GraphRequest, Handle};
+use crate::auth::{Gate, Identity, Tokens};
 use crate::clock::MonotonicClock;
-use crate::shm::{Region, ShmRegistry};
+use crate::shm::{Refusal, Region, ShmRegistry, check_extent, check_key};
 use vig_backend_triton::TritonClient;
 use vig_config::schema::{Resolved, TrustMode};
 use vig_core::{Criticality, Duration, PayloadRef, RequestDescriptor, RequestId, SupersessionKey};
@@ -31,6 +41,7 @@ use vig_protocol_oip::inference::grpc_inference_service_server::GrpcInferenceSer
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tonic::{Request, Response, Status};
+use vig_protocol_oip::inference::infer_parameter::ParameterChoice;
 #[allow(clippy::wildcard_imports)]
 use vig_protocol_oip::inference::*;
 use vig_protocol_oip::params::{self, GenerationSource, HintRequest, VigParams};
@@ -38,6 +49,17 @@ use vig_protocol_oip::params::{self, GenerationSource, HintRequest, VigParams};
 /// Hoechstalter, ab dem ein Client-Zeitstempel als „aus einer anderen Uhr"
 /// gilt, wenn das Modell kein `max_age` konfiguriert hat (ADR-0011).
 const DEFAULT_PLAUSIBLE_AGE: Duration = Duration::from_nanos_unbounded(5_000_000_000);
+
+/// Der Tensorparameter, mit dem OIP eine Shared-Memory-Region nennt.
+pub const SHM_REGION_PARAM: &str = "shared_memory_region";
+
+/// Wie oft hoechstens eine Warnung ueber unplausible Client-Zeitstempel
+/// geschrieben wird (Security-Review N5).
+///
+/// Die Warnung beschreibt einen Integrationsfehler, keinen Einzelfall. Je
+/// Request geschrieben, flutet ein fehlkonfigurierter oder boeswilliger
+/// Client das Log; gezaehlt wird trotzdem jeder.
+const GENERATION_WARNING_INTERVAL_NS: u64 = 10_000_000_000;
 
 /// Der OIP-Dienst des Gateways.
 #[derive(Debug)]
@@ -49,7 +71,12 @@ pub struct GatewayService {
     next_id: AtomicU64,
     shm: ShmRegistry,
     budget: crate::budget::PayloadBudget,
-    tokens: Option<crate::auth::Tokens>,
+    gate: Gate,
+    /// Unplausible Client-Zeitstempel seit dem Start.
+    generation_warnings: AtomicU64,
+    /// Wann zuletzt darueber geschrieben wurde, in Nanosekunden der
+    /// Dienstuhr; `0` heisst nie.
+    last_generation_warning: AtomicU64,
 }
 
 /// Die Nutzlastgroesse eines Requests.
@@ -101,6 +128,27 @@ fn tensor_content_bytes(c: &InferTensorContents) -> u64 {
         )
 }
 
+/// Die Shared-Memory-Regionen, die ein Request nennt — in Ein- und Ausgaben.
+fn region_references(request: &ModelInferRequest) -> Vec<&str> {
+    fn named(parameters: &std::collections::HashMap<String, InferParameter>) -> Option<&str> {
+        match &parameters.get(SHM_REGION_PARAM)?.parameter_choice {
+            Some(ParameterChoice::StringParam(name)) => Some(name.as_str()),
+            _ => None,
+        }
+    }
+    request
+        .inputs
+        .iter()
+        .filter_map(|i| named(&i.parameters))
+        .chain(request.outputs.iter().filter_map(|o| named(&o.parameters)))
+        .collect()
+}
+
+/// Ob ein Hinweis mit dieser Geltungsdauer angenommen wird (N6).
+fn hint_ttl_allowed(ttl: Duration, max: Option<Duration>) -> bool {
+    max.is_none_or(|max| ttl <= max)
+}
+
 impl GatewayService {
     /// Baut den Dienst.
     #[must_use]
@@ -111,28 +159,46 @@ impl GatewayService {
         clock: MonotonicClock,
     ) -> Self {
         let limit = config.max_inflight_bytes;
+        let regions = config.security.max_shm_regions;
         Self {
             config,
             backend,
             scheduler,
             clock,
             next_id: AtomicU64::new(1),
-            shm: ShmRegistry::new(),
+            shm: ShmRegistry::with_limit(regions),
             budget: crate::budget::PayloadBudget::new(limit),
-            tokens: None,
+            gate: Gate::default(),
+            generation_warnings: AtomicU64::new(0),
+            last_generation_warning: AtomicU64::new(0),
         }
     }
 
     /// Schaltet die Bearer-Token-Pruefung ein.
     ///
     /// Ohne Aufruf ist sie aus. Bewusst als eigener Schritt und nicht aus der
-    /// Konfiguration gelesen: der Dienst laedt keine Dateien: das tut der
+    /// Konfiguration gelesen: der Dienst laedt keine Dateien; das tut der
     /// Aufrufer, und er kann einen Ladefehler melden, bevor irgendetwas
     /// lauscht.
     #[must_use]
-    pub fn with_tokens(mut self, tokens: crate::auth::Tokens) -> Self {
-        self.tokens = Some(tokens);
+    pub fn with_tokens(mut self, tokens: Tokens) -> Self {
+        self.gate = self.gate.with_tokens(tokens);
         self
+    }
+
+    /// Hinterlegt die Administrationstoken (Security-Review H3).
+    ///
+    /// Ohne sie sind die Administrationsendpunkte gesperrt.
+    #[must_use]
+    pub fn with_admin_tokens(mut self, admin: Tokens) -> Self {
+        self.gate = self.gate.with_admin(admin);
+        self
+    }
+
+    /// Die Zugangspruefung, fuer den Interceptor vor dem Dekodieren.
+    #[must_use]
+    pub fn gate(&self) -> Gate {
+        self.gate.clone()
     }
 
     /// Der Griff auf den Scheduler-Actor.
@@ -144,11 +210,34 @@ impl GatewayService {
         self.scheduler.clone()
     }
 
+    /// Wie viele unplausible Client-Zeitstempel seit dem Start kamen.
+    #[must_use]
+    pub fn generation_warnings(&self) -> u64 {
+        self.generation_warnings.load(Ordering::Relaxed)
+    }
+
     /// Prueft die Zugangsberechtigung einer Anfrage.
     fn authorize<T>(&self, request: &Request<T>) -> Result<(), Status> {
-        match &self.tokens {
-            Some(tokens) => tokens.check(request),
-            None => Ok(()),
+        self.gate.admit(request)
+    }
+
+    /// Prueft, ob eine Anfrage einen Administrationsendpunkt nutzen darf.
+    ///
+    /// Die Endpunkte aendern den Zustand des Backends: Modelle laden und
+    /// entladen, Tracing, Loglevel, CUDA-Speicher. Mit
+    /// `--model-control-mode=explicit` entlaedt sonst jeder Inferenzclient das
+    /// geschuetzte Modell — ein Denial of Service mit einem einzigen Aufruf.
+    /// Deshalb gesperrt, bis ein Administrationstoken hinterlegt ist und
+    /// vorgelegt wird, in jedem Vertrauensmodus.
+    fn require_admin<T>(&self, request: &Request<T>) -> Result<(), Status> {
+        self.authorize(request)?;
+        if self.gate.is_admin(request) {
+            Ok(())
+        } else {
+            Err(Status::permission_denied(
+                "Administrationsendpunkt: nur mit Administrationstoken \
+                 (backend.security.admin_token_file)",
+            ))
         }
     }
 
@@ -195,20 +284,43 @@ impl GatewayService {
             .map_err(|e| Status::unavailable(e.to_string()))
     }
 
-    /// Baut die Scheduling-Metadaten aus Request und Konfiguration.
+    /// Unter `trust: strict`: nennt der Request nur eigene Regionen?
     ///
-    /// Was der Client angibt, gewinnt; was er weglaesst, kommt aus dem Vertrag
-    /// (Spec 16.3). Ein fehlerhafter Parameter fuehrt zur Ablehnung, nicht zu
-    /// einem stillen Default.
+    /// Eine Region, die ein anderer Aufrufer registriert hat — oder die
+    /// niemand ueber diesen Governor registriert hat —, darf in keiner
+    /// Inferenz stehen. Als Eingabe laesen die Frames eines anderen, als
+    /// Ausgabe schriebe das Backend in fremden Speicher (Security-Review H2).
+    fn check_region_references(
+        &self,
+        request: &ModelInferRequest,
+        identity: Identity,
+    ) -> Result<(), Status> {
+        if self.config.trust != TrustMode::Strict {
+            return Ok(());
+        }
+        for name in region_references(request) {
+            if self.shm.owner_of(name) != Some(identity) {
+                return Err(Status::permission_denied(format!(
+                    "die Region {name} wurde nicht von diesem Aufrufer ueber den \
+                     Governor registriert; im strikten Modus nennt eine Inferenz \
+                     nur eigene Regionen"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Reicht einen mitgegebenen Anwendungshinweis an den Kern durch (NV-18).
     ///
     /// Die Kennung kommt aus der Zugangsschicht und nicht aus dem Request:
     /// ADR-0029 verlangt, dass sie **belegt** und nicht behauptet wird. Ohne
-    /// belegte Kennung — also ohne hinterlegte Token — passiert hier nichts.
+    /// belegte Kennung — also ohne benanntes Token — passiert hier nichts.
     ///
     /// Ebenso ohne Geltungsdauer: ein Hinweis ohne Frist gaebe es nach
     /// ADR-0029 gar nicht, und einen Standardwert zu erfinden hiesse, eine
-    /// Dauer zu setzen, die niemand vereinbart hat.
+    /// Dauer zu setzen, die niemand vereinbart hat. Und nicht mit einer
+    /// Frist ueber `hints.max_ttl_ms`: das waere eine dauerhafte
+    /// Vertragsaenderung durch die Anwendung (Security-Review N6).
     fn offer_hint_from(
         &self,
         model: vig_core::ModelIdx,
@@ -224,6 +336,14 @@ impl GatewayService {
         let (Some(requested), Some(ttl)) = (params.hint, params.hint_ttl) else {
             return;
         };
+        if !hint_ttl_allowed(ttl, self.config.hint_max_ttl) {
+            tracing::debug!(
+                model = model.get(),
+                ttl_ms = ttl.as_nanos().checked_div(1_000_000).unwrap_or(0),
+                "Anwendungshinweis verworfen: Geltungsdauer ueber hints.max_ttl_ms"
+            );
+            return;
+        }
         let kind = match requested {
             HintRequest::ActionHorizon(holds_for) => {
                 vig_core::hints::HintKind::ActionHorizon { holds_for }
@@ -240,30 +360,28 @@ impl GatewayService {
         });
     }
 
-    /// Meldet einen Auftrag im Abhaengigkeitsgraphen an (NV-17, ADR-0028).
+    /// Die Anmeldung eines Auftrags im Abhaengigkeitsgraphen (NV-17, ADR-0028).
     ///
     /// Die Kennung ist das `id`-Feld des OIP-Requests, als Zahl gelesen — die
     /// Groesse, die der Client ohnehin fuehrt und in `vig_depends_on` wieder
-    /// nennt. Ohne `vig_capture_id` gibt es nichts anzumelden.
+    /// nennt. Ohne `vig_capture_id` gibt es nichts anzumelden. Geprueft wird
+    /// die Zusammenfuehrung im Actor, zusammen mit der Ankunft.
     ///
     /// # Errors
     ///
-    /// `FailedPrecondition`, wenn die Eltern zu verschiedenen Aufnahmen
-    /// gehoeren oder einer unbekannt ist. `InvalidArgument`, wenn eine
-    /// Zusammenfuehrung angemeldet wird, ohne dass der Request eine lesbare
-    /// Kennung traegt — dann koennte niemand ihn spaeter als Elternteil
-    /// nennen.
-    async fn register_in_graph(
-        &self,
-        model: vig_core::ModelIdx,
+    /// `InvalidArgument`, wenn eine Zusammenfuehrung angemeldet wird, ohne
+    /// dass der Request eine Aufnahme oder eine lesbare Kennung traegt — dann
+    /// koennte niemand ihn spaeter als Elternteil nennen.
+    fn graph_request(
         request: &ModelInferRequest,
-    ) -> Result<(), Status> {
+        identity: Identity,
+    ) -> Result<Option<GraphRequest>, Status> {
         let Ok(params): Result<VigParams, _> = params::extract(&request.parameters) else {
-            return Ok(());
+            return Ok(None);
         };
         let Some(capture) = params.capture_id else {
             if params.depends_on.is_empty() {
-                return Ok(());
+                return Ok(None);
             }
             return Err(Status::invalid_argument(
                 "vig_depends_on ohne vig_capture_id: eine Zusammenfuehrung \
@@ -276,16 +394,47 @@ impl GatewayService {
                  ohne sie kann kein spaeterer Auftrag diesen als Elternteil nennen",
             ));
         };
-        self.scheduler
-            .fuse(
-                model,
-                vig_core::dag::CaptureId(capture),
-                id,
-                params.depends_on,
-            )
-            .await
+        Ok(Some(GraphRequest {
+            owner: identity.0,
+            capture: vig_core::dag::CaptureId(capture),
+            id,
+            parents: params.depends_on,
+        }))
     }
 
+    /// Meldet einen unplausiblen Client-Zeitstempel — gedrosselt (N5).
+    ///
+    /// Der haeufigste Integrationsfehler: der Parameter ist gesetzt, stammt
+    /// aber aus einer anderen Zeitbasis. Ohne Meldung arbeitet Vigilant stumm
+    /// ohne die Semantik, fuer die er da ist; mit einer Meldung je Request
+    /// flutet ein einzelner Client das Log.
+    fn warn_generation(&self, model: vig_core::ModelIdx, what: &'static str) {
+        let total = self
+            .generation_warnings
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        let now = self.clock.now().as_nanos().max(1);
+        let last = self.last_generation_warning.load(Ordering::Relaxed);
+        let due = last == 0 || now.saturating_sub(last) >= GENERATION_WARNING_INTERVAL_NS;
+        if due
+            && self
+                .last_generation_warning
+                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            tracing::warn!(
+                model = model.get(),
+                total,
+                "{what} (hoechstens eine Meldung je 10 s; `total` zaehlt alle)"
+            );
+        }
+    }
+
+    /// Baut die Scheduling-Metadaten aus Request und Konfiguration.
+    ///
+    /// Was der Client angibt, gewinnt; was er weglaesst, kommt aus dem Vertrag
+    /// (Spec 16.3). Ein fehlerhafter Parameter fuehrt zur Ablehnung, nicht zu
+    /// einem stillen Default.
     fn build_descriptor(
         &self,
         model: vig_core::ModelIdx,
@@ -310,22 +459,16 @@ impl GatewayService {
         match source {
             GenerationSource::ArrivalFallback {
                 rejected_client_value: true,
-            } => {
-                // Der haeufigste Integrationsfehler: der Parameter ist gesetzt,
-                // stammt aber aus einer anderen Zeitbasis. Ohne diese Meldung
-                // arbeitet Vigilant stumm ohne die Semantik, fuer die er da ist.
-                tracing::warn!(
-                    model = model.get(),
-                    "Generation-Time des Clients liegt in der Zukunft und wurde verworfen; Ankunftszeit wird verwendet"
-                );
-            }
-            GenerationSource::ClampedAge => {
-                tracing::warn!(
-                    model = model.get(),
-                    plausible_ms = plausible.as_nanos().checked_div(1_000_000).unwrap_or(0),
-                    "Generation-Time des Clients ist unplausibel alt; auf die Plausibilitaetsgrenze geklemmt"
-                );
-            }
+            } => self.warn_generation(
+                model,
+                "Generation-Time des Clients liegt in der Zukunft und wurde verworfen; \
+                 Ankunftszeit wird verwendet",
+            ),
+            GenerationSource::ClampedAge => self.warn_generation(
+                model,
+                "Generation-Time des Clients ist unplausibel alt; auf die \
+                 Plausibilitaetsgrenze geklemmt",
+            ),
             GenerationSource::ArrivalFallback {
                 rejected_client_value: false,
             }
@@ -363,25 +506,33 @@ impl GatewayService {
             decomposable: false,
         })
     }
-}
 
-#[tonic::async_trait]
-impl GrpcInferenceService for GatewayService {
-    async fn model_infer(
+    fn budget_exhausted(&self, bytes: u64) -> Status {
+        Status::resource_exhausted(format!(
+            "Nutzlastbudget erschoepft: {bytes} Bytes angefordert, Obergrenze \
+             {} Bytes",
+            self.config.max_inflight_bytes
+        ))
+    }
+
+    async fn infer(
         &self,
         request: Request<ModelInferRequest>,
-    ) -> Result<Response<ModelInferResponse>, Status> {
+    ) -> Result<ModelInferResponse, Status> {
         // Vor allem anderen: unautorisierte Arbeit soll nicht einmal die
         // Parameter kosten, die ihr Auslesen braucht.
         self.authorize(&request)?;
-        // Die belegte Kennung des Aufrufers, bevor der Request verbraucht
-        // wird (NV-18). Ohne hinterlegte Token gibt es keine — und dann auch
-        // keinen Hinweis.
-        let authority = self
-            .tokens
-            .as_ref()
-            .and_then(|tokens| tokens.authority_of(&request));
+        // Identitaet und Hinweis-Kennung, bevor der Request verbraucht wird.
+        let identity = self.gate.identity_of(&request);
+        let authority = self.gate.authority_of(&request);
         let inner = request.into_inner();
+        self.check_region_references(&inner, identity)?;
+
+        // Bytebudget: der Ereigniskanal begrenzt die Anzahl offener Requests,
+        // nicht ihren Speicher. Ohne diese Schranke haelt ein Aufrufer mit
+        // grossen Tensoren den Prozess an die Speicherwand, lange bevor die
+        // Requestzahl auffaellt.
+        let bytes = payload_bytes(&inner);
 
         let Some(model) = self.config.model_index(&inner.model_name) else {
             // Unkonfiguriertes Modell: unveraendert durchreichen (Spec L-002).
@@ -399,20 +550,20 @@ impl GrpcInferenceService for GatewayService {
                     inner.model_name
                 )));
             }
-            return self.raw().await?.model_infer(inner).await;
+            // Auch durchgereicht zaehlt die Nutzlast gegen das Budget, und
+            // zwar bis die Antwort da ist (Security-Review M2). Sonst hebelt
+            // ein grosser Request an ein unkonfiguriertes Modell die
+            // Speichergrenze aus.
+            let Some(permit) = self.budget.try_reserve(bytes) else {
+                return Err(self.budget_exhausted(bytes));
+            };
+            let result = self.raw().await?.model_infer(inner).await;
+            drop(permit);
+            return result.map(Response::into_inner);
         };
 
-        // Bytebudget: der Ereigniskanal begrenzt die Anzahl offener Requests,
-        // nicht ihren Speicher. Ohne diese Schranke haelt ein Aufrufer mit
-        // grossen Tensoren den Prozess an die Speicherwand, lange bevor die
-        // Requestzahl auffaellt.
-        let bytes = payload_bytes(&inner);
         let Some(permit) = self.budget.try_reserve(bytes) else {
-            return Err(Status::resource_exhausted(format!(
-                "Nutzlastbudget erschoepft: {bytes} Bytes angefordert, Obergrenze \
-                 {} Bytes",
-                self.config.max_inflight_bytes
-            )));
+            return Err(self.budget_exhausted(bytes));
         };
 
         // NV-18: ein mitgegebener Hinweis geht an den Kern, bevor der Request
@@ -422,24 +573,37 @@ impl GrpcInferenceService for GatewayService {
         // Request, der ihn mitgebracht hat, nicht scheitern lassen.
         self.offer_hint_from(model, &inner, authority);
 
-        // NV-17: nennt der Client eine Aufnahme, wird der Auftrag im Graphen
-        // gefuehrt — und eine Zusammenfuehrung ueber Aufnahmegrenzen
-        // abgelehnt, **bevor** sie rechnet. Danach waere es eine Feststellung
-        // ueber verbrauchte Zeit. Ohne `vig_capture_id` passiert hier nichts,
-        // und der Governor plant nach Frische allein.
-        self.register_in_graph(model, &inner).await?;
+        // NV-17: nennt der Client eine Aufnahme, meldet sich der Auftrag mit
+        // seiner Ankunft im Graphen an — und eine Zusammenfuehrung ueber
+        // Aufnahmegrenzen wird abgelehnt, **bevor** sie rechnet. Ohne
+        // `vig_capture_id` passiert nichts, und der Governor plant nach
+        // Frische allein.
+        let graph = Self::graph_request(&inner, identity)?;
 
         let descriptor = self.build_descriptor(model, &inner)?;
         let logical = inner.model_name.clone();
         // Der Guard reist mit: das Budget endet mit der Ausfuehrung, nicht mit
         // diesem Aufruf.
-        let mut response = self.scheduler.submit(descriptor, inner, permit).await?;
+        let mut response = self
+            .scheduler
+            .submit_with_graph(descriptor, inner, permit, graph)
+            .await?;
         // Nach aussen existiert nur das logische Modell. Welche Variante
         // gelaufen ist, ist eine interne Entscheidung — steht ihr Name in der
         // Antwort, koppelt sich der Client daran, und die Variantenwahl waere
         // faktisch nicht mehr frei. `model_metadata` haelt es genauso.
         response.model_name = logical;
-        Ok(Response::new(response))
+        Ok(response)
+    }
+}
+
+#[tonic::async_trait]
+impl GrpcInferenceService for GatewayService {
+    async fn model_infer(
+        &self,
+        request: Request<ModelInferRequest>,
+    ) -> Result<Response<ModelInferResponse>, Status> {
+        Box::pin(self.infer(request)).await.map(Response::new)
     }
 
     async fn model_ready(
@@ -478,18 +642,33 @@ impl GrpcInferenceService for GatewayService {
         Ok(Response::new(response))
     }
 
+    /// Lebt der Governor? Lokal beantwortet (Security-Review N3).
+    ///
+    /// Frueher fragte jeder Aufruf das Backend — ungeprueft, und damit ein
+    /// Verstaerker: jeder im Netz konnte Tritons Health-Endpunkt ueber den
+    /// Governor im Takt aufrufen. Ob der Governor lebt, weiss er selbst.
     async fn server_live(
         &self,
         request: Request<ServerLiveRequest>,
     ) -> Result<Response<ServerLiveResponse>, Status> {
-        Box::pin(async move { self.raw().await?.server_live(request.into_inner()).await }).await
+        self.authorize(&request)?;
+        Ok(Response::new(ServerLiveResponse { live: true }))
     }
 
+    /// Kann der Governor etwas ausrichten? Aus seinem eigenen Zustand
+    /// beantwortet: aktive Erreichbarkeitsprobe je Backend und Quarantaene —
+    /// dieselbe Entscheidung wie `/readyz`.
     async fn server_ready(
         &self,
         request: Request<ServerReadyRequest>,
     ) -> Result<Response<ServerReadyResponse>, Status> {
-        Box::pin(async move { self.raw().await?.server_ready(request.into_inner()).await }).await
+        self.authorize(&request)?;
+        let ready = self
+            .scheduler
+            .metrics()
+            .await
+            .is_ok_and(|metrics| crate::exporter::readiness(&metrics).is_ok());
+        Ok(Response::new(ServerReadyResponse { ready }))
     }
 
     async fn server_metadata(
@@ -537,7 +716,7 @@ impl GrpcInferenceService for GatewayService {
         &self,
         request: Request<RepositoryModelLoadRequest>,
     ) -> Result<Response<RepositoryModelLoadResponse>, Status> {
-        self.authorize(&request)?;
+        self.require_admin(&request)?;
         self.raw()
             .await?
             .repository_model_load(request.into_inner())
@@ -548,16 +727,16 @@ impl GrpcInferenceService for GatewayService {
         &self,
         request: Request<RepositoryModelUnloadRequest>,
     ) -> Result<Response<RepositoryModelUnloadResponse>, Status> {
-        self.authorize(&request)?;
+        self.require_admin(&request)?;
         self.raw()
             .await?
             .repository_model_unload(request.into_inner())
             .await
     }
 
-    // Shared-Memory-Endpunkte werden unveraendert durchgereicht. Damit kann ein
-    // Client seine Regionen schon heute registrieren; der Governor beruehrt die
-    // Payload dabei nie (ADR-0003).
+    // Shared-Memory-Endpunkte werden durchgereicht; der Governor beruehrt die
+    // Payload dabei nie (ADR-0003). Registrierung und Abmeldung sind aber
+    // geprueft: Schluesselpraefix, Ausdehnung, Besitz, Obergrenze.
     async fn system_shared_memory_status(
         &self,
         request: Request<SystemSharedMemoryStatusRequest>,
@@ -574,12 +753,34 @@ impl GrpcInferenceService for GatewayService {
         request: Request<SystemSharedMemoryRegisterRequest>,
     ) -> Result<Response<SystemSharedMemoryRegisterResponse>, Status> {
         self.authorize(&request)?;
+        let identity = self.gate.identity_of(&request);
         Box::pin(async move {
             let inner = request.into_inner();
+            if inner.name.is_empty() {
+                return Err(Status::invalid_argument("eine Region braucht einen Namen"));
+            }
+            check_key(&self.config.security.shm_key_prefix, &inner.key)
+                .map_err(Status::invalid_argument)?;
+            check_extent(inner.offset, inner.byte_size).map_err(Status::invalid_argument)?;
+            match self.shm.admit(&inner.name, identity) {
+                Ok(()) => {}
+                Err(Refusal::Foreign) => {
+                    return Err(Status::permission_denied(format!(
+                        "die Region {} gehoert einem anderen Aufrufer",
+                        inner.name
+                    )));
+                }
+                Err(Refusal::Full { limit }) => {
+                    return Err(Status::resource_exhausted(format!(
+                        "hoechstens {limit} Regionen (backend.security.max_shm_regions)"
+                    )));
+                }
+            }
             let region = Region {
                 byte_size: inner.byte_size,
                 offset: inner.offset,
                 cuda: false,
+                owner: identity,
             };
             let name = inner.name.clone();
             let response = self
@@ -600,9 +801,34 @@ impl GrpcInferenceService for GatewayService {
         request: Request<SystemSharedMemoryUnregisterRequest>,
     ) -> Result<Response<SystemSharedMemoryUnregisterResponse>, Status> {
         self.authorize(&request)?;
+        let identity = self.gate.identity_of(&request);
+        let admin = self.gate.is_admin(&request);
         Box::pin(async move {
             let inner = request.into_inner();
             let name = inner.name.clone();
+            // Ein leerer Name heisst im Protokoll „alle Regionen" — auch die
+            // aller anderen Clients (Security-Review M4).
+            if name.is_empty() && !admin {
+                return Err(Status::permission_denied(
+                    "alle Regionen abmelden nur mit Administrationstoken",
+                ));
+            }
+            if !name.is_empty() && !admin {
+                match self.shm.owner_of(&name) {
+                    Some(owner) if owner != identity => {
+                        return Err(Status::permission_denied(format!(
+                            "die Region {name} gehoert einem anderen Aufrufer"
+                        )));
+                    }
+                    None if self.config.trust == TrustMode::Strict => {
+                        return Err(Status::permission_denied(format!(
+                            "die Region {name} wurde nicht ueber diesen Governor \
+                             registriert; im strikten Modus meldet nur ihr Besitzer ab"
+                        )));
+                    }
+                    _ => {}
+                }
+            }
             let response = self
                 .raw()
                 .await?
@@ -625,11 +851,13 @@ impl GrpcInferenceService for GatewayService {
             .await
     }
 
+    // CUDA-Speicher wird ueber Geraetehandles registriert, die der Governor
+    // weder pruefen noch einem Besitzer zuordnen kann. Deshalb Administration.
     async fn cuda_shared_memory_register(
         &self,
         request: Request<CudaSharedMemoryRegisterRequest>,
     ) -> Result<Response<CudaSharedMemoryRegisterResponse>, Status> {
-        self.authorize(&request)?;
+        self.require_admin(&request)?;
         self.raw()
             .await?
             .cuda_shared_memory_register(request.into_inner())
@@ -640,7 +868,7 @@ impl GrpcInferenceService for GatewayService {
         &self,
         request: Request<CudaSharedMemoryUnregisterRequest>,
     ) -> Result<Response<CudaSharedMemoryUnregisterResponse>, Status> {
-        self.authorize(&request)?;
+        self.require_admin(&request)?;
         self.raw()
             .await?
             .cuda_shared_memory_unregister(request.into_inner())
@@ -651,7 +879,7 @@ impl GrpcInferenceService for GatewayService {
         &self,
         request: Request<TraceSettingRequest>,
     ) -> Result<Response<TraceSettingResponse>, Status> {
-        self.authorize(&request)?;
+        self.require_admin(&request)?;
         Box::pin(async move { self.raw().await?.trace_setting(request.into_inner()).await }).await
     }
 
@@ -659,7 +887,7 @@ impl GrpcInferenceService for GatewayService {
         &self,
         request: Request<LogSettingsRequest>,
     ) -> Result<Response<LogSettingsResponse>, Status> {
-        self.authorize(&request)?;
+        self.require_admin(&request)?;
         Box::pin(async move { self.raw().await?.log_settings(request.into_inner()).await }).await
     }
 
@@ -703,5 +931,54 @@ mod tokio_stream_placeholder {
         fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
             Poll::Ready(None)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
+
+    use super::*;
+
+    fn ms(v: u64) -> Duration {
+        Duration::from_millis(v).unwrap()
+    }
+
+    /// N6: ein Hinweis mit einer Frist ueber der Obergrenze wird verworfen.
+    #[test]
+    fn a_hint_longer_than_the_limit_is_dropped() {
+        assert!(hint_ttl_allowed(ms(500), Some(ms(60_000))));
+        assert!(hint_ttl_allowed(ms(60_000), Some(ms(60_000))));
+        assert!(!hint_ttl_allowed(ms(60_001), Some(ms(60_000))));
+        // Ohne Hinweisblock gibt es auch keine Obergrenze — und keine Hinweise.
+        // Die laengste Spanne, die es ueberhaupt gibt: eine Stunde.
+        assert!(hint_ttl_allowed(Duration::MAX_CONTRACT, None));
+    }
+
+    /// H2: Regionen stehen in Ein- **und** Ausgaben.
+    #[test]
+    fn region_references_are_found_in_inputs_and_outputs() {
+        let region = |name: &str| {
+            let mut p = std::collections::HashMap::new();
+            p.insert(
+                SHM_REGION_PARAM.to_owned(),
+                InferParameter {
+                    parameter_choice: Some(ParameterChoice::StringParam(name.to_owned())),
+                },
+            );
+            p
+        };
+        let request = ModelInferRequest {
+            inputs: vec![model_infer_request::InferInputTensor {
+                parameters: region("in"),
+                ..Default::default()
+            }],
+            outputs: vec![model_infer_request::InferRequestedOutputTensor {
+                parameters: region("out"),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(region_references(&request), vec!["in", "out"]);
     }
 }

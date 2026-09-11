@@ -32,6 +32,7 @@ pub(crate) async fn run(
     path: &Path,
     listen: &str,
     metrics: &str,
+    insecure_open: bool,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let text = std::fs::read_to_string(path)?;
     let config = Config::from_yaml(&text)?;
@@ -85,17 +86,39 @@ pub(crate) async fn run(
         let tokens = vig_gateway::auth::Tokens::load(path)
             .map_err(|e| format!("{}: {e}", path.display()))?;
         tracing::info!(tokens = tokens.len(), "Bearer-Token-Pruefung aktiv");
-        // Die Kennungen, die diese Token belegen (NV-18). Der Betreiber
-        // braucht die Zahl fuer `backend.hints.authority`; ohne sie waere die
-        // Hinweispolicy zwar konfigurierbar, aber nicht ausfuellbar. Die
-        // Token selbst stehen hier nicht.
-        for authority in tokens.authorities() {
+        // Die Kennungen der benannten Token (NV-18). Der Betreiber braucht
+        // die Zahl fuer `backend.hints.authority`. Sie kommt aus dem Namen,
+        // nicht aus dem Token: hier steht nichts, woraus sich ein Token
+        // zurueckgewinnen liesse (Security-Review N1).
+        for (label, authority) in tokens.authorities() {
             tracing::info!(
+                %label,
                 authority = authority.0,
-                "Hinweis-Kennung eines hinterlegten Tokens"
+                "Hinweis-Kennung eines benannten Tokens"
+            );
+        }
+        if tokens.unlabeled() > 0 {
+            tracing::info!(
+                unlabeled = tokens.unlabeled(),
+                "Token ohne Namen authentifizieren, geben aber keine \
+                 Anwendungshinweise; `name:token` in der Tokendatei vergibt einen"
             );
         }
         service = service.with_tokens(tokens);
+    }
+    // Administration (Security-Review H3): ohne eigene Tokendatei gesperrt.
+    if let Some(path) = &resolved.security.admin_token_file {
+        let admin = vig_gateway::auth::Tokens::load(path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        tracing::info!(
+            tokens = admin.len(),
+            "Administrationsendpunkte nur mit Administrationstoken"
+        );
+        service = service.with_admin_tokens(admin);
+    } else {
+        tracing::info!(
+            "Administrationsendpunkte gesperrt (kein backend.security.admin_token_file)"
+        );
     }
 
     // Der Metrik-Endpunkt laeuft auf einem eigenen Port und in einem eigenen
@@ -115,17 +138,9 @@ pub(crate) async fn run(
     // Konfigurationspruefung ab; hier gibt es nur noch an oder aus.
     let tls = tls_config(&resolved.security)?;
     let address: std::net::SocketAddr = listen.parse()?;
-    let exposed = !address.ip().is_loopback();
-    match (&tls, exposed) {
-        (Some(_), _) => tracing::info!(mtls = resolved.security.client_ca.is_some(), "TLS aktiv"),
-        (None, true) => tracing::warn!(
-            %address,
-            "Der Endpunkt lauscht ausserhalb von Loopback **ohne TLS**. Jeder im \
-             Netz kann damit die Steuerung der GPU uebernehmen. Entweder \
-             `backend.security` einrichten oder eine authentifizierende \
-             Instanz davorstellen."
-        ),
-        (None, false) => {}
+    exposure_verdict(&address, &resolved.security, insecure_open)?;
+    if tls.is_some() {
+        tracing::info!(mtls = resolved.security.client_ca.is_some(), "TLS aktiv");
     }
     tracing::info!(
         %address,
@@ -139,7 +154,19 @@ pub(crate) async fn run(
     // fuer Steuernachrichten gedacht: 4 MiB Nachrichtengrenze lehnt einen
     // gewoehnlichen Kameraframe ab, und das 64-KiB-HTTP/2-Fenster zwingt bei
     // Tensornutzlasten zu einer Kette von WINDOW_UPDATE-Runden.
-    let mut builder = Server::builder();
+    //
+    // Dazu die Grenzen, die ein Client ohne Token sonst beliebig ausreizt:
+    // Streams je Verbindung, gleichzeitige Anfragen, Frist, Keepalive
+    // (Security-Review M1).
+    let limits = resolved.security.transport;
+    let millis = std::time::Duration::from_millis;
+    let mut builder = Server::builder()
+        .concurrency_limit_per_connection(limits.concurrency_per_connection)
+        .max_concurrent_streams(limits.max_concurrent_streams)
+        .timeout(millis(limits.request_timeout_ms))
+        .http2_keepalive_interval(Some(millis(limits.keepalive_interval_ms)))
+        .http2_keepalive_timeout(Some(millis(limits.keepalive_timeout_ms)))
+        .tcp_keepalive(Some(millis(limits.keepalive_interval_ms)));
     if let Some(tls) = tls {
         builder = builder.tls_config(tls)?;
     }
@@ -157,15 +184,19 @@ pub(crate) async fn run(
     // ist. Ihn direkt abzuwarten hiesse: schliesst tonic seine Verbindungen
     // nicht, steht davor ein unbegrenztes Warten, und die zugesagte
     // Gesamtfrist ab SIGTERM waere keine.
+    // Die Zugangspruefung laeuft als Interceptor **vor** dem Dekodieren: ein
+    // Client ohne Token kostet keine 64-MiB-Nachricht (Security-Review M1).
+    let gate = service.gate();
     let mut server = tokio::spawn(
         builder
             .initial_stream_window_size(STREAM_WINDOW_BYTES)
             .initial_connection_window_size(CONNECTION_WINDOW_BYTES)
-            .add_service(
+            .add_service(tonic::service::interceptor::InterceptedService::new(
                 GrpcInferenceServiceServer::new(service)
                     .max_decoding_message_size(DEFAULT_MAX_MESSAGE_BYTES)
                     .max_encoding_message_size(DEFAULT_MAX_MESSAGE_BYTES),
-            )
+                gate,
+            ))
             .serve_with_shutdown(address, shutdown),
     );
 
@@ -431,6 +462,51 @@ async fn startup_checks(
     Ok(unverified)
 }
 
+/// Darf der Endpunkt so lauschen? (Security-Review M3)
+///
+/// Ausserhalb von Loopback nur, wenn jemand prueft, **wer** anfragt: mTLS
+/// (`client_ca`) oder Token (`token_file`). TLS allein verschluesselt, prueft
+/// aber niemanden — der Governor steuert eine ganze GPU, und ohne
+/// Identitaetspruefung gibt er diese Steuerung an jeden, der ihn erreicht.
+///
+/// `--insecure-open` ist der ausdrueckliche Weg vorbei, fuer genau einen
+/// Fall: einen Container, dessen Port nur auf dem Loopback des Hosts
+/// veroeffentlicht ist.
+///
+/// # Errors
+///
+/// Ein Text, der sagt, was fehlt und wie es behoben wird.
+pub(crate) fn exposure_verdict(
+    address: &std::net::SocketAddr,
+    security: &vig_config::schema::SecurityConfig,
+    insecure_open: bool,
+) -> Result<(), String> {
+    if address.ip().is_loopback() {
+        return Ok(());
+    }
+    if security.client_ca.is_some() || security.token_file.is_some() {
+        return Ok(());
+    }
+    if insecure_open {
+        tracing::warn!(
+            %address,
+            "Der Endpunkt lauscht ausserhalb von Loopback **ohne** \
+             Identitaetspruefung (--insecure-open). Das ist nur richtig, wenn \
+             der Port ausschliesslich auf dem Loopback des Hosts veroeffentlicht \
+             ist."
+        );
+        return Ok(());
+    }
+    Err(format!(
+        "der Endpunkt {address} liegt ausserhalb von Loopback, und weder mTLS \
+         (backend.security.client_ca) noch Token (backend.security.token_file) \
+         pruefen, wer anfragt — jeder, der ihn erreicht, steuert die GPU. TLS \
+         allein verschluesselt, prueft aber niemanden. Eines von beiden \
+         einrichten, oder, nur fuer einen auf Loopback veroeffentlichten \
+         Containerport, --insecure-open angeben."
+    ))
+}
+
 /// Baut die TLS-Konfiguration des Servers, wenn eine hinterlegt ist.
 ///
 /// `None` heisst Klartext. Das ist fuer Loopback die richtige Voreinstellung —
@@ -489,5 +565,60 @@ async fn report_backend_capabilities(backend: &Arc<TritonClient>) {
                  +160 us."
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::exposure_verdict;
+    use vig_config::schema::SecurityConfig;
+
+    fn security(tls: bool, ca: bool, tokens: bool) -> SecurityConfig {
+        SecurityConfig {
+            tls_cert: tls.then(|| "server.pem".into()),
+            tls_key: tls.then(|| "server.key".into()),
+            client_ca: ca.then(|| "ca.pem".into()),
+            token_file: tokens.then(|| "tokens".into()),
+            ..SecurityConfig::default()
+        }
+    }
+
+    fn at(address: &str) -> std::net::SocketAddr {
+        address.parse().unwrap()
+    }
+
+    /// Loopback ist die Grenze, fuer die der Governor gebaut ist.
+    #[test]
+    fn loopback_needs_no_identity_check() {
+        assert!(
+            exposure_verdict(&at("127.0.0.1:9001"), &security(false, false, false), false).is_ok()
+        );
+        assert!(exposure_verdict(&at("[::1]:9001"), &security(false, false, false), false).is_ok());
+    }
+
+    /// M3: ausserhalb von Loopback ohne Identitaetspruefung verweigert —
+    /// auch mit TLS, das verschluesselt, aber niemanden prueft.
+    #[test]
+    fn an_open_endpoint_without_identity_is_refused_even_with_tls() {
+        for tls in [false, true] {
+            let error = exposure_verdict(&at("0.0.0.0:9001"), &security(tls, false, false), false)
+                .unwrap_err();
+            assert!(error.contains("--insecure-open"), "{error}");
+        }
+    }
+
+    /// Token oder mTLS genuegen; `--insecure-open` ist der ausdrueckliche
+    /// Weg vorbei.
+    #[test]
+    fn identity_or_the_explicit_flag_opens_it() {
+        assert!(
+            exposure_verdict(&at("0.0.0.0:9001"), &security(false, false, true), false).is_ok()
+        );
+        assert!(exposure_verdict(&at("0.0.0.0:9001"), &security(true, true, false), false).is_ok());
+        assert!(
+            exposure_verdict(&at("0.0.0.0:9001"), &security(false, false, false), true).is_ok()
+        );
     }
 }

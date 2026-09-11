@@ -572,6 +572,154 @@ models:
     );
 }
 
+/// Ein Backendblock ohne Modelle darum herum, fuer die Grenzen aus dem
+/// Security-Review.
+fn with_backend(backend: &str) -> String {
+    format!(
+        r"
+version: 1
+backend:
+  type: triton
+  grpc_endpoint: 127.0.0.1:8001
+  slots: 1
+  pipelining_depth: 0
+{backend}models:
+  detector:
+    class: protected
+    queue: {{ policy: fifo, capacity: 4 }}
+    contract: {{ deadline_ms: 33 }}
+    variants:
+      - id: main
+        backend_model: rfdetr
+        quality: {{ value: 1.0, source: measured }}
+        profile: {{ p50_us: 15000, p95_us: 17000, p99_us: 17500, samples: 120 }}
+"
+    )
+}
+
+/// Security-Review H2, H3, M1, N6, N7: ohne Angabe gelten sichere Grenzen.
+#[test]
+fn the_security_limits_are_safe_by_default() {
+    use vig_config::schema::{DEFAULT_HINT_MAX_TTL_MS, TransportLimits};
+
+    let resolved = Config::from_yaml(&with_backend(""))
+        .unwrap()
+        .resolve()
+        .unwrap();
+    let security = &resolved.security;
+    assert_eq!(security.shm_key_prefix, "/vig_");
+    assert_eq!(security.max_shm_regions, 256);
+    assert_eq!(
+        security.admin_token_file, None,
+        "ohne Datei bleiben die Administrationsendpunkte gesperrt"
+    );
+    assert_eq!(security.transport, TransportLimits::default());
+    assert_eq!(security.transport.max_concurrent_streams, 256);
+    assert_eq!(resolved.hint_max_ttl, None, "ohne hints-Block kein Hinweis");
+
+    let hints = Config::from_yaml(&with_backend("  hints: { authority: 7 }\n"))
+        .unwrap()
+        .resolve()
+        .unwrap();
+    assert_eq!(
+        hints.hint_max_ttl,
+        vig_core::Duration::from_millis(DEFAULT_HINT_MAX_TTL_MS),
+        "eine Minute, wenn nichts anderes steht"
+    );
+}
+
+/// Was der Betreiber angibt, kommt an — auch teilweise.
+#[test]
+fn the_security_limits_can_be_set() {
+    let text = with_backend(
+        "  hints: { authority: 7, max_ttl_ms: 500 }\n  security:\n    \
+         shm_key_prefix: /robot_\n    max_shm_regions: 4\n    \
+         transport: { max_concurrent_streams: 8, request_timeout_ms: 1000 }\n",
+    );
+    let resolved = Config::from_yaml(&text).unwrap().resolve().unwrap();
+    let security = &resolved.security;
+    assert_eq!(security.shm_key_prefix, "/robot_");
+    assert_eq!(security.max_shm_regions, 4);
+    assert_eq!(security.transport.max_concurrent_streams, 8);
+    assert_eq!(security.transport.request_timeout_ms, 1000);
+    assert_eq!(
+        security.transport.concurrency_per_connection, 64,
+        "nicht genannt: Voreinstellung"
+    );
+    assert_eq!(resolved.hint_max_ttl, vig_core::Duration::from_millis(500));
+}
+
+/// Eine Grenze, die keine ist, wird abgelehnt — nicht still ersetzt.
+#[test]
+fn security_limits_that_would_not_limit_are_refused() {
+    let cases = [
+        (
+            "  security:\n    shm_key_prefix: \"\"\n",
+            "backend.security.shm_key_prefix",
+        ),
+        (
+            "  security:\n    shm_key_prefix: /\n",
+            "backend.security.shm_key_prefix",
+        ),
+        (
+            "  security:\n    shm_key_prefix: vig_\n",
+            "backend.security.shm_key_prefix",
+        ),
+        (
+            "  security:\n    shm_key_prefix: /a/b\n",
+            "backend.security.shm_key_prefix",
+        ),
+        (
+            "  security:\n    max_shm_regions: 0\n",
+            "backend.security.max_shm_regions",
+        ),
+        (
+            "  security:\n    transport: { max_concurrent_streams: 0 }\n",
+            "backend.security.transport.max_concurrent_streams",
+        ),
+        (
+            "  security:\n    transport: { concurrency_per_connection: 0 }\n",
+            "backend.security.transport.concurrency_per_connection",
+        ),
+        (
+            "  security:\n    transport: { request_timeout_ms: 0 }\n",
+            "backend.security.transport.request_timeout_ms",
+        ),
+        (
+            "  security:\n    transport: { keepalive_timeout_ms: 0 }\n",
+            "backend.security.transport.keepalive_timeout_ms",
+        ),
+        (
+            "  security:\n    admin_token_file: /nonexistent/admin.tokens\n",
+            "backend.security.admin_token_file",
+        ),
+        (
+            "  hints: { authority: 7, max_ttl_ms: 0 }\n",
+            "backend.hints.max_ttl_ms",
+        ),
+        (
+            "  hints: { authority: 7, max_ttl_ms: 3600001 }\n",
+            "backend.hints.max_ttl_ms",
+        ),
+    ];
+    for (backend, path) in cases {
+        let findings = Config::from_yaml(&with_backend(backend))
+            .unwrap()
+            .diagnose();
+        assert!(
+            findings.iter().any(|f| f.to_string().starts_with(path)),
+            "erwartet ein Befund an {path}, gefunden: {findings:?}"
+        );
+    }
+    // Ein vertippter Transportschluessel wuerde sonst ignoriert.
+    assert!(
+        Config::from_yaml(&with_backend(
+            "  security:\n    transport: { streams: 8 }\n"
+        ))
+        .is_err()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // NV-03 — Profilmanifest v2
 // ---------------------------------------------------------------------------

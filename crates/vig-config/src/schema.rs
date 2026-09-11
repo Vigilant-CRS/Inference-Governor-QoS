@@ -219,7 +219,18 @@ pub struct HintsConfig {
     /// Millisekunden.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_action_horizon_ms: Option<u64>,
+    /// Die laengste Geltungsdauer, die ein Hinweis beanspruchen darf, in
+    /// Millisekunden (Security-Review N6). Ohne Angabe eine Minute.
+    ///
+    /// Ein Hinweis mit einer Frist von Jahren waere eine dauerhafte
+    /// Vertragsaenderung durch die Anwendung. Ein laengerer wird verworfen,
+    /// nicht gekuerzt: gekuerzt gaelte er anders, als die Anwendung glaubt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_ttl_ms: Option<u64>,
 }
+
+/// Die Voreinstellung fuer `hints.max_ttl_ms`.
+pub const DEFAULT_HINT_MAX_TTL_MS: u64 = 60_000;
 
 impl HintsConfig {
     /// Uebersetzt die Konfiguration in die Kernform.
@@ -465,7 +476,7 @@ impl IoSignature {
 /// der Governor gebaut ist (ein Geraet, ein Betreiber, Loopback), und der
 /// falsche fuer alles andere. Deshalb bindet `vig serve` per Voreinstellung
 /// auf Loopback: wer den Endpunkt oeffnet, muss beides ausdruecklich tun.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SecurityConfig {
     /// Serverzertifikat im PEM-Format.
@@ -485,14 +496,99 @@ pub struct SecurityConfig {
     /// nicht.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_ca: Option<PathBuf>,
-    /// Datei mit erlaubten Bearer-Token, eines je Zeile.
+    /// Datei mit erlaubten Bearer-Token, eines je Zeile: `token` oder
+    /// `name:token`, mindestens 16 Zeichen.
     ///
     /// Die pragmatische Variante fuer Umgebungen ohne Zertifikatsverwaltung.
     /// Leerzeilen und `#`-Kommentare werden ignoriert. Ist die Datei gesetzt,
-    /// wird **jede** Anfrage ohne gueltiges Token abgelehnt — auch die an
-    /// unkonfigurierte Modelle.
+    /// wird **jede gRPC-Anfrage** ohne gueltiges Token abgelehnt — auch die an
+    /// unkonfigurierte Modelle und `ServerLive`/`ServerReady`. Der Metrikport
+    /// (`/metrics`, `/healthz`, `/readyz`) prueft keine Token; er gehoert auf
+    /// Loopback. Anwendungshinweise (NV-18) geben nur **benannte** Token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_file: Option<PathBuf>,
+    /// Datei mit Administrationstoken, im selben Format (Security-Review H3).
+    ///
+    /// Endpunkte, die den Zustand des Backends aendern — Modelle laden und
+    /// entladen, Tracing, Loglevel, CUDA-Shared-Memory, „alle Regionen
+    /// abmelden" —, sind **ohne** diese Datei gesperrt, auch im offenen
+    /// Modus. Ein Administrationstoken gilt auch fuer gewoehnliche Anfragen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_token_file: Option<PathBuf>,
+    /// Praefix, den jeder ueber den Governor registrierte
+    /// Shared-Memory-Schluessel tragen muss (Security-Review H2).
+    ///
+    /// Das Backend sieht das `/dev/shm` des Hosts. Ohne Praefix liesse sich
+    /// ueber den Governor das Segment jedes anderen Prozesses registrieren.
+    #[serde(default = "default_shm_key_prefix")]
+    pub shm_key_prefix: String,
+    /// Wie viele Regionen hoechstens gleichzeitig registriert sind
+    /// (Security-Review N7).
+    #[serde(default = "default_max_shm_regions")]
+    pub max_shm_regions: usize,
+    /// Grenzen des gRPC-Transports (Security-Review M1).
+    #[serde(default)]
+    pub transport: TransportLimits,
+}
+
+impl Default for SecurityConfig {
+    /// Von Hand und nicht abgeleitet: ein abgeleitetes `Default` gaebe einen
+    /// leeren Schluesselpraefix — also gar keinen — und null Regionen.
+    fn default() -> Self {
+        Self {
+            tls_cert: None,
+            tls_key: None,
+            client_ca: None,
+            token_file: None,
+            admin_token_file: None,
+            shm_key_prefix: default_shm_key_prefix(),
+            max_shm_regions: default_max_shm_regions(),
+            transport: TransportLimits::default(),
+        }
+    }
+}
+
+fn default_shm_key_prefix() -> String {
+    "/vig_".to_owned()
+}
+
+const fn default_max_shm_regions() -> usize {
+    256
+}
+
+/// Die Grenzen des gRPC-Transports (Security-Review M1).
+///
+/// Ohne sie haelt ein Client beliebig viele Streams je Verbindung offen, jeden
+/// mit bis zu 64 MiB, oder leere Verbindungen ohne Frist — und erschoepft
+/// Speicher und Dateideskriptoren, bevor ein einziges Token geprueft ist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct TransportLimits {
+    /// Gleichzeitige HTTP/2-Streams je Verbindung.
+    pub max_concurrent_streams: u32,
+    /// Gleichzeitig bearbeitete Anfragen je Verbindung.
+    pub concurrency_per_connection: usize,
+    /// Hoechstdauer einer Anfrage in Millisekunden.
+    ///
+    /// Grosszuegig, weil ein zerlegter generativer Auftrag viele Quanten
+    /// dauern kann; die Frist begrenzt haengende Clients, nicht Inferenzen.
+    pub request_timeout_ms: u64,
+    /// Abstand der HTTP/2- und TCP-Keepalives in Millisekunden.
+    pub keepalive_interval_ms: u64,
+    /// Wie lange auf eine Keepalive-Antwort gewartet wird, in Millisekunden.
+    pub keepalive_timeout_ms: u64,
+}
+
+impl Default for TransportLimits {
+    fn default() -> Self {
+        Self {
+            max_concurrent_streams: 256,
+            concurrency_per_connection: 64,
+            request_timeout_ms: 600_000,
+            keepalive_interval_ms: 30_000,
+            keepalive_timeout_ms: 10_000,
+        }
+    }
 }
 
 /// Wie weit der Governor Aufrufern vertraut.
@@ -566,6 +662,7 @@ impl SecurityConfig {
             ("tls_key", self.tls_key.as_ref()),
             ("client_ca", self.client_ca.as_ref()),
             ("token_file", self.token_file.as_ref()),
+            ("admin_token_file", self.admin_token_file.as_ref()),
         ] {
             if let Some(p) = path
                 && !p.exists()
@@ -578,6 +675,56 @@ impl SecurityConfig {
                 );
             }
         }
+        self.validate_limits(findings);
+    }
+
+    /// Prueft Schluesselpraefix, Regionsgrenze und Transportgrenzen
+    /// (Security-Review H2, M1, N7).
+    fn validate_limits(&self, findings: &mut Vec<Located>) {
+        let prefix = self.shm_key_prefix.as_str();
+        let rest = prefix.strip_prefix('/').unwrap_or("");
+        if rest.is_empty() || rest.contains('/') || rest.contains('\0') {
+            findings.push(
+                ConfigError::OutOfRange {
+                    expected: "ein POSIX-Schluesselpraefix wie \"/vig_\": beginnt mit '/', \
+                               danach mindestens ein Zeichen und kein weiteres '/' — \
+                               ein leerer Praefix erlaubte jeden Schluessel",
+                }
+                .at("backend.security.shm_key_prefix"),
+            );
+        }
+        if self.max_shm_regions == 0 {
+            findings.push(
+                ConfigError::OutOfRange {
+                    expected: "mindestens eine Region",
+                }
+                .at("backend.security.max_shm_regions"),
+            );
+        }
+        let t = &self.transport;
+        for (label, value) in [
+            (
+                "max_concurrent_streams",
+                u64::from(t.max_concurrent_streams),
+            ),
+            (
+                "concurrency_per_connection",
+                u64::try_from(t.concurrency_per_connection).unwrap_or(u64::MAX),
+            ),
+            ("request_timeout_ms", t.request_timeout_ms),
+            ("keepalive_interval_ms", t.keepalive_interval_ms),
+            ("keepalive_timeout_ms", t.keepalive_timeout_ms),
+        ] {
+            if value == 0 {
+                findings.push(
+                    ConfigError::OutOfRange {
+                        expected: "groesser als null; null haette keine Grenze, sondern \
+                                   einen Endpunkt, der nichts annimmt",
+                    }
+                    .at(format!("backend.security.transport.{label}")),
+                );
+            }
+        }
     }
 }
 
@@ -585,6 +732,17 @@ impl BackendConfig {
     /// Prueft die Betriebsgrenzen und gibt das Inferenztimeout zurueck.
     fn limits(&self, findings: &mut Vec<Located>) -> Option<Duration> {
         self.security.validate(findings);
+        if let Some(ttl) = self.hints.as_ref().and_then(|h| h.max_ttl_ms)
+            && (ttl == 0 || vig_core::Duration::from_millis(ttl).is_none())
+        {
+            findings.push(
+                ConfigError::OutOfRange {
+                    expected: "hints.max_ttl_ms zwischen 1 und 3.600.000 (eine Stunde, \
+                               die laengste Vertragsdauer)",
+                }
+                .at("backend.hints.max_ttl_ms"),
+            );
+        }
         match duration_ms(self.inference_timeout_ms, "inference_timeout_ms") {
             Ok(d) => Some(d),
             Err(e) => {
@@ -1290,6 +1448,9 @@ pub struct Resolved {
     pub prediction: vig_core::predictor::Mode,
     /// Die Hinweispolicy des Betreibers (NV-18).
     pub hint_policy: vig_core::hints::HintPolicy,
+    /// Die laengste zulaessige Geltungsdauer eines Hinweises; `None` ohne
+    /// Hinweisblock (Security-Review N6).
+    pub hint_max_ttl: Option<vig_core::Duration>,
     /// Die Aktuationskonfiguration, falls eine gesetzt ist (NV-13).
     pub actuation: Option<ActuationConfig>,
     /// Die gemessene Interferenztabelle (NV-11).
@@ -1732,6 +1893,12 @@ impl Config {
                 .hints
                 .as_ref()
                 .map_or_else(vig_core::hints::HintPolicy::closed, HintsConfig::resolve),
+            hint_max_ttl: self
+                .backend
+                .hints
+                .as_ref()
+                .map(|h| h.max_ttl_ms.unwrap_or(DEFAULT_HINT_MAX_TTL_MS))
+                .and_then(vig_core::Duration::from_millis),
             backend_endpoint: self.backend.grpc_endpoint.clone(),
             slots,
             contracts,

@@ -2,7 +2,9 @@
 # Binary in einem minimalen Image. Kein Rust-Toolchain, kein Cargo-Cache und
 # keine Quellen im Auslieferungsartefakt.
 
-FROM rust:1-bookworm AS build
+# Basisimages per Digest: ein Tag kann sich unter demselben Namen aendern,
+# ein Digest nicht. Dependabot (`.github/dependabot.yml`) schlaegt neue vor.
+FROM rust:1-bookworm@sha256:9a73a5088750b4c95158ab26629c854c3d6fc4b173cb7bc8079ad252d8ed7bfa AS build
 WORKDIR /src
 
 # protoc für die Codegenerierung. Das Build-Skript bevorzugt einen
@@ -15,10 +17,12 @@ RUN apt-get update \
 COPY . .
 RUN cargo build --release -p vig-cli
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 # `curl` ist fuer den Healthcheck da und fuer nichts anderes. Ein Image ohne
 # jede Moeglichkeit, seinen eigenen Bereitschaftsendpunkt abzufragen, laesst
-# sich in einem Rollout nicht sinnvoll pruefen.
+# sich in einem Rollout nicht sinnvoll pruefen. Das ist ein bewusst
+# akzeptiertes Werkzeug im Laufzeitimage (docs/security.md, N7): der Prozess
+# laeuft ohne Root, ohne Capabilities und mit schreibgeschuetztem Dateisystem.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*

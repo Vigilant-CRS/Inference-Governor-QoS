@@ -576,8 +576,126 @@ pub async fn serve(
         .route("/readyz", get(ready_endpoint))
         .with_state(handle);
     let listener = tokio::net::TcpListener::bind(address).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(LimitedListener::new(listener, MAX_METRICS_CONNECTIONS), app).await?;
     Ok(())
+}
+
+/// Wie viele Verbindungen der Metrik-Endpunkt gleichzeitig haelt
+/// (Security-Review N4).
+///
+/// Ein Scraper, ein Healthcheck, ein Mensch mit `curl` — sechzehn reichen.
+/// Ohne Grenze verbrauchen Leerlaufverbindungen die Dateideskriptoren
+/// **desselben Prozesses**, und dann nimmt auch der Inferenzendpunkt nichts
+/// mehr an.
+pub const MAX_METRICS_CONNECTIONS: usize = 16;
+
+/// Ein Listener, der hoechstens `limit` Verbindungen gleichzeitig annimmt.
+///
+/// Weitere Verbindungen bleiben im Backlog des Betriebssystems, bis eine
+/// endet — sie werden nicht abgewiesen, sie warten. Die Genehmigung reist mit
+/// der Verbindung und faellt mit ihr.
+#[derive(Debug)]
+pub struct LimitedListener {
+    inner: tokio::net::TcpListener,
+    permits: std::sync::Arc<tokio::sync::Semaphore>,
+}
+
+impl LimitedListener {
+    /// Begrenzt einen gebundenen Listener.
+    #[must_use]
+    pub fn new(inner: tokio::net::TcpListener, limit: usize) -> Self {
+        Self {
+            inner,
+            permits: std::sync::Arc::new(tokio::sync::Semaphore::new(limit)),
+        }
+    }
+}
+
+impl axum::serve::Listener for LimitedListener {
+    type Io = LimitedStream;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            let Ok(permit) = std::sync::Arc::clone(&self.permits).acquire_owned().await else {
+                // Die Semaphore wird nie geschlossen; ohne sie gibt es nichts
+                // mehr anzunehmen.
+                return std::future::pending().await;
+            };
+            match self.inner.accept().await {
+                Ok((stream, address)) => {
+                    return (
+                        LimitedStream {
+                            stream,
+                            _permit: permit,
+                        },
+                        address,
+                    );
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "Metrikverbindung nicht angenommen");
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.inner.local_addr()
+    }
+}
+
+/// Eine angenommene Verbindung samt ihrer Genehmigung.
+#[derive(Debug)]
+pub struct LimitedStream {
+    stream: tokio::net::TcpStream,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl tokio::io::AsyncRead for LimitedStream {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().stream).poll_read(cx, buf)
+    }
+}
+
+impl tokio::io::AsyncWrite for LimitedStream {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.get_mut().stream).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().stream).poll_shutdown(cx)
+    }
+
+    fn poll_write_vectored(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.get_mut().stream).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.stream.is_write_vectored()
+    }
 }
 
 /// Der Betriebszustand: Quarantaene, Transportfehler, offene Aufrufe.

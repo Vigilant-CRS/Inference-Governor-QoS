@@ -4,13 +4,23 @@
 # Registry bezogen; die NVIDIA-Bedingungen sind dabei zu akzeptieren
 # (Spec 6.4, 20.3).
 #
-# Voraussetzung: GPU-Zugriff im Container. Prüfen mit
+# Voraussetzung: GPU-Zugriff im Container. Pruefen mit
 #   docker run --rm --device nvidia.com/gpu=all ubuntu:24.04 nvidia-smi -L
 # Details und Fallstricke: ../triton/README.md
+#
+# Sicherheit (docs/security.md):
+#   * Triton ist **nicht** veroeffentlicht. Der Governor erreicht ihn im
+#     Compose-Netz unter `triton:8001`; wer Triton direkt erreicht, umgeht
+#     Token, `trust: strict`, Frische und Budget. In der vig.yaml steht
+#     deshalb `grpc_endpoint: "triton:8001"`.
+#   * Governor und Metriken sind nur auf dem **Loopback des Hosts**
+#     veroeffentlicht. Fuer Zugriff aus dem Netz: README, Abschnitt
+#     „Aus dem Netz erreichbar".
 
 services:
   triton:
-    image: nvcr.io/nvidia/tritonserver:26.06-py3
+    # Per Digest: derselbe Tag kann ein anderes Image bedeuten.
+    image: nvcr.io/nvidia/tritonserver:26.06-py3@sha256:58df7489c3f2276f9591d500a012dee03e23d35543ce3c390b4c001e6bf90794
     command: >
       tritonserver
       --model-repository=/models
@@ -20,14 +30,18 @@ services:
       - ${VIG_MODELS:?Pfad zum Triton-Modellrepository setzen}:/models:ro
     devices:
       - nvidia.com/gpu=all
-    # Nicht optional: der Datenpfad läuft über System Shared Memory, und ein
-    # Container hat standardmäßig sein eigenes /dev/shm. Ohne das findet
+    # Nicht optional: der Datenpfad laeuft ueber System Shared Memory, und ein
+    # Container hat standardmaessig sein eigenes /dev/shm. Ohne das findet
     # Triton die Region des Clients nicht (ADR-0003).
+    #
+    # Das ist die groesste verbleibende Flaeche dieses Aufbaus: Triton sieht
+    # das /dev/shm des Hosts. Der Governor laesst ueber sich nur Schluessel mit
+    # seinem Praefix registrieren (`backend.security.shm_key_prefix`); wer
+    # Triton direkt erreicht, ist daran nicht gebunden. Deshalb keine Ports.
     ipc: host
-    ports:
-      - "8000:8000"   # HTTP
-      - "8001:8001"   # gRPC
-      - "8002:8002"   # Prometheus des Backends
+    # Keine `ports:`. Nur Dienste im Compose-Netz erreichen Triton.
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/v2/health/ready"]
       interval: 10s
@@ -44,10 +58,17 @@ services:
       - serve
       - "-c"
       - /etc/vig/vig.yaml
+      # Im Container auf allen Schnittstellen, denn die Portweiterleitung
+      # erreicht das Loopback des Containers nicht. Veroeffentlicht wird unten
+      # nur auf dem Loopback des Hosts — deshalb, und nur deshalb,
+      # `--insecure-open`: ohne Token oder mTLS verweigert `vig serve` sonst
+      # einen Start ausserhalb von Loopback. Wer die Ports oeffnet, nimmt den
+      # Schalter heraus und richtet `backend.security` ein.
       - "--listen"
       - "0.0.0.0:9001"
       - "--metrics"
       - "0.0.0.0:9090"
+      - "--insecure-open"
     volumes:
       - ${VIG_CONFIG:?Pfad zur vig.yaml setzen}:/etc/vig/vig.yaml:ro
       # Nur lesend, und nur fuer den Artefakt-Digest des Profilmanifests
@@ -56,11 +77,18 @@ services:
       # Ohne den Mount bleibt das Feld `unknown` — ehrlich, aber blind.
       - ${VIG_MODELS}:/models:ro
     # Dieselbe IPC-Sicht wie Triton: der Governor reicht Shm-Referenzen durch
-    # und muss dieselben Regionen sehen können wie der Client.
+    # und muss dieselben Regionen sehen koennen wie der Client.
     ipc: host
     ports:
-      - "9001:9001"
-      - "9090:9090"   # /metrics und /healthz
+      - "127.0.0.1:9001:9001"
+      - "127.0.0.1:9090:9090"   # /metrics, /healthz, /readyz — ohne Zugangspruefung
+    # Der Governor braucht weder Rechte noch ein beschreibbares Dateisystem.
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=16m
     depends_on:
       triton:
         condition: service_healthy

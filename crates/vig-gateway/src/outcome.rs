@@ -77,6 +77,27 @@ pub fn status_for(state: RequestState) -> Option<Status> {
     Some(status)
 }
 
+/// Eine Ablehnung aus dem Abhaengigkeitsgraphen (NV-17), mit Grund.
+///
+/// Der Grund steht wie bei jeder anderen Ablehnung in `vig-reason`: ein
+/// Client soll `capture_mismatch` von `graph_full` unterscheiden koennen,
+/// ohne Fehlertexte zu lesen. Ein voller Graph ist Kapazitaet
+/// (`ResourceExhausted`, ein spaeterer Versuch kann gelingen), alles andere
+/// eine Vorbedingung, die dieser Request nicht erfuellt.
+#[must_use]
+pub fn graph_rejection(reason: &'static str, message: &str) -> Status {
+    let code = if matches!(reason, "graph_full" | "graph_quota") {
+        Code::ResourceExhausted
+    } else {
+        Code::FailedPrecondition
+    };
+    let mut status = Status::new(code, message.to_owned());
+    if let Ok(value) = reason.parse() {
+        status.metadata_mut().insert(REASON_HEADER, value);
+    }
+    status
+}
+
 /// Markiert eine Antwort als bei Fertigstellung veraltet (Spec 10.3 Stufe C).
 ///
 /// Das Ergebnis wird trotzdem geliefert. Es zu verschweigen waere eine

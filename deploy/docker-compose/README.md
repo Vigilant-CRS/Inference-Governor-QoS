@@ -32,6 +32,13 @@ die eigene Hardware neu messen:
 vig profile -c vig.yaml
 ```
 
+Im Compose-Netz heisst das Backend `triton`, nicht `127.0.0.1`:
+
+```yaml
+backend:
+  grpc_endpoint: "triton:8001"
+```
+
 ## 4. Starten
 
 ```bash
@@ -43,10 +50,11 @@ docker compose up -d
 ## 5. Prüfen
 
 ```bash
-vig doctor -c vig.yaml
+docker compose run --rm vig doctor -c /etc/vig/vig.yaml
 ```
 
-`doctor` sagt vor dem ersten Request, was nicht funktionieren wird — und zwar
+`doctor` laeuft im selben Netz wie der Governor und erreicht Triton deshalb
+unter demselben Namen. `doctor` sagt vor dem ersten Request, was nicht funktionieren wird — und zwar
 alles auf einmal. Es meldet unter anderem:
 
 * eine geschützte Auslastung, die die Kapazität übersteigt,
@@ -83,6 +91,58 @@ Im Client nur den Zielendpoint ändern:
 
 Modelle ohne Vigilant-Konfiguration werden unverändert durchgereicht. Die
 QoS-Regeln lassen sich danach Modell für Modell ergänzen.
+
+## Was diese Datei absichert — und was nicht
+
+Die Voreinstellung ist **ein Gerät, ein Betreiber**:
+
+* Beide Ports (`9001` gRPC, `9090` Metriken) sind nur auf `127.0.0.1` des
+  Hosts veröffentlicht. Triton hat gar keinen veröffentlichten Port; es ist
+  nur im Compose-Netz erreichbar, also nie am Governor vorbei.
+* `vig` startet mit `--insecure-open`, weil es im Container auf `0.0.0.0`
+  lauschen muss. Das ist nur richtig, solange die Ports auf Loopback des
+  Hosts bleiben. Ohne das Flag verweigert `vig serve` jeden Start ausserhalb
+  von Loopback ohne mTLS oder Token.
+* `vig` läuft mit schreibgeschütztem Dateisystem, ohne Capabilities und mit
+  `no-new-privileges`.
+* Triton braucht `ipc: host` für Shared Memory mit den Clients auf dem Host.
+  Das teilt den IPC-Namensraum des Hosts; jeder Prozess dort, der auf
+  `/dev/shm` schreiben darf, kann Regionen anlegen, die Triton liest. Das ist
+  das dokumentierte Restrisiko dieser Datei
+  ([`docs/security.md`](../../docs/security.md)).
+* Die Administrationsendpunkte (Modelle laden/entladen, Tracing, Loglevel,
+  CUDA-Speicher) sind gesperrt, bis `backend.security.admin_token_file`
+  gesetzt ist.
+
+### Zugriff von einem anderen Rechner
+
+Nicht die Portbindung auf `0.0.0.0` ändern und `--insecure-open` stehen
+lassen. Stattdessen:
+
+1. In `vig.yaml` eine Identitätsprüfung einrichten und den strikten Modus
+   einschalten:
+
+   ```yaml
+   backend:
+     trust: strict
+     security:
+       tls_cert: /etc/vig/tls/server.pem
+       tls_key: /etc/vig/tls/server.key
+       client_ca: /etc/vig/tls/clients.pem     # mTLS; oder:
+       token_file: /etc/vig/tokens              # "name:token" je Zeile, >= 16 Zeichen
+       admin_token_file: /etc/vig/admin.tokens  # nur, wenn Administration gebraucht wird
+   ```
+
+2. Die Dateien schreibgeschützt einhängen (`volumes:` von `vig`).
+3. In `docker-compose.yml` `--insecure-open` aus `command:` entfernen und die
+   Portbindung für `9001` auf die gewünschte Adresse ändern. `9090` (Metriken,
+   ohne Authentifizierung) bleibt auf Loopback; ein Prometheus auf einem
+   anderen Rechner liest über einen Tunnel oder eine authentifizierende
+   Instanz davor.
+4. `docker compose run --rm vig doctor -c /etc/vig/vig.yaml` — `doctor` meldet
+   eine Konfiguration, die `serve` verweigern würde.
+
+Die ganze Liste steht in [`docs/security.md`](../../docs/security.md).
 
 ## Kennzahlen
 

@@ -109,14 +109,24 @@ enum Command {
         /// Defaults to **loopback**, not `0.0.0.0`. The governor has neither
         /// authentication nor TLS; a default start that listens on every
         /// interface hands control of the whole GPU to anyone on the network.
-        /// If you want it exposed, say so explicitly — and put something in
-        /// front of it that checks identity.
+        /// A non-loopback address is refused unless `backend.security` checks
+        /// identity (mTLS via `client_ca`, or `token_file`); see
+        /// `--insecure-open` for the one exception.
         #[arg(short, long, default_value = "127.0.0.1:9001")]
         listen: String,
         /// Address for the metrics and health endpoints
         /// (`/metrics`, `/healthz`, `/readyz`). Loopback as well.
         #[arg(long, default_value = "127.0.0.1:9090")]
         metrics: String,
+        /// Listen outside loopback **without** any identity check.
+        ///
+        /// Refused by default: with neither `client_ca` (mTLS) nor
+        /// `token_file`, anyone who reaches the endpoint controls the GPU —
+        /// TLS alone encrypts but checks nobody. The one legitimate use is a
+        /// container whose port is published on the host's loopback only, as
+        /// in the compose quickstart.
+        #[arg(long)]
+        insecure_open: bool,
     },
 }
 
@@ -183,7 +193,8 @@ async fn run() -> ExitCode {
             config,
             listen,
             metrics,
-        } => Box::pin(serve::run(&config, &listen, &metrics)).await,
+            insecure_open,
+        } => Box::pin(serve::run(&config, &listen, &metrics, insecure_open)).await,
     };
 
     match result {
