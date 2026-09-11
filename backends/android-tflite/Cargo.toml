@@ -1,0 +1,53 @@
+# Ein zweites echtes Backend: TFLite mit GPU-Delegate, als eigener Prozess
+# (ADR-0033, ADR-0039). Eigener Workspace, damit `unsafe` fuer die FFI hier
+# erlaubt sein kann und im Governor weiter ausnahmslos verboten bleibt.
+#
+#   tools/android/build-backend.sh     # aarch64-linux-android, NDK-Clang
+#   cargo test --manifest-path backends/android-tflite/Cargo.toml   # Host
+[package]
+name = "vig-backend-tflite"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "BUSL-1.1"
+authors = ["Vigilant e.K. <info@vigilant-crs.de>"]
+publish = false
+description = "OIP backend for TFLite with the GPU delegate, a separate process in front of the GPU (Android)"
+
+[workspace]
+
+[[bin]]
+name = "vig-tflite-server"
+path = "src/main.rs"
+
+[dependencies]
+vig-protocol-oip = { path = "../../crates/vig-protocol-oip" }
+tonic = "0.14.6"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "signal", "time"] }
+tokio-stream = "0.1.19"
+libloading = "0.8"
+
+[dev-dependencies]
+vig-backend-triton = { path = "../../crates/vig-backend-triton" }
+
+[lints.rust]
+missing_docs = "warn"
+unreachable_pub = "warn"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "deny"
+undocumented_unsafe_blocks = "deny"
+dbg_macro = "deny"
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+doc_markdown = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"

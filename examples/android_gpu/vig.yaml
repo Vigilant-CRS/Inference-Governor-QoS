@@ -1,0 +1,54 @@
+# Gate-M3-Analogon auf der GPU eines Pixel 2, UNTER Last (ADR-0039).
+#
+# Backend: vig-tflite-server (backends/android-tflite) auf demselben Telefon,
+# TFLite 2.16.1 mit GPU-Delegate V2 ueber GLES, Adreno 540, Android 11.
+# Ablauf: tools/android/gate-on-phone.sh, Messung: docs/benchmark/android-gpu.md
+#
+# Die Profile stammen aus `vig profile --samples 200` auf dem Telefon, ueber
+# gRPC auf dem Kopierpfad (11.09.2026) — also mit Transport, wie der Governor
+# ihn erlebt. Die reine Rechenzeit im Interpreter ist deutlich kleiner (Pose
+# 34 statt 90 ms); wer mit ihr plant, macht den Governor schlechter als kein
+# Governor (android-gpu.md, erster Versuch).
+#
+# Serialisierte Auslastung mit p99: 287/1000 + 120/500 + 206/2000 = 63 %.
+version: 1
+
+backend:
+  type: oip
+  grpc_endpoint: "127.0.0.1:8001"
+  slots: 1
+  pipelining_depth: 0
+  safety_margin_percent: 110
+
+models:
+  # EfficientDet-Lite0 mit NMS im Graphen: 266 von 267 Knoten auf der GPU,
+  # die Nachbearbeitung auf der CPU; 25 Boxen in der Antwort.
+  detector:
+    class: protected
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 1000, deadline_ms: 1000, max_age_ms: 2000 }
+    variants:
+      - id: main
+        backend_model: detector
+        quality: { value: 1.00, source: user_declared }
+        profile: { p50_us: 224650, p95_us: 256420, p99_us: 287339, samples: 200 }
+
+  pose:
+    class: high
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 500, deadline_ms: 500, max_age_ms: 1000 }
+    variants:
+      - id: main
+        backend_model: pose
+        quality: { value: 1.00, source: user_declared }
+        profile: { p50_us: 90215, p95_us: 112685, p99_us: 120457, samples: 200 }
+
+  depth:
+    class: high
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 2000, deadline_ms: 2000, max_age_ms: 4000 }
+    variants:
+      - id: main
+        backend_model: depth
+        quality: { value: 1.00, source: user_declared }
+        profile: { p50_us: 195941, p95_us: 201777, p99_us: 205646, samples: 200 }

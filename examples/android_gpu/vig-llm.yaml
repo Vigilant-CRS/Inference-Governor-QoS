@@ -1,0 +1,29 @@
+# "Detektor plus kleines Sprachmodell" auf einem Pixel 2 (ADR-0039,
+# tools/android/llm-neighbour.sh).
+#
+# Nur der Detektor steht hinter dem Governor, auf der GPU. Das Sprachmodell
+# (Qwen2.5-0.5B-Instruct in llama.cpp) laeuft daneben auf der CPU und ist dem
+# Governor unbekannt: es konkurriert um CPU, Speicherbandbreite und
+# Waermebudget, nicht um GPU-Zeit.
+#
+# Profil wie vig.yaml (`vig profile` auf dem Telefon, mit Transport).
+# Serialisierte Auslastung mit p99: 287/500 = 57 %.
+version: 1
+
+backend:
+  type: oip
+  grpc_endpoint: "127.0.0.1:8001"
+  slots: 1
+  pipelining_depth: 0
+  safety_margin_percent: 110
+
+models:
+  detector:
+    class: protected
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 500, deadline_ms: 500, max_age_ms: 1000 }
+    variants:
+      - id: main
+        backend_model: detector
+        quality: { value: 1.00, source: user_declared }
+        profile: { p50_us: 224650, p95_us: 256420, p99_us: 287339, samples: 200 }

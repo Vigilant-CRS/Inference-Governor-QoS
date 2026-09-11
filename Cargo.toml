@@ -11,6 +11,9 @@ members = [
     "crates/vig-protocol-oip",
     "crates/vig-sim",
 ]
+# Backendprozesse mit nativem Code bauen in einem eigenen Workspace, damit
+# `unsafe_code = "forbid"` hier ohne Ausnahme bleibt (ADR-0033, ADR-0039).
+exclude = ["backends/android-tflite"]
 
 [workspace.package]
 version = "0.2.0"

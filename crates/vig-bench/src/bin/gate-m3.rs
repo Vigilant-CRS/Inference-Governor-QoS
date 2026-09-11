@@ -58,7 +58,13 @@ struct Prepared {
     period: Duration,
     max_age: Duration,
     input: InputSpec,
-    _region: Region,
+    /// `None` auf dem Kopierpfad (`VIG_GATE_COPY=1`).
+    _region: Option<Region>,
+}
+
+/// Wahr, wenn die Umgebungsvariable auf `1` steht.
+fn flag(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|v| v == "1")
 }
 
 fn to_std(d: vig_core::Duration) -> Duration {
@@ -106,7 +112,23 @@ async fn run() {
         resolved.backend_endpoint,
         resolved.protected_utilization_permille() / 10
     );
-    println!("Messdauer {RUN_SECONDS} s je Lauf und Puffertiefe {CAPS:?}\n");
+    // Ein Backend ohne Shared Memory — etwa TFLite auf Android, das kein
+    // `/dev/shm` hat (ADR-0039) — bekommt die Nutzlast im Request. Das
+    // kostet den Governor die Kopie (ADR-0003); beide Seiten zahlen denselben
+    // Transport, der Vergleich bleibt einer des Schedulings.
+    let copy = flag("VIG_GATE_COPY");
+    let run_seconds = std::env::var("VIG_GATE_SECONDS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(RUN_SECONDS);
+    println!(
+        "Messdauer {run_seconds} s je Lauf und Puffertiefe {CAPS:?} · Datenpfad {}\n",
+        if copy {
+            "Kopie im Request"
+        } else {
+            "Shared Memory"
+        }
+    );
 
     // --- Vorbereiten: Metadaten holen, Shm-Regionen anlegen und registrieren
     let mut prepared = Vec::new();
@@ -148,30 +170,35 @@ async fn run() {
         let elements: i64 = shape.iter().copied().product();
         let byte_size = u64::try_from(elements).unwrap_or(0) * element_size(&input.datatype) as u64;
 
-        let region_name = format!("vig_{logical}");
-        let region = Region::create(&region_name, byte_size).expect("Shm-Region anlegen");
+        let region = if copy {
+            None
+        } else {
+            let region_name = format!("vig_{logical}");
+            let region = Region::create(&region_name, byte_size).expect("Shm-Region anlegen");
 
-        // Aufraeumen, falls ein frueherer Lauf abgebrochen ist.
-        let _ = client
-            .raw()
-            .await
-            .expect("Backend erreichbar")
-            .system_shared_memory_unregister(SystemSharedMemoryUnregisterRequest {
-                name: region.name.clone(),
-            })
-            .await;
-        client
-            .raw()
-            .await
-            .expect("Backend erreichbar")
-            .system_shared_memory_register(SystemSharedMemoryRegisterRequest {
-                name: region.name.clone(),
-                key: region.key.clone(),
-                offset: 0,
-                byte_size,
-            })
-            .await
-            .expect("Shm-Region registrieren");
+            // Aufraeumen, falls ein frueherer Lauf abgebrochen ist.
+            let _ = client
+                .raw()
+                .await
+                .expect("Backend erreichbar")
+                .system_shared_memory_unregister(SystemSharedMemoryUnregisterRequest {
+                    name: region.name.clone(),
+                })
+                .await;
+            client
+                .raw()
+                .await
+                .expect("Backend erreichbar")
+                .system_shared_memory_register(SystemSharedMemoryRegisterRequest {
+                    name: region.name.clone(),
+                    key: region.key.clone(),
+                    offset: 0,
+                    byte_size,
+                })
+                .await
+                .expect("Shm-Region registrieren");
+            Some(region)
+        };
 
         println!(
             "  {logical:<9} -> {physical:<15} {:>6} KB  Periode {:>4} ms{}",
@@ -194,7 +221,7 @@ async fn run() {
                 name: input.name.clone(),
                 datatype: input.datatype.clone(),
                 shape,
-                region: Some(region.name.clone()),
+                region: region.as_ref().map(|r| r.name.clone()),
                 byte_size,
             },
             _region: region,
@@ -225,7 +252,7 @@ async fn run() {
             .collect()
     };
 
-    let duration = Duration::from_secs(RUN_SECONDS);
+    let duration = Duration::from_secs(run_seconds);
 
     // --- Baseline: direkt zu Triton --------------------------------------
     let mut endpoints: Vec<String> = prepared.iter().map(|p| p.endpoint.clone()).collect();
@@ -263,7 +290,12 @@ async fn run() {
         actor::spawn(Arc::clone(&resolved), &triton, clock, &[]).expect("Scheduler startet");
     // Wie `vig serve`: der Governor beobachtet die Karte. Ohne das plant er
     // ohne Geraetezustand, und die Prognose (NV-06) haette nie eine Zelle.
-    handle.observe_hardware();
+    // Auf einem Geraet ohne `nvidia-smi` gibt es nichts zu beobachten
+    // (`VIG_GATE_NO_HARDWARE=1`); der Governor plant dann mit dem Profil,
+    // wie ADR-0022 es fuer diesen Fall vorsieht.
+    if !flag("VIG_GATE_NO_HARDWARE") {
+        handle.observe_hardware();
+    }
     let service = GatewayService::new(Arc::clone(&resolved), triton, handle.clone(), clock);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
