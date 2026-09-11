@@ -181,6 +181,13 @@ Verbindungsgrenze am Metrikport.
   Modells (100 ms bis 5 s), unter Druck gehen die aeltesten zuerst.
   Ablehnungen tragen `vig-reason` (`graph_full`, `capture_mismatch`, ...).
   Gefunden live von der ROS-2-Bruecke.
+- **Die Messwerkzeuge liefen ohne `TCP_NODELAY`.** Jedes Werkzeug, das einen
+  Governor oder ein Mock-Backend im Prozess startet, band ueber
+  `serve_with_incoming`, und dort uebergeht tonic die Einstellung. Nagle und
+  das verzoegerte ACK erzeugten gelegentlich 40 ms auf der Governor-Seite:
+  zwei von drei Laeufen der Datenpfadbudgets rissen ihr p99. `vig serve` war
+  nie betroffen. Alle Werkzeuge nehmen jetzt `vig_bench::incoming`
+  ([arm-serve.md](docs/benchmark/arm-serve.md)).
 - **Ein nicht zerlegter Auftrag wurde als Quantum eingeplant.** Ein Request
   ohne Texteingang auf einem `cooperative`-Vertrag bekam vom Kern eine
   Quantendauer zugewiesen, waehrend das Backend den ganzen Auftrag rechnete;

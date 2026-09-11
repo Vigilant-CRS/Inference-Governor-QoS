@@ -166,7 +166,7 @@ async fn start_gateway(yaml: &str, metrics_port: u16) -> String {
         .expect("Port");
     let address = listener.local_addr().expect("Adresse").to_string();
     tokio::spawn(async move {
-        let stream = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        let stream = vig_bench::incoming(listener);
         let _ = tonic::transport::Server::builder()
             .initial_stream_window_size(vig_backend_triton::STREAM_WINDOW_BYTES)
             .initial_connection_window_size(vig_backend_triton::CONNECTION_WINDOW_BYTES)

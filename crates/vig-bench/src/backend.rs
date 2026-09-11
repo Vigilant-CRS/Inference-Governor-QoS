@@ -118,7 +118,7 @@ pub async fn start(backend: Arc<Backend>) -> SocketAddr {
     let address = listener.local_addr().expect("lokale Adresse");
     let service = BackendService::new(backend);
     tokio::spawn(async move {
-        let stream = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        let stream = crate::incoming(listener);
         let _ = tonic::transport::Server::builder()
             .initial_stream_window_size(vig_backend_triton::STREAM_WINDOW_BYTES)
             .initial_connection_window_size(vig_backend_triton::CONNECTION_WINDOW_BYTES)

@@ -165,11 +165,14 @@ Die Mediane ändern sich nicht; die Schwänze verschwinden. Auf dem Handy
 genauso: der erste wache Lauf ohne `TCP_NODELAY` hatte einen p99-Zusatz von
 +31 ms in der Shm-Zeile bei 1,2 MB, danach höchstens +7,2 ms (Silber).
 
-**Dasselbe Muster steht in allen `vig-bench`-Werkzeugen**, die einen Governor
-im Prozess starten (`shm-latency`, `gate-m3`, `load-ramp`, `frontier`,
-`soak`, `wire-bench`, `wp26`, `diy-baseline`, `edge-pilot`, `oip-check`):
-ihre Governor-Seite läuft ohne `TCP_NODELAY`. Ob das die p99-Werte früherer
-Berichte berührt, ist nicht geprüft. Diese Messung ändert dort nichts.
+**Dasselbe Muster stand in allen `vig-bench`-Werkzeugen**, die einen
+Governor im Prozess starten (`shm-latency`, `gate-m3`, `load-ramp`,
+`frontier`, `soak`, `wire-bench`, `wp26`, `diy-baseline`, `edge-pilot`,
+`oip-check`): ihre Governor-Seite lief ohne `TCP_NODELAY`. Seit diesem Befund
+nehmen alle `vig_bench::incoming`, das die Einstellung setzt. Berichte vor dem
+11.09. sind damit gemessen; wo ein Ausreißer von rund 40 ms auf der
+Vigilant-Seite steht, gehört er möglicherweise dem Messaufbau. Die
+Messkette vom 11.09. läuft mit der Korrektur.
 
 ## Nebenbefund: der Stack der Testthreads
 

@@ -3,9 +3,11 @@
 # verbraucht, die der Testlaeufer einem Testthread standardmaessig gibt.
 #
 # Das ist keine Eigenschaft unseres Codes: die beteiligten Futures sind
-# gemessen 2-3 KB gross (siehe `report_future_sizes`), und im Release-Build
-# laufen dieselben Tests mit dem Standardstack durch. Der Wert steht deshalb
-# hier und nicht als Umgebungsvariable in einer Anleitung, die jeder neue
-# Entwickler und die CI erst finden muessten.
+# gemessen 2-3 KB gross (siehe `report_future_sizes`). Auch im Release-Build
+# reicht der Standardstack nicht fuer jeden Test: `datapath_budgets_hold`
+# laeuft direkt aufgerufen, ohne `cargo test`, ueber (docs/benchmark/
+# arm-serve.md). Wer ein Testbinary direkt startet, setzt denselben Wert.
+# Er steht hier und nicht als Umgebungsvariable in einer Anleitung, die jeder
+# neue Entwickler und die CI erst finden muessten.
 [env]
 RUST_MIN_STACK = "16777216"

@@ -34,5 +34,17 @@ pub mod service;
 pub mod shm;
 pub mod workload;
 
+/// Eingang fuer einen Governor oder ein Mock-Backend im Prozess, mit
+/// `TCP_NODELAY` wie `vig serve` und Triton.
+///
+/// `serve_with_incoming` uebergeht die Einstellung des Builders. Ohne sie
+/// wartet eine Antwort gelegentlich auf das verzoegerte ACK des Clients, rund
+/// 40 ms — ein Ausreisser, der dem Governor angelastet wuerde, aber nur dem
+/// Messaufbau gehoert (docs/benchmark/arm-serve.md).
+#[must_use]
+pub fn incoming(listener: tokio::net::TcpListener) -> tonic::transport::server::TcpIncoming {
+    tonic::transport::server::TcpIncoming::from(listener).with_nodelay(Some(true))
+}
+
 pub use backend::Backend;
 pub use workload::{StreamDef, StreamReport, drive};

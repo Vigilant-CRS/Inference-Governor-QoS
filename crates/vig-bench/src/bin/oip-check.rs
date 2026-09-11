@@ -147,7 +147,7 @@ async fn run() {
         .expect("Port");
     let gateway = listener.local_addr().expect("Adresse").to_string();
     tokio::spawn(async move {
-        let stream = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        let stream = vig_bench::incoming(listener);
         let _ = tonic::transport::Server::builder()
             .add_service(GrpcInferenceServiceServer::new(service))
             .serve_with_incoming(stream)

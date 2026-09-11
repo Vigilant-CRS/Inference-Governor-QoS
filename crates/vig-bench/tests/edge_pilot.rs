@@ -137,7 +137,7 @@ async fn start_gateway(backend: &str) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap().to_string();
     tokio::spawn(async move {
-        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        let incoming = vig_bench::incoming(listener);
         let _ = tonic::transport::Server::builder()
             .add_service(GrpcInferenceServiceServer::new(service))
             .serve_with_incoming(incoming)
