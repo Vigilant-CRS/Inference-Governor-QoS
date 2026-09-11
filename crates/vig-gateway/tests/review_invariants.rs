@@ -762,7 +762,7 @@ async fn without_a_valid_token_nothing_gets_through() {
     let endpoint = mock_backend::start(backend_impl.clone()).await.to_string();
 
     let mut token_file = tempfile::NamedTempFile::new().unwrap();
-    writeln!(token_file, "# der Roboter\ns3cret").unwrap();
+    writeln!(token_file, "# der Roboter\nrobot:s3cret-0123456789abcdef").unwrap();
     token_file.flush().unwrap();
 
     let tokens = vig_gateway::auth::Tokens::load(token_file.path()).unwrap();
@@ -771,8 +771,10 @@ async fn without_a_valid_token_nothing_gets_through() {
     let authorised = |with_token: bool| {
         let mut r = tonic::Request::new(request());
         if with_token {
-            r.metadata_mut()
-                .insert("authorization", "Bearer s3cret".parse().unwrap());
+            r.metadata_mut().insert(
+                "authorization",
+                "Bearer s3cret-0123456789abcdef".parse().unwrap(),
+            );
         }
         r
     };

@@ -40,6 +40,9 @@ pub struct MockBackend {
     /// Auf dem Shm-Pfad muss dieser Zaehler null bleiben: der Request traegt
     /// dann nur eine Referenz.
     pub raw_bytes_seen: AtomicU64,
+    /// Shared-Memory-Registrierungen und -Abmeldungen, die das Backend
+    /// erreicht haben.
+    pub shm_calls: AtomicU64,
     /// Zeichen, die ein generatives Modell je Aufruf erzeugt.
     ///
     /// `0` schaltet die Textausgabe ab; das Backend antwortet dann wie ein
@@ -98,6 +101,7 @@ impl MockBackend {
             served: AtomicU64::new(0),
             seen_models: std::sync::Mutex::new(Vec::new()),
             raw_bytes_seen: AtomicU64::new(0),
+            shm_calls: AtomicU64::new(0),
             chars_per_call: 0,
             seen_prompts: std::sync::Mutex::new(Vec::new()),
             seen_max_tokens: std::sync::Mutex::new(Vec::new()),
@@ -450,18 +454,25 @@ impl GrpcInferenceService for Service {
         Err(Status::unimplemented("system_shared_memory_status"))
     }
 
+    // Registrierung und Abmeldung werden angenommen und gezaehlt: die
+    // Sicherheitspruefungen des Governors liegen **davor**, und ein Test muss
+    // sehen koennen, ob eine Anfrage das Backend erreicht hat.
     async fn system_shared_memory_register(
         &self,
         _r: Request<SystemSharedMemoryRegisterRequest>,
     ) -> Result<Response<SystemSharedMemoryRegisterResponse>, Status> {
-        Err(Status::unimplemented("system_shared_memory_register"))
+        self.inner.shm_calls.fetch_add(1, Ordering::Relaxed);
+        Ok(Response::new(SystemSharedMemoryRegisterResponse::default()))
     }
 
     async fn system_shared_memory_unregister(
         &self,
         _r: Request<SystemSharedMemoryUnregisterRequest>,
     ) -> Result<Response<SystemSharedMemoryUnregisterResponse>, Status> {
-        Err(Status::unimplemented("system_shared_memory_unregister"))
+        self.inner.shm_calls.fetch_add(1, Ordering::Relaxed);
+        Ok(Response::new(
+            SystemSharedMemoryUnregisterResponse::default(),
+        ))
     }
 
     async fn cuda_shared_memory_status(

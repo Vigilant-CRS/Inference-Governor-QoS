@@ -131,6 +131,13 @@ pub(crate) enum Msg {
         /// Lebensdauer: nach einem Timeout rechnet das Backend weiter und
         /// haelt die Nutzlast (Review R04).
         permit: crate::budget::PayloadPermit,
+        /// Die Anmeldung im Abhaengigkeitsgraphen (NV-17), falls der Client
+        /// eine Aufnahme nennt.
+        ///
+        /// Mit der Ankunft und nicht davor: Anmelden und Verknuepfen mit dem
+        /// Auftrag sind ein Schritt. Getrennt blieb ein Knoten offen, wenn
+        /// das Einreichen danach scheiterte.
+        graph: Option<GraphRequest>,
     },
     /// Ein Backendaufruf ist beendet.
     BackendDone {
@@ -169,23 +176,6 @@ pub(crate) enum Msg {
     Hint {
         /// Der Hinweis in Kernform.
         hint: Box<vig_core::hints::Hint>,
-    },
-    /// Ein Auftrag meldet seine Aufnahme und seine Eltern an (NV-17).
-    ///
-    /// Mit Antwort, weil eine Ablehnung den Client erreichen muss: eine
-    /// Zusammenfuehrung ueber Aufnahmegrenzen wird abgelehnt, **bevor** sie
-    /// rechnet. Danach waere es eine Feststellung ueber verbrauchte Zeit.
-    Fuse {
-        /// Der logische Modellindex.
-        model: vig_core::ModelIdx,
-        /// Die Aufnahme, zu der dieser Auftrag gehoert.
-        capture: vig_core::dag::CaptureId,
-        /// Die Kennung dieses Auftrags, wie der Client sie fuehrt.
-        id: u64,
-        /// Die Kennungen der Eltern.
-        parents: vig_protocol_oip::params::DependsOn,
-        /// Wohin die Antwort geht.
-        reply: oneshot::Sender<Result<(), String>>,
     },
     /// Das Ergebnis einer aktiven Erreichbarkeitsprobe (Review R11).
     Reachability {
@@ -322,6 +312,59 @@ impl Drop for CancelOnDrop {
     }
 }
 
+/// Die Anmeldung eines Auftrags im Abhaengigkeitsgraphen (NV-17).
+///
+/// Die Kennungen sind die des Clients, in seinem Namensraum: zwei Clients
+/// koennen dieselbe Kennung benutzen, ohne einander zu begegnen, und keiner
+/// kann einen Knoten des anderen als Elternteil nennen (Security-Review N2).
+#[derive(Debug, Clone, Copy)]
+pub struct GraphRequest {
+    /// Die Identitaet des Aufrufers; `0` ohne Zugangspruefung.
+    pub owner: u64,
+    /// Die Aufnahme, zu der dieser Auftrag gehoert.
+    pub capture: vig_core::dag::CaptureId,
+    /// Die Kennung dieses Auftrags, wie der Client sie fuehrt.
+    pub id: u64,
+    /// Die Kennungen der Eltern.
+    pub parents: vig_protocol_oip::params::DependsOn,
+}
+
+/// Wie lange ein fertiges Ergebnis fuer spaete Verbraucher gehalten wird,
+/// wenn sein Vertrag kein Hoechstalter nennt.
+const GRAPH_DEFAULT_RETENTION: vig_core::Duration =
+    vig_core::Duration::from_nanos_unbounded(1_000_000_000);
+/// Die untere Grenze der Haltedauer.
+const GRAPH_MIN_RETENTION: vig_core::Duration =
+    vig_core::Duration::from_nanos_unbounded(100_000_000);
+/// Die obere Grenze der Haltedauer.
+const GRAPH_MAX_RETENTION: vig_core::Duration =
+    vig_core::Duration::from_nanos_unbounded(5_000_000_000);
+/// Ab wie vielen freien Plaetzen gehaltene Ergebnisse vorzeitig gehen.
+const GRAPH_HEADROOM: usize = 16;
+/// Wie viele Knoten eine authentifizierte Identitaet hoechstens belegt.
+///
+/// Die Haelfte des Graphen: ein einzelner Client kann ihn nicht allein
+/// fuellen und damit NV-17 fuer alle anderen blockieren (Security-Review N2).
+const GRAPH_QUOTA_PER_IDENTITY: usize = vig_core::dag::MAX_NODES.div_euclid(2);
+
+/// Der `vig-reason` einer Ablehnung durch den Graphen.
+///
+/// Stabile, maschinenlesbare Werte: die ROS-2-Bruecke (NV-21) unterscheidet
+/// `graph_full` von `capture_mismatch`, ohne Fehlertexte zu lesen.
+const fn graph_reason(error: &vig_core::dag::GraphError) -> &'static str {
+    use vig_core::dag::GraphError;
+    match error {
+        GraphError::Full { .. } => "graph_full",
+        GraphError::TooManyParents { .. } => "too_many_parents",
+        GraphError::UnknownParent { .. } | GraphError::UnknownNode { .. } => "unknown_parent",
+        GraphError::MixedCaptures { .. } => "capture_mismatch",
+        GraphError::MixedEpochs { .. } => "epoch_mismatch",
+        GraphError::InvalidTransition { .. } | GraphError::ReleaseWithoutHold { .. } => {
+            "graph_error"
+        }
+    }
+}
+
 /// Der Griff, ueber den das Gateway den Actor erreicht.
 #[derive(Debug, Clone)]
 pub struct Handle {
@@ -342,6 +385,26 @@ impl Handle {
         request: ModelInferRequest,
         permit: crate::budget::PayloadPermit,
     ) -> Reply {
+        Box::pin(self.submit_with_graph(descriptor, request, permit, None)).await
+    }
+
+    /// Reicht einen Request ein, der sich im Abhaengigkeitsgraphen anmeldet
+    /// (NV-17).
+    ///
+    /// Die Anmeldung und der Auftrag erreichen den Actor als **eine**
+    /// Nachricht. Eine abgelehnte Anmeldung beantwortet den Request, bevor er
+    /// rechnet — mit `vig-reason`.
+    ///
+    /// # Errors
+    ///
+    /// Wie [`Handle::submit`], dazu die Ablehnungen des Graphen.
+    pub async fn submit_with_graph(
+        &self,
+        descriptor: RequestDescriptor,
+        request: ModelInferRequest,
+        permit: crate::budget::PayloadPermit,
+        graph: Option<GraphRequest>,
+    ) -> Reply {
         let id = descriptor.id;
         let (reply, wait) = oneshot::channel();
         let msg = Msg::Arrival {
@@ -349,6 +412,7 @@ impl Handle {
             request: Box::new(request),
             reply,
             permit,
+            graph,
         };
         self.tx.try_send(msg).map_err(|e| match e {
             mpsc::error::TrySendError::Full(_) => {
@@ -432,37 +496,6 @@ impl Handle {
         spawn_hardware_probe(&self.tx);
     }
 
-    /// Meldet einen Auftrag im Abhaengigkeitsgraphen an (NV-17).
-    ///
-    /// # Errors
-    ///
-    /// Wenn die Eltern zu verschiedenen Aufnahmen gehoeren, einer unbekannt
-    /// ist oder der Graph voll ist.
-    pub async fn fuse(
-        &self,
-        model: vig_core::ModelIdx,
-        capture: vig_core::dag::CaptureId,
-        id: u64,
-        parents: vig_protocol_oip::params::DependsOn,
-    ) -> Result<(), Status> {
-        let (reply, wait) = oneshot::channel();
-        self.tx
-            .send(Msg::Fuse {
-                model,
-                capture,
-                id,
-                parents,
-                reply,
-            })
-            .await
-            .map_err(|_| Status::internal("der Scheduler ist nicht mehr aktiv"))?;
-        match wait.await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(reason)) => Err(Status::failed_precondition(reason)),
-            Err(_) => Err(Status::internal("der Scheduler hat nicht geantwortet")),
-        }
-    }
-
     /// Der aktuelle Metrikabzug.
     ///
     /// # Errors
@@ -541,8 +574,26 @@ struct Actor {
     /// Governor nach Frische allein, wie vor NV-17 — eine Zusammenfuehrung,
     /// die niemand anmeldet, kann er nicht pruefen.
     graph: vig_core::dag::Graph,
-    /// Welcher Requestkennung welcher Knoten gehoert.
-    nodes: HashMap<u64, vig_core::dag::NodeId>,
+    /// Welcher Requestkennung welcher Knoten gehoert — je Identitaet.
+    ///
+    /// Der Schluessel ist (Identitaet, Kennung des Clients). Zwei Clients
+    /// koennen dieselbe Kennung benutzen, ohne sich zu begegnen
+    /// (Security-Review N2).
+    nodes: HashMap<(u64, u64), vig_core::dag::NodeId>,
+    /// Welcher Auftrag welchen Knoten traegt.
+    ///
+    /// Ueber diese Zuordnung erreicht jedes Ende eines Auftrags seinen
+    /// Knoten. Ohne sie blieb jeder Knoten offen, `collect()` fand nie etwas,
+    /// und der Graph war nach 256 Aufnahmen voll — bei 30 Hz nach rund acht
+    /// Sekunden.
+    graph_links: HashMap<RequestId, vig_core::dag::NodeId>,
+    /// Fertige Ergebnisse, die noch fuer spaete Verbraucher gehalten werden,
+    /// mit dem Zeitpunkt, ab dem sie gehen duerfen.
+    ///
+    /// Ein Elternteil ist oft fertig, bevor sich sein zweiter Verbraucher
+    /// anmeldet. Ohne Haltung raeumte `collect()` es dazwischen weg, und der
+    /// zweite Verbraucher bekaeme „unbekanntes Elternteil".
+    graph_retained: Vec<(vig_core::dag::NodeId, Instant)>,
     /// Das jeweils letzte Ergebnis der Erreichbarkeitsprobe je Endpunkt
     /// (Review R11).
     ///
@@ -734,6 +785,8 @@ fn spawn_owned(
         reachability: HashMap::new(),
         graph: vig_core::dag::Graph::new(),
         nodes: HashMap::new(),
+        graph_links: HashMap::new(),
+        graph_retained: Vec::new(),
         outstanding: 0,
         shutdown: None,
         // Fortsetzungen bekommen Kennungen aus einem eigenen Bereich, damit
@@ -1042,8 +1095,21 @@ impl Actor {
                 request,
                 reply,
                 permit,
+                graph,
             } => {
-                if !self.accept(now, *descriptor, request, reply, permit, &mut sink) {
+                // NV-17: zuerst die Anmeldung im Graphen. Eine Zusammenfuehrung
+                // ueber Aufnahmegrenzen wird abgelehnt, **bevor** sie rechnet.
+                let node = match self.graph_admit(now, descriptor.logical_model, graph.as_ref()) {
+                    Ok(node) => node,
+                    Err(status) => {
+                        let _ = reply.send(Err(status));
+                        return;
+                    }
+                };
+                let id = descriptor.id;
+                let accepted = self.accept(now, *descriptor, request, reply, permit, &mut sink);
+                self.graph_link(id, node, accepted);
+                if !accepted {
                     return;
                 }
             }
@@ -1116,15 +1182,6 @@ impl Actor {
                     ),
                 }
             }
-            Msg::Fuse {
-                model,
-                capture,
-                id,
-                parents,
-                reply,
-            } => {
-                let _ = reply.send(self.fuse(model, capture, id, &parents));
-            }
             Msg::Reachability {
                 endpoint,
                 reachable,
@@ -1145,6 +1202,7 @@ impl Actor {
                 self.scheduler.on_event(now, Event::Tick, &mut sink);
                 self.report_contract_mismatch(now);
                 self.retry_pending_reconciliation();
+                self.graph_housekeeping(now);
             }
             Msg::Snapshot(tx) => self.on_snapshot(tx),
         }
@@ -1207,6 +1265,7 @@ impl Actor {
                 quantum,
                 ..
             } => {
+                self.graph_started(request);
                 self.forward(request, model, variant, slot, quantum);
             }
             Action::Terminate { request, state } => self.finish(request, state),
@@ -1338,13 +1397,18 @@ impl Actor {
     /// Auftrag, der insgesamt zu lange braucht, altert damit korrekt und wird
     /// verworfen, statt unbegrenzt weiterzulaufen.
     fn continue_job(&mut self, request: RequestId, job: GenerativeJob) {
+        // Auch ein Abbruch hier ist ein Ende: der Knoten darf nicht als
+        // laufend zurueckbleiben (NV-17).
         let Some(descriptor) = self.descriptors.remove(&request) else {
+            self.graph_finished(request, RequestState::Failed);
             return;
         };
         let Some(reply) = self.waiting.remove(&request) else {
+            self.graph_finished(request, RequestState::Failed);
             return;
         };
         let Some(oip) = self.inbox.remove(&request) else {
+            self.graph_finished(request, RequestState::Failed);
             return;
         };
         self.responses.remove(&request);
@@ -1364,6 +1428,10 @@ impl Actor {
 
         if let Some(permit) = self.permits.remove(&request) {
             self.permits.insert(continuation, permit);
+        }
+        // Der Knoten gehoert dem ganzen Auftrag, nicht dem Quantum (NV-17).
+        if let Some(node) = self.graph_links.remove(&request) {
+            self.graph_links.insert(continuation, node);
         }
         self.jobs.insert(continuation, job);
         self.descriptors.insert(continuation, next);
@@ -1481,33 +1549,85 @@ impl Actor {
     /// ist keine.
     fn fuse(
         &mut self,
+        now: Instant,
         model: vig_core::ModelIdx,
-        capture: vig_core::dag::CaptureId,
-        id: u64,
-        parents: &vig_protocol_oip::params::DependsOn,
-    ) -> Result<(), String> {
+        request: &GraphRequest,
+    ) -> Result<vig_core::dag::NodeId, (&'static str, String)> {
+        let GraphRequest {
+            owner,
+            capture,
+            id,
+            parents,
+        } = *request;
         // Alter Zustand raus, bevor neuer dazukommt: ohne das waechst der
         // Graph mit der Laufzeit, und ein Graph, der waechst, ist ein
         // unbeschraenkter Puffer (Spec L-003).
-        let collected = self.graph.collect();
-        if collected > 0 {
-            self.nodes
-                .retain(|_, node| self.graph.state(*node).is_some());
+        self.graph_housekeeping(now);
+
+        // Eine Kennung, deren Knoten noch offen ist, ist vergeben. Ist er
+        // fertig, darf der Client sie wiederverwenden — sein Namensraum,
+        // seine Entscheidung (Security-Review N2).
+        if let Some(existing) = self.nodes.get(&(owner, id)).copied()
+            && self
+                .graph
+                .state(existing)
+                .is_some_and(vig_core::dag::NodeState::is_open)
+        {
+            return Err((
+                "duplicate_id",
+                format!("die Request-Kennung {id} gehoert zu einem Auftrag, der noch laeuft"),
+            ));
+        }
+        // Eine authentifizierte Identitaet haelt hoechstens halb so viele
+        // **offene** Knoten, wie der Graph fasst; ohne Zugangspruefung gibt es
+        // nur eine Identitaet, und fuer sie gilt die ganze Kapazitaet.
+        // Gehaltene fertige Ergebnisse zaehlen nicht: sie gehen unter Druck
+        // ohnehin zuerst, und ein Client mit vier Kameras haelt in einer
+        // Sekunde Haltefrist schnell mehr als das Kontingent.
+        if owner != 0 {
+            let graph = &self.graph;
+            let held = self
+                .nodes
+                .iter()
+                .filter(|((o, _), node)| {
+                    *o == owner
+                        && graph
+                            .state(**node)
+                            .is_some_and(vig_core::dag::NodeState::is_open)
+                })
+                .count();
+            if held >= GRAPH_QUOTA_PER_IDENTITY {
+                return Err((
+                    "graph_quota",
+                    format!(
+                        "diese Identitaet haelt bereits {held} Knoten; hoechstens \
+                         {GRAPH_QUOTA_PER_IDENTITY} je Identitaet"
+                    ),
+                ));
+            }
         }
 
         // Feste Groesse ohne Allokation, wie ueberall auf diesem Pfad.
         let mut resolved = [vig_core::dag::NodeId(0); vig_core::dag::MAX_PARENTS];
         let mut count = 0_usize;
         for parent in parents.as_slice() {
-            let Some(node) = self.nodes.get(parent).copied() else {
-                return Err(format!(
-                    "vig_depends_on nennt {parent}; dieser Auftrag ist hier nicht \
-                     bekannt. Eine Zusammenfuehrung, von der die Haelfte fehlt, \
-                     ist keine."
+            // Im eigenen Namensraum: die Kennung eines anderen Clients ist
+            // hier unbekannt, nicht fremd.
+            let Some(node) = self.nodes.get(&(owner, *parent)).copied() else {
+                return Err((
+                    "unknown_parent",
+                    format!(
+                        "vig_depends_on nennt {parent}; dieser Auftrag ist hier nicht \
+                         bekannt. Eine Zusammenfuehrung, von der die Haelfte fehlt, \
+                         ist keine."
+                    ),
                 ));
             };
             let Some(slot) = resolved.get_mut(count) else {
-                return Err("mehr Eltern als der Graph fuehrt".to_owned());
+                return Err((
+                    "too_many_parents",
+                    "mehr Eltern als der Graph fuehrt".to_owned(),
+                ));
             };
             *slot = node;
             count = count.saturating_add(1);
@@ -1520,10 +1640,154 @@ impl Actor {
         let epoch = vig_core::dag::EpochId(self.profile_revision);
         match self.graph.insert(model, capture, epoch, parents_resolved) {
             Ok(node) => {
-                self.nodes.insert(id, node);
-                Ok(())
+                self.nodes.insert((owner, id), node);
+                Ok(node)
             }
-            Err(e) => Err(e.to_string()),
+            Err(e) => Err((graph_reason(&e), e.to_string())),
+        }
+    }
+
+    /// Meldet eine Ankunft im Graphen an, falls sie eine Aufnahme nennt
+    /// (NV-17). Eine Ablehnung traegt ihren `vig-reason`.
+    fn graph_admit(
+        &mut self,
+        now: Instant,
+        model: vig_core::ModelIdx,
+        graph: Option<&GraphRequest>,
+    ) -> Result<Option<vig_core::dag::NodeId>, Status> {
+        let Some(graph) = graph else {
+            return Ok(None);
+        };
+        self.fuse(now, model, graph)
+            .map(Some)
+            .map_err(|(reason, message)| crate::outcome::graph_rejection(reason, &message))
+    }
+
+    /// Verknuepft den Knoten einer angenommenen Ankunft mit ihrem Auftrag —
+    /// bevor die Aktionen des Schedulers angewendet werden, damit ein
+    /// sofortiges Verwerfen ihn schon findet. Eine abgewiesene Ankunft lief
+    /// nie durch `finish`; ihr frischer Knoten wird nie gestartet.
+    fn graph_link(
+        &mut self,
+        request: RequestId,
+        node: Option<vig_core::dag::NodeId>,
+        accepted: bool,
+    ) {
+        let Some(node) = node else {
+            return;
+        };
+        if accepted {
+            self.graph_links.insert(request, node);
+        } else {
+            let _ = self
+                .graph
+                .transition(node, vig_core::dag::NodeState::Cancelled);
+        }
+    }
+
+    /// Raeumt den Abhaengigkeitsgraphen auf (NV-17).
+    ///
+    /// Gehaltene Ergebnisse, deren Frist abgelaufen ist, werden freigegeben.
+    /// Wird der Platz knapp, gehen die aeltesten vorzeitig: ein voller Graph
+    /// soll nur dann „voll" sagen, wenn wirklich so viele Auftraege offen
+    /// sind, nicht weil fertige Ergebnisse herumliegen.
+    fn graph_housekeeping(&mut self, now: Instant) {
+        let graph = &mut self.graph;
+        self.graph_retained.retain(|(node, until)| {
+            if *until <= now {
+                let _ = graph.release(*node);
+                false
+            } else {
+                true
+            }
+        });
+        // Jede Entfernung zaehlt, auch die unter Druck: sonst blieben
+        // Kennungen stehen, deren Knoten es nicht mehr gibt.
+        let mut removed = 0_usize;
+        while self.graph.len() >= vig_core::dag::MAX_NODES.saturating_sub(GRAPH_HEADROOM) {
+            let oldest = self
+                .graph_retained
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, (_, until))| *until)
+                .map(|(index, _)| index);
+            let Some(index) = oldest else {
+                break;
+            };
+            let (node, _) = self.graph_retained.swap_remove(index);
+            let _ = self.graph.release(node);
+            removed = removed.saturating_add(self.graph.collect());
+        }
+        removed = removed.saturating_add(self.graph.collect());
+        if removed > 0 || self.nodes.len() > self.graph.len() {
+            let graph = &self.graph;
+            self.nodes.retain(|_, node| graph.state(*node).is_some());
+            self.graph_links
+                .retain(|_, node| graph.state(*node).is_some());
+        }
+    }
+
+    /// Ein Auftrag mit Knoten ist gestartet (NV-17).
+    fn graph_started(&mut self, request: RequestId) {
+        if let Some(node) = self.graph_links.get(&request).copied()
+            && self.graph.state(node) == Some(vig_core::dag::NodeState::Pending)
+        {
+            let _ = self
+                .graph
+                .transition(node, vig_core::dag::NodeState::Running);
+        }
+    }
+
+    /// Ein Auftrag mit Knoten ist zu Ende — auf welchem Weg auch immer
+    /// (NV-17).
+    ///
+    /// Ein fertiges, verwendbares Ergebnis wird fuer die Haltedauer seines
+    /// Modells gehalten: so lange, wie ein spaeter Verbraucher es noch
+    /// sinnvoll zusammenfuehren kann. Danach ist es ohnehin zu alt.
+    fn graph_finished(&mut self, request: RequestId, state: RequestState) {
+        use vig_core::dag::NodeState;
+        let Some(node) = self.graph_links.remove(&request) else {
+            return;
+        };
+        let to = match (self.graph.state(node), state) {
+            (Some(NodeState::Running), RequestState::CompletedValid) => NodeState::Completed,
+            // Fertig, aber bei Fertigstellung schon zu alt: das Ergebnis
+            // existiert, fuer eine Zusammenfuehrung taugt es nicht.
+            (Some(NodeState::Running), RequestState::CompletedObsolete) => NodeState::Superseded,
+            (Some(NodeState::Running), _) => NodeState::Failed,
+            // Nie gestartet: verworfen, ersetzt, abgelehnt, zurueckgezogen.
+            (Some(NodeState::Pending), _) => NodeState::Cancelled,
+            _ => return,
+        };
+        if self.graph.transition(node, to).is_err() || to != NodeState::Completed {
+            return;
+        }
+        let retention = self.graph_retention(node);
+        if let Some(until) = self.clock.now().checked_add(retention)
+            && self.graph.acquire(node).is_ok()
+        {
+            self.graph_retained.push((node, until));
+        }
+    }
+
+    /// Wie lange ein fertiges Ergebnis dieses Knotens gehalten wird.
+    ///
+    /// Das Hoechstalter seines Modells, begrenzt: ein aelteres Ergebnis ist
+    /// fuer eine Zusammenfuehrung wertlos, und ein unbegrenztes Halten waere
+    /// der unbeschraenkte Puffer, den Spec L-003 verbietet.
+    fn graph_retention(&self, node: vig_core::dag::NodeId) -> vig_core::Duration {
+        let wanted = self
+            .graph
+            .model(node)
+            .and_then(|model| self.config.contracts.get(model.get()))
+            .and_then(|contract| contract.max_age)
+            .unwrap_or(GRAPH_DEFAULT_RETENTION);
+        if wanted < GRAPH_MIN_RETENTION {
+            GRAPH_MIN_RETENTION
+        } else if wanted > GRAPH_MAX_RETENTION {
+            GRAPH_MAX_RETENTION
+        } else {
+            wanted
         }
     }
 
@@ -1821,6 +2085,10 @@ impl Actor {
                 *response = job.build_response(response);
             }
         }
+
+        // Jedes Ende erreicht den Knoten — Antwort, Verwerfen, Ablehnung,
+        // Abbruch, Backendfehler, Drain (NV-17).
+        self.graph_finished(request, state);
 
         let Some(reply) = self.waiting.remove(&request) else {
             // Auch ohne wartenden Client darf kein Auftragszustand
