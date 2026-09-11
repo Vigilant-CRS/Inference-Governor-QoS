@@ -40,6 +40,18 @@ and returning a credit would put a second inference on the same unit.
 quarantine is knowledge, not a stuck state — restarting throws that knowledge
 away, and the new process starts into an occupancy it knows nothing about.
 
+**If the backend itself restarted.** The governor sees the completion counter
+fall and logs "Abschlusszaehler zurueckgefallen". Calls whose connection had
+already broken end with it; calls with an open connection keep their credit
+until they answer, because they may be running in the new process
+([ADR-0040](adr/0040-a-restart-proves-only-what-died-with-it.md)). Two cases
+an aggregate counter cannot resolve keep a credit held instead: a call that
+finished in the new process before the restart was noticed, and a new process
+whose counter already passed the old value before the governor read it. If
+`vig_quarantined_slots` stays up after the backend is healthy and idle, those
+are the cases where restarting the governor — while the backend is reachable —
+is the right step.
+
 ### `/readyz` red: "N Transportfehler seit dem letzten Erfolg"
 
 **What happened.** The connection to the backend cannot be established. Unlike

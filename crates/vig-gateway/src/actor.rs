@@ -155,17 +155,17 @@ pub(crate) enum Msg {
     /// Modell insgesamt abgeschlossen hat. Ob daraus ein Nachweis folgt,
     /// entscheidet der Actor — er allein kennt die Zahl der Auslieferungen,
     /// die noch offen sein koennen.
+    ///
+    /// Ob der Zaehler zurueckgefallen ist, entscheidet ebenfalls der Actor,
+    /// gegen den hoechsten Stand, den **er** in der laufenden Epoche gesehen
+    /// hat — nicht der Poller. Ein Poller, der sich den Hoechststand selbst
+    /// merkte, meldete nach einem Reset jede weitere Runde erneut als
+    /// Neustart (Review R01).
     CompletionEvidence {
-        /// Das Backendmodell.
-        model: String,
-        /// Der Statistikzaehler des Modells.
+        /// Server und Backendmodell.
+        identity: BackendIdentity,
+        /// Der Statistikzaehler des Modells, ueber alle Versionen.
         completed: u64,
-        /// Ob der Zaehler zurueckgesprungen ist.
-        ///
-        /// Ein Zaehler faellt nur, wenn das Modell neu geladen oder der
-        /// Server neu gestartet wurde — und dann ist alles, was dort lief,
-        /// ohnehin verloren.
-        restarted: bool,
     },
     /// Ein Anwendungshinweis (NV-18, ADR-0029).
     ///
@@ -189,8 +189,8 @@ pub(crate) enum Msg {
     /// Einmal beim Start. Bis sie da ist, laufen Auslieferungen dieses Modells
     /// ohne zaehlerbasierten Nachweis — vorsichtig und nicht falsch.
     ReconcileBaseline {
-        /// Das Backendmodell.
-        model: String,
+        /// Server und Backendmodell.
+        identity: BackendIdentity,
         /// Der Statistikzaehler zum Startzeitpunkt.
         completed: u64,
     },
@@ -238,17 +238,63 @@ pub(crate) enum Msg {
 struct Lease {
     /// Der Slot, dessen Kredit gehalten wird.
     slot: SlotIdx,
-    /// Das Backendmodell, gegen dessen Statistik abgeglichen wird.
-    backend_model: String,
-    /// Der Endpunkt, an den dieser Aufruf ging.
+    /// Server und Backendmodell, an die dieser Aufruf ging.
     ///
-    /// Ein Transportfehler sagt etwas ueber **diesen** Endpunkt und ueber
-    /// keinen anderen. Ohne ihn liesse sich der Befund nur global buchen, und
-    /// ein Erfolg an Backend B deckte den Ausfall von Backend A zu
-    /// (Review R11).
-    endpoint: String,
+    /// Gegen **deren** Statistik wird abgeglichen (Review R02), und ein
+    /// Transportfehler sagt etwas ueber diesen Endpunkt und ueber keinen
+    /// anderen (Review R11).
+    identity: BackendIdentity,
+    /// Die Abgleichsepoche der Identitaet beim Dispatch (Review R01).
+    ///
+    /// Ein Neustart des Backends beendet eine Epoche. Er belegt das Ende der
+    /// Aufrufe, die in ihr lagen und deren Verbindung schon abgebrochen ist —
+    /// und sonst keines.
+    epoch: u64,
     /// Wie der Anspruch derzeit steht.
     state: LeaseState,
+}
+
+/// Wogegen ein Anspruch abgeglichen wird: der Server, der den Aufruf bekam,
+/// und das Backendmodell dort.
+///
+/// Bis zum Review R02 war der Schluessel nur der Modellname. Bieten zwei
+/// Server derselben GPU ein Modell gleichen Namens an, wurde ein Aufruf an
+/// den zweiten gegen die Statistik des ersten abgeglichen. Die Domaene steckt
+/// nicht im Schluessel: jede Domaene hat ihren eigenen Actor (ADR-0037).
+/// Die Modellversion auch nicht: gezaehlt wird ueber alle Versionen
+/// (`TritonClient::completion_evidence`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct BackendIdentity {
+    /// Der Endpunkt des Servers.
+    endpoint: String,
+    /// Der Modellname dort.
+    model: String,
+}
+
+/// Der Abgleichszustand einer Backendidentitaet (Review R01).
+///
+/// Eine **Epoche** ist die Lebensdauer eines Zaehlers: sie beginnt mit der
+/// Basislinie beim Start und endet, wenn der Zaehler zurueckfaellt — ein
+/// Neustart des Servers oder ein Neuladen des Modells. Der Nachweis „das
+/// Backend hat mindestens so viele Inferenzen abgeschlossen, wie es von uns
+/// bekommen hat" gilt je Epoche: Basislinie und Auslieferungen gehoeren zum
+/// selben Zaehler, oder der Vergleich sagt nichts.
+#[derive(Debug, Default)]
+struct Ledger {
+    /// Die laufende Epoche.
+    epoch: u64,
+    /// Der Zaehlerstand zu Beginn der Epoche; fehlt, bis die Basislinie da ist.
+    baseline: Option<u64>,
+    /// Aufrufe dieser Epoche, die das Backend erreicht haben koennen.
+    ///
+    /// Sinkt, wenn sich herausstellt, dass ein Aufruf schon am Kanalaufbau
+    /// scheiterte: er wird nie eine Fertigstellung erzeugen.
+    reached: u64,
+    /// Der hoechste Zaehlerstand, den das Backend in dieser Epoche gemeldet
+    /// hat. Ein kleinerer ist ein Neustart.
+    highest: u64,
+    /// Der Poller dieser Identitaet, falls einer laeuft — hoechstens einer.
+    poller: Option<tokio::task::AbortHandle>,
 }
 
 /// Der Wissensstand ueber eine ausgelieferte Inferenz.
@@ -678,15 +724,13 @@ struct Actor {
     consecutive_transport_failures: u64,
     /// Wie oft ein Ausfuehrungsende durch Abgleich belegt wurde.
     reconciled: u64,
-    /// Wie viele Inferenzen dieser Governor je Backendmodell ausgeliefert hat.
-    dispatched_per_model: HashMap<String, u64>,
-    /// Der Statistikzaehler je Backendmodell zum Startzeitpunkt.
+    /// Der Abgleichszustand je Server und Backendmodell (Review R01, R02).
     ///
-    /// Einmal beim Start geholt, nicht beim Abgleich: eine Basislinie, die
-    /// erst der Abgleich abfragt, kaeme zu spaet — das Backend kann inzwischen
-    /// fertig geworden sein. Fehlt ein Eintrag, gibt es fuer dieses Modell
-    /// keinen zaehlerbasierten Nachweis.
-    reconcile_baseline: HashMap<String, u64>,
+    /// Die Basislinie der ersten Epoche wird einmal beim Start geholt, nicht
+    /// beim Abgleich: eine Basislinie, die erst der Abgleich abfragt, kaeme
+    /// zu spaet — das Backend kann inzwischen fertig geworden sein. Fehlt
+    /// sie, gibt es fuer diese Identitaet keinen zaehlerbasierten Nachweis.
+    ledgers: HashMap<BackendIdentity, Ledger>,
     /// Requests, die wegen vollstaendiger Quarantaene abgewiesen wurden.
     metrics_rejected_quarantined: u64,
     /// Die Fortschrittsbuchhaltung ueber alle zerlegten Auftraege (NV-16).
@@ -976,8 +1020,7 @@ fn spawn_owned(
         backend_timeouts: 0,
         consecutive_transport_failures: 0,
         reconciled: 0,
-        dispatched_per_model: HashMap::new(),
-        reconcile_baseline: HashMap::new(),
+        ledgers: HashMap::new(),
         metrics_rejected_quarantined: 0,
         generative: GenerativeAccounting::default(),
         permits: HashMap::new(),
@@ -1189,7 +1232,7 @@ impl Actor {
                 // (Review R11). Andersherum — Erholung an den Verkehr zu
                 // haengen — war der Fehler.
                 if let Some(lease) = self.leases.get(&request) {
-                    let endpoint = lease.endpoint.clone();
+                    let endpoint = lease.identity.endpoint.clone();
                     self.reachability.insert(endpoint, false);
                 }
             }
@@ -1200,7 +1243,7 @@ impl Actor {
                 // Probe. Ein Modellfehler heisst „das Backend hat geantwortet
                 // und diesen Request abgelehnt", nicht „das Backend ist weg".
                 if let Some(lease) = self.leases.get(&request) {
-                    let endpoint = lease.endpoint.clone();
+                    let endpoint = lease.identity.endpoint.clone();
                     self.reachability.insert(endpoint, true);
                 }
             }
@@ -1227,9 +1270,10 @@ impl Actor {
         if matches!(result.as_ref(),
             Err(e) if e.execution_state() == vig_backend_triton::ExecutionState::NotStarted)
             && let Some(lease) = self.leases.get(&request)
-            && let Some(count) = self.dispatched_per_model.get_mut(&lease.backend_model)
+            && let Some(ledger) = self.ledgers.get_mut(&lease.identity)
+            && ledger.epoch == lease.epoch
         {
-            *count = count.saturating_sub(1);
+            ledger.reached = ledger.reached.saturating_sub(1);
         }
         // Fencing: eine Meldung ohne passenden Anspruch gehoert zu einer
         // aelteren Generation. Sie darf keinen Kredit freigeben — sonst
@@ -1247,7 +1291,7 @@ impl Actor {
             // Der Kredit wird in jedem Fall gehalten. Konnte der Abgleich
             // nicht anlaufen — die Basislinie fehlt noch —, merkt sich der
             // Anspruch das und der naechste Tick versucht es erneut.
-            let started = self.start_reconciliation(&lease);
+            let started = self.start_reconciliation(&lease.identity);
             if let Some(entry) = self.leases.get_mut(&request) {
                 entry.state = if started {
                     LeaseState::Reconciling
@@ -1322,12 +1366,9 @@ impl Actor {
                 }
             }
             Msg::CompletionEvidence {
-                model,
+                identity,
                 completed,
-                restarted,
-            } => {
-                self.on_completion_evidence(now, &model, completed, restarted, &mut sink);
-            }
+            } => self.on_completion_evidence(now, &identity, completed, &mut sink),
             Msg::BackendTimeout { request } => {
                 // **Nur der Client wird freigegeben, nicht der Slot.** Der
                 // Kredit gehoert zur Recheneinheit, und die ist womoeglich
@@ -1387,15 +1428,12 @@ impl Actor {
             } => {
                 self.reachability.insert(endpoint, reachable);
             }
-            Msg::ReconcileBaseline { model, completed } => {
-                self.on_baseline(model, completed);
-                // Und sofort die Anspruechen nachziehen, die auf sie gewartet
-                // haben. Nicht erst beim naechsten Tick: in einem leeren
-                // System gibt es keinen — der Actor schlaeft dann, bis wieder
-                // Arbeit kommt, und ein gehaltener Kredit waere bis dahin
-                // unversorgt.
-                self.retry_pending_reconciliation();
-            }
+            // `on_baseline` zieht die Anspruechen nach, die auf sie gewartet
+            // haben — sofort, nicht erst beim naechsten Tick.
+            Msg::ReconcileBaseline {
+                identity,
+                completed,
+            } => self.on_baseline(&identity, completed),
             Msg::HardwareState { state } => self.on_hardware_state(state),
             Msg::Tick => {
                 self.scheduler.on_event(now, Event::Tick, &mut sink);
@@ -1539,21 +1577,23 @@ impl Actor {
         self.outstanding = self.outstanding.saturating_add(1);
 
         // Der Anspruch auf den Slotkredit entsteht **hier**, mit dem Dispatch,
-        // und endet erst mit einem Nachweis. Die Wanduhrzeit dient
-        // ausschliesslich dem spaeteren Abgleich gegen Tritons `last_inference`.
-        // Die laufende Summe der Auslieferungen an dieses Modell. Sie ist die
+        // und endet erst mit einem Nachweis. Gezaehlt wird er beim Server,
+        // an den er geht, in dessen laufender Epoche: die Summe ist die
         // Groesse, gegen die der Abgleich prueft — und sie sinkt wieder, wenn
         // sich herausstellt, dass ein Aufruf das Backend nie erreicht hat.
-        self.dispatched_per_model
-            .entry(oip.model_name.clone())
-            .and_modify(|n| *n = n.saturating_add(1))
-            .or_insert(1);
+        let identity = BackendIdentity {
+            endpoint: self.config.endpoint_of(model).to_owned(),
+            model: oip.model_name.clone(),
+        };
+        let ledger = self.ledgers.entry(identity.clone()).or_default();
+        ledger.reached = ledger.reached.saturating_add(1);
+        let epoch = ledger.epoch;
         self.leases.insert(
             request,
             Lease {
                 slot,
-                backend_model: oip.model_name.clone(),
-                endpoint: self.config.endpoint_of(model).to_owned(),
+                identity,
+                epoch,
                 state: LeaseState::Running,
             },
         );
@@ -1667,23 +1707,32 @@ impl Actor {
     /// Belegt ist das Ende auf zwei Wegen:
     ///
     /// * Das Modell meldet mindestens so viele abgeschlossene Inferenzen, wie
-    ///   dieser Governor ihm ausgeliefert hat. Dann ist von unserer Arbeit
-    ///   nichts mehr offen.
+    ///   dieser Governor ihm in der laufenden Epoche ausgeliefert hat. Dann
+    ///   ist von unserer Arbeit nichts mehr offen.
     /// * Der Zaehler ist **gefallen**. Ein Zaehler faellt nur, wenn das Modell
-    ///   neu geladen oder der Server neu gestartet wurde — und dann ist alles,
-    ///   was dort lief, ohnehin verloren.
+    ///   neu geladen oder der Server neu gestartet wurde. Das belegt das Ende
+    ///   der Aufrufe, deren Verbindung schon abgebrochen ist — sie liefen im
+    ///   alten Prozess. Einen Aufruf mit offener Verbindung belegt es nicht:
+    ///   der kann im neuen laufen (Review R01, [`Actor::on_backend_restart`]).
+    ///
+    /// Je Identitaet laeuft hoechstens ein Poller. Er fragt, solange ein
+    /// Anspruch dieser Identitaet auf den Abgleich wartet, und endet danach.
     ///
     /// Beides setzt voraus, dass dieser Governor der einzige Aufrufer des
     /// Modells ist. Genau das ist der dokumentierte Aufbau, und `trust:
     /// strict` setzt es auf unserer Seite durch. Teilt sich ein fremder Client
     /// dasselbe Modell, zaehlt Triton dessen Arbeit mit, und der Nachweis wird
     /// zum Indiz. Das steht so in `docs/how-it-works.md`.
-    fn start_reconciliation(&self, lease: &Lease) -> bool {
-        let Some(backend) = self.backend_for_model_name(&lease.backend_model) else {
+    fn start_reconciliation(&mut self, identity: &BackendIdentity) -> bool {
+        let Some(backend) = self.backends.get(&identity.endpoint).map(Arc::clone) else {
             tracing::warn!(
-                model = %lease.backend_model,
+                endpoint = %identity.endpoint,
+                model = %identity.model,
                 "kein Backendclient fuer den Abgleich; der Slotkredit bleibt gehalten"
             );
+            return false;
+        };
+        let Some(ledger) = self.ledgers.get_mut(identity) else {
             return false;
         };
         // Basislinie plus eigene Auslieferungen — in der Zaehldomaene des
@@ -1691,31 +1740,35 @@ impl Actor {
         // geholt), wird der Abgleich nicht gestartet und beim naechsten Tick
         // erneut versucht. Ein Ziel ohne Basislinie waere im Zweifel zu klein
         // und gaebe einen Kredit frei, der gehalten gehoert.
-        if !self.reconcile_baseline.contains_key(&lease.backend_model) {
+        if ledger.baseline.is_none() {
             tracing::debug!(
-                model = %lease.backend_model,
+                endpoint = %identity.endpoint,
+                model = %identity.model,
                 "Abgleich wartet auf die Basislinie; der Slotkredit bleibt gehalten"
             );
             return false;
         }
+        // Hoechstens ein Poller je Identitaet. Jeder weitere Abbruch haengt
+        // sich an den laufenden an, statt einen eigenen zu starten, der nie
+        // endete (Review R01).
+        if ledger.poller.as_ref().is_some_and(|p| !p.is_finished()) {
+            return true;
+        }
         let tx = self.tx.clone();
-        let model = lease.backend_model.clone();
+        let target = identity.clone();
         let interval = std::time::Duration::from_millis(RECONCILE_INTERVAL_MS);
 
-        tokio::spawn(async move {
-            let mut highest = 0_u64;
+        let task = tokio::spawn(async move {
             loop {
-                match backend.completion_evidence(&model).await {
+                match backend.completion_evidence(&target.model).await {
                     Ok(evidence) => {
-                        let restarted = evidence.completed < highest;
-                        highest = highest.max(evidence.completed);
                         // Gemeldet, nicht entschieden: was der Zaehlerstand
-                        // belegt, weiss nur der Actor.
+                        // belegt — auch, ob er zurueckfiel —, weiss nur der
+                        // Actor.
                         if tx
                             .send(Msg::CompletionEvidence {
-                                model: model.clone(),
+                                identity: target.clone(),
                                 completed: evidence.completed,
-                                restarted,
                             })
                             .await
                             .is_err()
@@ -1725,14 +1778,45 @@ impl Actor {
                     }
                     Err(error) => {
                         // Kein Nachweis heisst: der Kredit bleibt gehalten.
-                        // Weiter fragen, bis der Actor endet.
-                        tracing::debug!(%model, %error, "Abgleich noch ohne Nachweis");
+                        // Weiter fragen, bis der Actor den Poller beendet.
+                        tracing::debug!(
+                            endpoint = %target.endpoint,
+                            model = %target.model,
+                            %error,
+                            "Abgleich noch ohne Nachweis"
+                        );
                     }
                 }
                 tokio::time::sleep(interval).await;
             }
         });
+        ledger.poller = Some(task.abort_handle());
         true
+    }
+
+    /// Beendet den Poller einer Identitaet, wenn kein Anspruch mehr auf ihn
+    /// wartet.
+    ///
+    /// Ein Anspruch in `TimedOut` braucht keinen: seine offene Verbindung
+    /// bringt die Antwort, und die ist der Nachweis.
+    fn stop_idle_poller(&mut self, identity: &BackendIdentity) {
+        let waiting = self.leases.values().any(|lease| {
+            lease.identity == *identity
+                && matches!(
+                    lease.state,
+                    LeaseState::Reconciling | LeaseState::AwaitingBaseline
+                )
+        });
+        if waiting {
+            return;
+        }
+        if let Some(poller) = self
+            .ledgers
+            .get_mut(identity)
+            .and_then(|ledger| ledger.poller.take())
+        {
+            poller.abort();
+        }
     }
 
     /// Meldet einen Auftrag im Abhaengigkeitsgraphen an (NV-17, ADR-0028).
@@ -2013,9 +2097,9 @@ impl Actor {
     /// Anspruechen dieses Modells gemeinsam. Das ist die schwaechere Aussage,
     /// und sie ist die einzige, die stimmt.
     ///
-    /// Ein zurueckgesprungener Zaehler traegt dieselbe Aussage aus einem
-    /// anderen Grund: der Prozess, der die Ausfuehrung hielt, gibt es nicht
-    /// mehr.
+    /// Ein zurueckgesprungener Zaehler traegt eine engere Aussage: der
+    /// Prozess, der die abgebrochenen Aufrufe hielt, gibt es nicht mehr. Was
+    /// daraus folgt und was nicht, steht bei [`Actor::on_backend_restart`].
     ///
     /// Das Generation-Fencing von frueher ist damit hinfaellig und
     /// entfernt. Es schuetzte davor, dass eine verspaetete Meldung zu einem
@@ -2027,53 +2111,148 @@ impl Actor {
     fn on_completion_evidence<S: FnMut(Action)>(
         &mut self,
         now: Instant,
-        model: &str,
+        identity: &BackendIdentity,
         completed: u64,
-        restarted: bool,
         sink: &mut S,
     ) {
-        let Some(baseline) = self.reconcile_baseline.get(model).copied() else {
+        let Some(ledger) = self.ledgers.get_mut(identity) else {
             return;
         };
-        // Gezaehlt wird, was das Backend **erreicht** hat. Ein Aufruf, der
-        // schon am Kanalaufbau scheiterte, wird nie eine Fertigstellung
-        // erzeugen; ihn im Ziel zu fuehren machte das Ziel unerreichbar.
-        let dispatched = self.dispatched_per_model.get(model).copied().unwrap_or(0);
-        let target = baseline.saturating_add(dispatched);
-        if !restarted && completed < target {
+        let Some(baseline) = ledger.baseline else {
+            return;
+        };
+        if completed < ledger.highest {
+            let previous = ledger.highest;
+            self.on_backend_restart(now, identity, previous, completed, sink);
+            return;
+        }
+        ledger.highest = completed;
+        // Gezaehlt wird, was das Backend in dieser Epoche **erreicht** hat.
+        // Ein Aufruf, der schon am Kanalaufbau scheiterte, wird nie eine
+        // Fertigstellung erzeugen; ihn im Ziel zu fuehren machte das Ziel
+        // unerreichbar.
+        let target = baseline.saturating_add(ledger.reached);
+        if completed < target {
             return;
         }
 
         let proven: Vec<RequestId> = self
             .leases
             .iter()
-            .filter(|(_, lease)| lease.backend_model == model && lease.state != LeaseState::Running)
+            .filter(|(_, lease)| lease.identity == *identity && lease.state != LeaseState::Running)
             .map(|(request, _)| *request)
             .collect();
         for request in proven {
-            let Some(lease) = self.leases.remove(&request) else {
-                continue;
-            };
-            self.reconciled = self.reconciled.saturating_add(1);
-            self.release_permit(request);
             tracing::info!(
                 %request,
-                model,
+                endpoint = %identity.endpoint,
+                model = %identity.model,
                 completed,
                 target,
-                restarted,
                 "Backend belegt, dass von unserer Arbeit nichts mehr laeuft; \
                  Slotkredit wird zurueckgegeben"
             );
-            self.scheduler.on_event(
-                now,
-                Event::BackendFailure {
-                    request,
-                    slot: lease.slot,
-                },
-                sink,
-            );
+            self.end_by_reconciliation(now, request, sink);
         }
+        self.stop_idle_poller(identity);
+    }
+
+    /// Der Zaehler einer Identitaet ist zurueckgefallen: eine neue Epoche
+    /// (Review R01).
+    ///
+    /// Ein Zaehler faellt nur, wenn der Server neu gestartet oder das Modell
+    /// neu geladen wurde. Was das belegt, ist enger, als es aussieht:
+    ///
+    /// * Ein Anspruch, dessen Aufruf **schon abgebrochen** ist (`Reconciling`,
+    ///   `AwaitingBaseline`), lief im alten Prozess — seine Verbindung starb
+    ///   mit ihm. Er endet jetzt.
+    /// * Ein Anspruch mit **offener** Verbindung (`Running`, `TimedOut`)
+    ///   endet nicht. Er kann erst nach dem Reset entstanden sein und im neuen
+    ///   Prozess rechnen; dann ist seine Antwort der Nachweis. Lief er im
+    ///   alten, bricht sein Aufruf ab, und das belegt dann die neue Epoche.
+    ///   Er wandert deshalb in die neue Epoche und zaehlt dort mit.
+    ///
+    /// Die neue Epoche beginnt beim gemeldeten Stand. Ab dann gilt derselbe
+    /// Ruhe-Nachweis wie vorher, gegen den neuen Zaehler. Der Neustart wird
+    /// genau einmal verarbeitet: danach ist der gemeldete Stand der hoechste,
+    /// und dieselbe Meldung noch einmal ist keiner.
+    ///
+    /// Nicht belegbar mit einem aggregierten Zaehler, und deshalb in
+    /// `docs/runbook.md` benannt: ein Aufruf, der nach dem Reset in den neuen
+    /// Prozess ging und dort **vor** dem Erkennen des Resets einen
+    /// Transportfehler bekam, endet hier zu frueh.
+    fn on_backend_restart<S: FnMut(Action)>(
+        &mut self,
+        now: Instant,
+        identity: &BackendIdentity,
+        previous: u64,
+        completed: u64,
+        sink: &mut S,
+    ) {
+        let Some(ledger) = self.ledgers.get_mut(identity) else {
+            return;
+        };
+        let ended_epoch = ledger.epoch;
+        let epoch = ended_epoch.saturating_add(1);
+        ledger.epoch = epoch;
+        ledger.baseline = Some(completed);
+        ledger.highest = completed;
+
+        let mut dead = Vec::new();
+        let mut carried = 0_u64;
+        for (request, lease) in &mut self.leases {
+            if lease.identity != *identity {
+                continue;
+            }
+            match lease.state {
+                LeaseState::Running | LeaseState::TimedOut => {
+                    lease.epoch = epoch;
+                    carried = carried.saturating_add(1);
+                }
+                LeaseState::Reconciling | LeaseState::AwaitingBaseline => dead.push(*request),
+            }
+        }
+        if let Some(ledger) = self.ledgers.get_mut(identity) {
+            ledger.reached = carried;
+        }
+        tracing::warn!(
+            endpoint = %identity.endpoint,
+            model = %identity.model,
+            previous,
+            completed,
+            ended_epoch,
+            ended = dead.len(),
+            carried,
+            "Abschlusszaehler zurueckgefallen: Server neu gestartet oder Modell \
+             neu geladen. Abgebrochene Aufrufe der alten Epoche enden; Aufrufe \
+             mit offener Verbindung warten auf ihre Antwort."
+        );
+        for request in dead {
+            self.end_by_reconciliation(now, request, sink);
+        }
+        self.stop_idle_poller(identity);
+    }
+
+    /// Beendet einen Anspruch, dessen Ende der Abgleich belegt hat.
+    fn end_by_reconciliation<S: FnMut(Action)>(
+        &mut self,
+        now: Instant,
+        request: RequestId,
+        sink: &mut S,
+    ) {
+        let Some(lease) = self.leases.remove(&request) else {
+            return;
+        };
+        self.reconciled = self.reconciled.saturating_add(1);
+        self.release_permit(request);
+        self.scheduler.on_event(
+            now,
+            Event::BackendFailure {
+                request,
+                slot: lease.slot,
+            },
+            sink,
+        );
     }
 
     /// Beantwortet eine Metrikabfrage.
@@ -2125,19 +2304,17 @@ impl Actor {
     /// Inferenzen enthalten; die Basislinie waere dann zu hoch, das Ziel
     /// unerreichbar und der Kredit dauerhaft gehalten. Eine zu hohe Basislinie
     /// ist nicht die sichere Seite, sondern eine andere Art, kaputt zu sein.
-    fn on_baseline(&mut self, model: String, completed: u64) {
-        if self.reconcile_baseline.contains_key(&model) {
+    fn on_baseline(&mut self, identity: &BackendIdentity, completed: u64) {
+        let ledger = self.ledgers.entry(identity.clone()).or_default();
+        if ledger.baseline.is_some() {
             // Eine zweite Meldung ist eine spaetere Momentaufnahme und als
             // Basislinie falsch.
             return;
         }
-        if self
-            .dispatched_per_model
-            .get(&model)
-            .is_some_and(|n| *n > 0)
-        {
+        if ledger.reached > 0 {
             tracing::warn!(
-                %model,
+                endpoint = %identity.endpoint,
+                model = %identity.model,
                 "Basislinie kaeme nach der ersten Auslieferung und waere \
                  womoeglich zu hoch; fuer dieses Modell gibt es keinen \
                  zaehlerbasierten Endnachweis. Governor bei erreichbarem \
@@ -2145,7 +2322,8 @@ impl Actor {
             );
             return;
         }
-        self.reconcile_baseline.insert(model, completed);
+        ledger.baseline = Some(completed);
+        ledger.highest = ledger.highest.max(completed);
         // Und sofort die Anspruechen nachziehen, die auf sie gewartet haben.
         // Nicht erst beim naechsten Tick: in einem leeren System gibt es
         // keinen — der Actor schlaeft dann, bis wieder Arbeit kommt, und ein
@@ -2153,10 +2331,23 @@ impl Actor {
         self.retry_pending_reconciliation();
     }
 
-    /// Wie viele Backendmodelle keine Abgleichs-Basislinie haben.
+    /// Wie viele Backendidentitaeten keine Abgleichs-Basislinie haben.
+    ///
+    /// Gezaehlt ueber dieselbe Menge, fuer die der Start eine Basislinie
+    /// holt: zwei Kameras auf dasselbe Modell am selben Server sind **eine**
+    /// Identitaet. Vorher zaehlte die Kennzahl logische Varianten gegen
+    /// eindeutige Namen, und zwei Aliase erschienen dauerhaft als eine
+    /// fehlende Basislinie (Review R02).
     fn baselines_missing(&self) -> u64 {
-        let total: usize = self.config.backend_models.iter().map(Vec::len).sum();
-        u64::try_from(total.saturating_sub(self.reconcile_baseline.len())).unwrap_or(u64::MAX)
+        let missing = backend_identities(&self.config)
+            .iter()
+            .filter(|identity| {
+                self.ledgers
+                    .get(*identity)
+                    .is_none_or(|ledger| ledger.baseline.is_none())
+            })
+            .count();
+        u64::try_from(missing).unwrap_or(u64::MAX)
     }
 
     /// Versucht ausstehende Abgleiche erneut zu starten.
@@ -2166,14 +2357,14 @@ impl Actor {
     /// ein Aufruf, der genau davor abbricht, soll deshalb nicht dauerhaft
     /// unversorgt bleiben.
     fn retry_pending_reconciliation(&mut self) {
-        let waiting: Vec<(RequestId, Lease)> = self
+        let waiting: Vec<(RequestId, BackendIdentity)> = self
             .leases
             .iter()
             .filter(|(_, lease)| lease.state == LeaseState::AwaitingBaseline)
-            .map(|(id, lease)| (*id, lease.clone()))
+            .map(|(id, lease)| (*id, lease.identity.clone()))
             .collect();
-        for (request, lease) in waiting {
-            if self.start_reconciliation(&lease)
+        for (request, identity) in waiting {
+            if self.start_reconciliation(&identity)
                 && let Some(entry) = self.leases.get_mut(&request)
             {
                 entry.state = LeaseState::Reconciling;
@@ -2189,19 +2380,6 @@ impl Actor {
     fn on_hardware_state(&mut self, state: StateClass) {
         self.scheduler
             .observe_hardware(state, self.profile_revision);
-    }
-
-    /// Der Client fuer ein Backendmodell, sofern eindeutig bestimmbar.
-    fn backend_for_model_name(&self, backend_model: &str) -> Option<Arc<dyn Executor>> {
-        let index = self
-            .config
-            .backend_models
-            .iter()
-            .position(|variants| variants.iter().any(|v| v == backend_model))?;
-        let model = vig_core::ModelIdx(u16::try_from(index).ok()?);
-        self.backends
-            .get(self.config.endpoint_of(model))
-            .map(Arc::clone)
     }
 
     /// Vergisst allen Zustand, den ein Request hinterlassen haben kann.
@@ -2336,25 +2514,44 @@ impl Actor {
 ///
 /// Einmal beim Start und nicht beim Abgleich: eine Basislinie, die erst der
 /// Abgleich abfragt, kaeme zu spaet.
-fn spawn_baseline_probe(
-    tx: &mpsc::Sender<Msg>,
-    config: &Arc<Resolved>,
-    backends: &HashMap<String, Arc<dyn Executor>>,
-) {
-    // Je Backendmodell den Client seines Endpunkts.
-    let mut targets: Vec<(String, Arc<dyn Executor>)> = Vec::new();
+/// Alle Backendidentitaeten der Konfiguration, ohne Doppelte.
+///
+/// Zwei logische Modelle auf dasselbe Backendmodell am selben Server teilen
+/// sich einen Zaehler und damit eine Identitaet; derselbe Name an zwei
+/// Servern sind zwei.
+fn backend_identities(config: &Resolved) -> Vec<BackendIdentity> {
+    let mut identities: Vec<BackendIdentity> = Vec::new();
     for (index, variants) in config.backend_models.iter().enumerate() {
         let Ok(model_index) = u16::try_from(index) else {
             continue;
         };
         let endpoint = config.endpoint_of(vig_core::ModelIdx(model_index));
-        let Some(backend) = backends.get(endpoint) else {
-            continue;
-        };
         for name in variants {
-            targets.push((name.clone(), Arc::clone(backend)));
+            let identity = BackendIdentity {
+                endpoint: endpoint.to_owned(),
+                model: name.clone(),
+            };
+            if !identities.contains(&identity) {
+                identities.push(identity);
+            }
         }
     }
+    identities
+}
+
+fn spawn_baseline_probe(
+    tx: &mpsc::Sender<Msg>,
+    config: &Arc<Resolved>,
+    backends: &HashMap<String, Arc<dyn Executor>>,
+) {
+    // Je Identitaet — Server und Modell — den Client ihres Endpunkts.
+    let targets: Vec<(BackendIdentity, Arc<dyn Executor>)> = backend_identities(config)
+        .into_iter()
+        .filter_map(|identity| {
+            let backend = Arc::clone(backends.get(&identity.endpoint)?);
+            Some((identity, backend))
+        })
+        .collect();
 
     let tx = tx.clone();
     let interval = std::time::Duration::from_millis(RECONCILE_INTERVAL_MS);
@@ -2366,17 +2563,18 @@ fn spawn_baseline_probe(
         let mut open = targets;
         while !open.is_empty() {
             let mut still_open = Vec::new();
-            for (model, backend) in open {
-                match backend.completion_evidence(&model).await {
+            for (identity, backend) in open {
+                match backend.completion_evidence(&identity.model).await {
                     Ok(evidence) => {
                         tracing::debug!(
-                            %model,
+                            endpoint = %identity.endpoint,
+                            model = %identity.model,
                             completed = evidence.completed,
                             "Abgleichs-Basislinie geholt"
                         );
                         if tx
                             .send(Msg::ReconcileBaseline {
-                                model,
+                                identity,
                                 completed: evidence.completed,
                             })
                             .await
@@ -2387,12 +2585,14 @@ fn spawn_baseline_probe(
                     }
                     Err(error) => {
                         tracing::warn!(
-                            %model, %error,
+                            endpoint = %identity.endpoint,
+                            model = %identity.model,
+                            %error,
                             "noch keine Abgleichs-Basislinie vom Backend; \
                              bis dahin haelt ein abgebrochener Aufruf seinen \
                              Slotkredit"
                         );
-                        still_open.push((model, backend));
+                        still_open.push((identity, backend));
                     }
                 }
             }

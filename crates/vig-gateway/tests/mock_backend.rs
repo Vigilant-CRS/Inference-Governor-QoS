@@ -91,6 +91,12 @@ pub struct MockBackend {
     /// im Unterschied zu einem abgelehnten Verbindungsaufbau, der etwas ganz
     /// anderes ueber die Ausfuehrung aussagt.
     pub fail_with: std::sync::Mutex<Option<tonic::Code>>,
+    /// Wenn nicht leer, meldet die Statistik je Eintrag eine Modellversion
+    /// mit diesem Abschlusszaehler statt eines einzigen Eintrags.
+    ///
+    /// Triton liefert ohne Versionsfilter eine Statistik je geladener
+    /// Version (Review R02).
+    pub stat_versions: std::sync::Mutex<Vec<(String, u64)>>,
 }
 
 impl MockBackend {
@@ -111,6 +117,7 @@ impl MockBackend {
             completed: AtomicU64::new(0),
             last_inference_ms: AtomicU64::new(0),
             fail_with: std::sync::Mutex::new(None),
+            stat_versions: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -409,25 +416,34 @@ impl GrpcInferenceService for Service {
         r: Request<ModelStatisticsRequest>,
     ) -> Result<Response<ModelStatisticsResponse>, Status> {
         let name = r.into_inner().name;
-        Ok(Response::new(ModelStatisticsResponse {
-            model_stats: vec![ModelStatistics {
-                name,
-                version: "1".to_owned(),
-                last_inference: self.inner.last_inference_ms.load(Ordering::Relaxed),
-                inference_count: 0,
-                execution_count: 0,
-                inference_stats: Some(InferStatistics {
-                    success: Some(StatisticDuration {
-                        count: self.inner.completed.load(Ordering::Relaxed),
-                        ns: 0,
-                    }),
-                    ..Default::default()
-                }),
-                batch_stats: Vec::new(),
-                memory_usage: Vec::new(),
-                response_stats: std::collections::HashMap::new(),
-            }],
-        }))
+        let last_inference = self.inner.last_inference_ms.load(Ordering::Relaxed);
+        let entry = |version: String, count: u64| ModelStatistics {
+            name: name.clone(),
+            version,
+            last_inference,
+            inference_count: 0,
+            execution_count: 0,
+            inference_stats: Some(InferStatistics {
+                success: Some(StatisticDuration { count, ns: 0 }),
+                ..Default::default()
+            }),
+            batch_stats: Vec::new(),
+            memory_usage: Vec::new(),
+            response_stats: std::collections::HashMap::new(),
+        };
+        let versions = self.inner.stat_versions.lock().unwrap().clone();
+        let model_stats = if versions.is_empty() {
+            vec![entry(
+                "1".to_owned(),
+                self.inner.completed.load(Ordering::Relaxed),
+            )]
+        } else {
+            versions
+                .into_iter()
+                .map(|(version, count)| entry(version, count))
+                .collect()
+        };
+        Ok(Response::new(ModelStatisticsResponse { model_stats }))
     }
 
     async fn repository_index(

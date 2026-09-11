@@ -191,6 +191,25 @@ Verbindungsgrenze am Metrikport.
 
 ### Behoben
 
+- **Nach einem Backend-Neustart konnte neue Arbeit zu frueh freigegeben
+  werden** (Review 11.09., R01, [ADR-0040](docs/adr/0040-a-restart-proves-only-what-died-with-it.md)).
+  Der Abgleichs-Poller merkte sich den hoechsten Zaehlerstand selbst und
+  nannte jeden niedrigeren einen Neustart; nach 100 → 0 → 0 gab auch die
+  dritte Meldung jeden gehaltenen Kredit frei, auch den eines Aufrufs, der
+  erst nach dem Reset entstanden war und im neuen Prozess rechnete. Jetzt
+  entscheidet der Actor je Epoche: ein Neustart beendet nur Anspruechen,
+  deren Verbindung schon abgebrochen ist; Aufrufe mit offener Verbindung
+  wandern in die neue Epoche, die beim gemeldeten Stand beginnt. Je
+  Identitaet laeuft hoechstens ein Poller, und er endet mit dem Nachweis —
+  vorher startete jeder Abbruch einen eigenen, der nie endete.
+- **Der Abgleich verwechselte Server und Versionen** (Review 11.09., R02).
+  Basislinie und Auslieferungssumme hingen am Modellnamen, und der Abgleich
+  fragte den ersten Server mit diesem Namen — auch fuer einen Aufruf an einen
+  zweiten Server derselben GPU. Jetzt ist der Schluessel Server plus Modell.
+  Die Statistik zaehlt ueber alle Versionen statt nur ueber den ersten
+  Eintrag. `vig_reconcile_baseline_missing` zaehlt eindeutige Identitaeten:
+  zwei Kameras auf dasselbe Modell erschienen vorher dauerhaft als eine
+  fehlende Basislinie.
 - **Der Abhaengigkeitsgraph lief nach 256 Aufnahmen voll** (NV-17). Kein
   Pfad setzte einen Knoten je auf einen Endzustand; danach lehnte das Gateway
   jede Anfrage mit `vig_capture_id` ab. Jedes Ende — Fertigstellung,

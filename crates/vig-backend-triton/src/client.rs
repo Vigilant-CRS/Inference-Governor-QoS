@@ -343,6 +343,15 @@ impl TritonClient {
     /// Schedulingzeit. Sie wird ausschliesslich fuer diesen Abgleich benutzt
     /// und fliesst in keine Planungsentscheidung ein.
     ///
+    /// Gezaehlt wird **ueber alle Versionen** des Modells. Ohne Versionsfilter
+    /// liefert Triton je geladener Version einen Eintrag, und die Zaehler
+    /// gelten je Version. Frueher galt der erste Eintrag: lief die Arbeit auf
+    /// einer anderen Version, stand der Zaehler still, und ein gehaltener
+    /// Kredit kam nie zurueck (Review R02). Die Summe ist unabhaengig davon,
+    /// welche Version die Versionspolicy gerade waehlt, und sie waechst nur
+    /// mit abgeschlossener Arbeit. Faellt eine Version weg, faellt die Summe —
+    /// das liest der Abgleich als neue Epoche.
+    ///
     /// # Errors
     ///
     /// Siehe [`BackendError`]. Meldet das Backend keine Statistik zu diesem
@@ -358,23 +367,22 @@ impl TritonClient {
             .map_err(BackendError::from)?
             .into_inner();
 
-        let stats = response
-            .model_stats
-            .into_iter()
-            .find(|s| s.name == model)
-            .ok_or_else(|| BackendError::UnknownModel {
-                model: model.to_owned(),
-            })?;
-
-        let inference = stats.inference_stats.unwrap_or_default();
-        let completed = inference
-            .success
-            .map_or(0, |d| d.count)
-            .saturating_add(inference.fail.map_or(0, |d| d.count));
-
-        Ok(Evidence {
-            completed,
-            last_inference_ms: stats.last_inference,
+        let mut evidence: Option<Evidence> = None;
+        for stats in response.model_stats.into_iter().filter(|s| s.name == model) {
+            let inference = stats.inference_stats.unwrap_or_default();
+            let completed = inference
+                .success
+                .map_or(0, |d| d.count)
+                .saturating_add(inference.fail.map_or(0, |d| d.count));
+            let sum = evidence.get_or_insert(Evidence {
+                completed: 0,
+                last_inference_ms: 0,
+            });
+            sum.completed = sum.completed.saturating_add(completed);
+            sum.last_inference_ms = sum.last_inference_ms.max(stats.last_inference);
+        }
+        evidence.ok_or_else(|| BackendError::UnknownModel {
+            model: model.to_owned(),
         })
     }
 
