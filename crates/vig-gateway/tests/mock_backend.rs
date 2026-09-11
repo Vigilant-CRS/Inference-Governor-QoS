@@ -212,7 +212,11 @@ pub async fn start(backend: Arc<MockBackend>) -> SocketAddr {
     let address = listener.local_addr().unwrap();
     let service = Service { inner: backend };
     tokio::spawn(async move {
-        let stream = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        // TCP_NODELAY wie `vig serve` und Triton. `serve_with_incoming`
+        // uebergeht die Einstellung des Builders; ohne sie wartet eine
+        // Antwort gelegentlich auf das verzoegerte ACK des Clients, rund 40 ms
+        // (docs/benchmark/arm-serve.md).
+        let stream = tonic::transport::server::TcpIncoming::from(listener).with_nodelay(Some(true));
         // Dieselben Transportgrenzen wie im Gateway. Ein Backend mit engeren
         // Grenzen wuerde den Vergleich zugunsten des Proxys verfaelschen.
         let _ = tonic::transport::Server::builder()

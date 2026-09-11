@@ -20,6 +20,7 @@ beschrieben und **nicht** als allgemeingültige Produktleistung zu lesen.
 | [`portability.md`](portability.md) | Laeuft es auch vor anderen OIP-Servern? | OVMS: 150/150 ohne Codeaenderung |
 | [`rfdetr-variants.md`](rfdetr-variants.md) | Belegen vier echte RF-DETR-Varianten die Variantenwahl? | **nein** — die Auflaesung bestimmt die Laufzeit, das Modell fast nicht |
 | [`arm-phones.md`](arm-phones.md) | Ist der Kern auf schwacher ARM-Hardware ein Engpass? | **nein** — p99 3–20 µs je Ereignis (Pixel 2/5, A53 bis A76); eine Entscheidung kostet auf dem ältesten Kern 0,08 % einer 33-ms-Periode |
+| [`arm-serve.md`](arm-serve.md) | Was kostet der ganze Governor je Request auf schwacher ARM-Hardware? | **mehr als die Laptop-Budgets erlauben** — Pixel 2: +2,1 ms je Request auf dem Shm-Pfad statt +0,17 ms, größtenteils Kernelzeit; nicht größenabhängig; `vig serve` läuft dort |
 | [`tensorrt.md`](tensorrt.md) | Beseitigt TensorRT den Engpass? | **nein** — Auslastung 103 % → 76 %, Vorsprung halbiert, Engpass bleibt |
 
 ## Regeln, die für jede Zahl hier gelten

@@ -95,7 +95,8 @@ async fn start(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let gateway_address = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        let stream = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        // TCP_NODELAY wie in `vig serve`, siehe `mock_backend::start`.
+        let stream = tonic::transport::server::TcpIncoming::from(listener).with_nodelay(Some(true));
         let _ = tonic::transport::Server::builder()
             .initial_stream_window_size(vig_backend_triton::STREAM_WINDOW_BYTES)
             .initial_connection_window_size(vig_backend_triton::CONNECTION_WINDOW_BYTES)

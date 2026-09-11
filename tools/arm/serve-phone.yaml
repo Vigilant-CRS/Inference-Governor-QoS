@@ -1,0 +1,54 @@
+# `vig serve` auf einem Handy, Triton auf dem Laptop (docs/benchmark/arm-serve.md).
+#
+# Eine verkleinerte Gate-M3-Konfiguration: nur die Modelle mit den kleinsten
+# Eingaben, Copy-Pfad, denn Shared Memory reicht nicht ueber Geraetegrenzen.
+#   pose_main       4x3x224x224 FP32 = 2,4 MB
+#   depth_main      4x3x224x224 FP32 = 2,4 MB
+#   detector_small  8x3x224x224 FP32 = 4,8 MB
+#
+# 127.0.0.1:8001 auf dem Handy ist Triton auf dem Laptop:
+#   adb reverse tcp:8001 tcp:8001
+#
+# Die Profile sind mit `vig profile` **auf dem Handy** gemessen: sie enthalten
+# den USB-Weg zum Laptop und zurueck, denn genau den sieht der Governor. Sie
+# gelten nur fuer diesen Aufbau. Die Perioden sind so gewaehlt, dass `doctor`
+# gruen ist; ueber USB dauert ein Aufruf ein Vielfaches der Rechenzeit.
+version: 1
+
+backend:
+  type: triton
+  grpc_endpoint: "127.0.0.1:8001"
+  slots: 1
+  pipelining_depth: 0
+  safety_margin_percent: 110
+
+models:
+  pose:
+    class: protected
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 250, deadline_ms: 250, max_age_ms: 500 }
+    variants:
+      - id: main
+        backend_model: pose_main
+        quality: { value: 1.00, source: user_declared }
+        profile: { p50_us: 60000, p95_us: 80000, p99_us: 90000, samples: 100 }
+
+  depth:
+    class: high
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 500, deadline_ms: 500, max_age_ms: 1000 }
+    variants:
+      - id: main
+        backend_model: depth_main
+        quality: { value: 1.00, source: user_declared }
+        profile: { p50_us: 60000, p95_us: 80000, p99_us: 90000, samples: 100 }
+
+  detector:
+    class: best_effort
+    queue: { policy: fifo, capacity: 2, overflow: backpressure_client }
+    contract: { deadline_ms: 2000, max_age_ms: 4000 }
+    variants:
+      - id: small
+        backend_model: detector_small
+        quality: { value: 1.00, source: user_declared }
+        profile: { p50_us: 120000, p95_us: 150000, p99_us: 170000, samples: 100 }
