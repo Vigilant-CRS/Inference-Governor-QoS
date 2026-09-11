@@ -108,18 +108,22 @@ vig serve -c measured.yaml
 
 Listens on `127.0.0.1:9001` by default, with metrics on `127.0.0.1:9090`.
 
-**Loopback is deliberate.** There is no authentication and no TLS. If you need
-it reachable from elsewhere, say so explicitly and put something in front of it
-that checks identity:
+**Loopback is deliberate.** By default there is no authentication and no TLS,
+so `vig serve` refuses any other address unless something checks **who** is
+calling — mTLS (`client_ca`) or tokens (`token_file`). TLS alone encrypts but
+checks nobody and is refused too. The one explicit way past this is
+`--insecure-open`, meant for a container whose port is published only on the
+host's loopback (that is what the shipped `docker-compose.yml` does):
 
 ```bash
-vig serve -c measured.yaml --listen 0.0.0.0:9001
+vig serve -c measured.yaml --listen 0.0.0.0:9001 --insecure-open   # container only
 ```
 
 ### Opening the endpoint safely
 
 If it has to be reachable from elsewhere, turn on one of the two mechanisms —
-`vig doctor` warns until you do:
+`vig doctor` warns until you do, and reports `trust: strict` without an
+identity check as not ready:
 
 ```yaml
 backend:
@@ -130,15 +134,31 @@ backend:
     client_ca: /etc/vig/clients-ca.pem   # mTLS: clients need a certificate
     # or, without certificate management:
     token_file: /etc/vig/tokens
+    # model load/unload, tracing, log level, CUDA memory: closed without this
+    admin_token_file: /etc/vig/admin.tokens
 ```
 
 mTLS is the stronger one: a private key does not leave the device, a token
-travels in every request. The token file holds one token per line; `#` starts a
-comment. With either enabled, **every** endpoint requires it — including the
-shared-memory registration, which is the one that matters most.
+travels in every request. The token file holds one token per line, optionally
+named — `robot:<token>`; `#` starts a comment. A token must be at least 16
+characters. With either mechanism enabled, **every gRPC request** requires it —
+including the shared-memory registration, which is the one that matters most.
+The metrics port (`--metrics`, default loopback) is not authenticated; keep it
+on loopback or behind something that is.
+
+The administration endpoints (model load/unload, trace and log settings, CUDA
+shared memory) stay closed in every mode until `admin_token_file` is set, and
+then accept only a token from that file.
+
+Shared-memory registrations through the governor are checked: the key must
+start with `shm_key_prefix` (default `/vig_`), the region must have a size and
+must not overflow, a region belongs to the caller that registered it, and at
+most `max_shm_regions` (default 256) exist. Under `trust: strict` an inference
+may only name regions its own caller registered.
 
 Half a configuration is refused rather than half applied: a certificate without
-a key looks like protection and is none.
+a key looks like protection and is none. What this protects and what it does
+not is listed in [security.md](security.md).
 
 ## Step 4 — point your client at it
 
@@ -211,18 +231,20 @@ governor plans by freshness alone ([ADR-0028](adr/0028-a-fusion-needs-a-common-c
 
 Hints let the application say what it needs **right now**, within bounds the
 operator set. They are off until `backend.hints` is configured, and a hint is
-only accepted from a caller that authenticates with a bearer token
-(`backend.security`). The authority is a number derived from that token;
-`vig serve` prints it at startup for every configured token.
+only accepted from a caller that authenticates with a **named** bearer token
+(`robot:<token>` in the token file). The authority is a number derived from the
+name, not from the token; `vig serve` prints it at startup for every named
+token. An unnamed token authenticates but never sends hints.
 
 ```yaml
 backend:
   hints:
-    authority: 1234567890123     # the number `vig serve` printed for the hint sender's token
+    authority: 1234567890123     # the number `vig serve` printed for the name "robot"
     allow_loosening: false       # action horizons weaken a promise; off by default
     approved_modes: [1, 2]       # modes the operator has named
     min_max_age_ms: 20           # how far "fresher" may go
     max_action_horizon_ms: 200   # how long "not fresher" may last
+    max_ttl_ms: 60000            # longest hint lifetime, 1 ms – 1 h; longer hints are dropped (default 60 s)
 ```
 
 A hint may **tighten** a promise, never silently loosen it: an elevated

@@ -194,6 +194,19 @@ production:
   what the robot needs; only the operator can make it. A system that invents
   its own deadlines cannot be held to them.
 
+## Security
+
+What the governor protects, the secure-deployment checklist and the accepted
+residual risks are in [security.md](security.md). Two runtime signals:
+
+* `vig serve` exits at startup with "ausserhalb von Loopback" — the listen
+  address is not loopback and neither `client_ca` nor `token_file` is set. Set
+  one; `--insecure-open` is only for a container port published on the host's
+  loopback.
+* A client gets `PERMISSION_DENIED` from model load/unload or from
+  unregistering all shared-memory regions — those need a token from
+  `backend.security.admin_token_file`; without that file they are closed.
+
 ## Support boundaries
 
 GitHub issues for bugs and questions about the software. For a commercial
