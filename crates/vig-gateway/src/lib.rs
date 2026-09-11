@@ -21,6 +21,7 @@ pub mod auth;
 pub mod budget;
 pub mod clock;
 pub mod cooperative;
+pub mod datapath_budget;
 pub mod executor;
 pub mod exporter;
 pub mod outcome;

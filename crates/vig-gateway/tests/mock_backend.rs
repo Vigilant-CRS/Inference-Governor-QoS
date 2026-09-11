@@ -137,6 +137,18 @@ impl MockBackend {
             ..Self::new(compute)
         }
     }
+
+    /// Traegt die Rohdatenbytes eines angekommenen Requests ein.
+    ///
+    /// Bis hierher wurde `raw_bytes_seen` nirgends erhoeht: der Zaehler blieb
+    /// auf jedem Pfad null, und die Pruefung „auf dem Shm-Pfad reisen keine
+    /// Rohdaten" bestand, gleichgueltig was der Governor tat. Die Gegenprobe
+    /// in `the_shm_path_never_carries_the_payload` haelt das jetzt fest.
+    fn count_raw_bytes(&self, request: &ModelInferRequest) {
+        let bytes: usize = request.raw_input_contents.iter().map(Vec::len).sum();
+        self.raw_bytes_seen
+            .fetch_add(u64::try_from(bytes).unwrap_or(u64::MAX), Ordering::Relaxed);
+    }
 }
 
 /// Kodiert einen String so, wie OIP Rohdaten fuer `BYTES` erwartet.
@@ -264,6 +276,7 @@ impl GrpcInferenceService for Service {
         r: Request<ModelInferRequest>,
     ) -> Result<Response<ModelInferResponse>, Status> {
         let request = r.into_inner();
+        self.inner.count_raw_bytes(&request);
         self.inner
             .seen_models
             .lock()
@@ -333,6 +346,7 @@ impl GrpcInferenceService for Service {
             .await
             .transpose()?
             .ok_or_else(|| Status::invalid_argument("kein Request im Stream"))?;
+        self.inner.count_raw_bytes(&request);
         tokio::time::sleep(self.inner.compute).await;
         self.inner.served.fetch_add(1, Ordering::Relaxed);
 
