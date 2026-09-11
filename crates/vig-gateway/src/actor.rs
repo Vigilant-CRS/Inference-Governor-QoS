@@ -655,6 +655,10 @@ fn spawn_owned(
     // ihn eingeschaltet hat. Vorher war er gebaut, getestet und durch keine
     // Konfiguration erreichbar (Review R09).
     scheduler.set_miss_aware_policy(config.miss_aware_policy);
+    // NV-06: die Prognose entscheidet nur, wenn der Betreiber es sagt. Ohne
+    // beobachteten Hardwarezustand (`observe_hardware`) faellt jede Zelle
+    // trotzdem auf den bisherigen Weg zurueck — scharf heisst nicht blind.
+    scheduler.set_predictor_mode(config.prediction);
     // NV-18: dasselbe fuer die Hinweispolicy. Ohne `hints:` in der
     // Konfiguration ist sie geschlossen und nimmt nichts an.
     scheduler.set_hint_policy(config.hint_policy);

@@ -590,6 +590,37 @@ fn service_with(endpoint: &str, extra_backend: &str) -> GatewayService {
     GatewayService::new(resolved, backend, handle, clock)
 }
 
+/// `backend.prediction: active` kommt im Scheduler an (NV-06, Review R09).
+///
+/// Dass der scharfe Modus eine Entscheidung aendert, prueft der Kern
+/// (`an_active_predictor_admits_what_the_stale_profile_refuses`). Hier geht
+/// es um die Naht davor: ein Schalter, der im Schema steht und im Actor nicht
+/// ankommt, ist genau der Befund aus R09. Und der Betreiber muss den Modus
+/// **sofort** sehen, nicht erst nach der ersten Fertigstellung.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_prediction_switch_reaches_the_scheduler() {
+    let backend_impl = Arc::new(mock_backend::MockBackend::new(
+        std::time::Duration::from_millis(1),
+    ));
+    let endpoint = mock_backend::start(backend_impl).await.to_string();
+
+    for (extra, expected) in [("", 0), ("  prediction: active\n", 1)] {
+        let resolved = Arc::new(
+            Config::from_yaml(&yaml_with(&endpoint, extra))
+                .unwrap()
+                .resolve()
+                .unwrap(),
+        );
+        let backend = Arc::new(vig_backend_triton::TritonClient::new(endpoint.clone()));
+        let handle = actor::spawn(resolved, &backend, MonotonicClock::start(), &[]).unwrap();
+        let metrics = handle.metrics().await.unwrap();
+        assert_eq!(
+            metrics.predictor_active, expected,
+            "Konfiguration {extra:?}: der Modus muss ab dem Start sichtbar sein"
+        );
+    }
+}
+
 /// Im strikten Modus führt der physische Modellname nicht am Governor vorbei.
 ///
 /// Unkonfigurierte Modelle unverändert durchzureichen ist die dokumentierte

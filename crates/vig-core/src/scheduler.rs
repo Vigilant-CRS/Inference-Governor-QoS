@@ -804,8 +804,13 @@ impl Scheduler {
     /// Bewusst eine ausdrueckliche Handlung des Betreibers: eine Policy, die
     /// sich selbst scharfschaltet, sobald sie genug Daten hat, entzieht
     /// genau die Entscheidung, um die es geht.
-    pub const fn set_predictor_mode(&mut self, mode: Mode) {
+    ///
+    /// Der Metrikabzug wird sofort nachgezogen. Sonst meldete
+    /// `vig_predictor_active` bis zur ersten Fertigstellung den alten Modus —
+    /// und der Betreiber saehe nach dem Einschalten eine Null.
+    pub fn set_predictor_mode(&mut self, mode: Mode) {
         self.predictor.set_mode(mode);
+        self.publish_predictor();
     }
 
     /// Der Schattenvergleich der Prognose (NV-06).

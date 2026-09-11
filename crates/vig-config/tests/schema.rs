@@ -40,6 +40,26 @@ fn a_corun_rule_pointing_at_nothing_is_reported() {
     );
 }
 
+/// NV-06: die Prognose entscheidet nur, wenn der Betreiber es sagt.
+///
+/// Ohne Angabe bleibt sie im Schatten; `active` schaltet sie scharf; ein
+/// anderer Wert wird abgelehnt statt still als Schatten gelesen — wer
+/// „aktiv" vertippt, soll es merken.
+#[test]
+fn the_prediction_mode_is_an_explicit_operator_step() {
+    use vig_core::predictor::Mode;
+
+    let default = Config::from_yaml(EXAMPLE).unwrap().resolve().unwrap();
+    assert_eq!(default.prediction, Mode::Shadow);
+
+    let active = EXAMPLE.replace("  type: triton\n", "  type: triton\n  prediction: active\n");
+    let resolved = Config::from_yaml(&active).unwrap().resolve().unwrap();
+    assert_eq!(resolved.prediction, Mode::Active);
+
+    let typo = EXAMPLE.replace("  type: triton\n", "  type: triton\n  prediction: aktiv\n");
+    assert!(Config::from_yaml(&typo).is_err());
+}
+
 /// Ein vertippter Schluessel wuerde sonst ignoriert, und der Nutzer glaubte,
 /// er haette etwas konfiguriert.
 #[test]

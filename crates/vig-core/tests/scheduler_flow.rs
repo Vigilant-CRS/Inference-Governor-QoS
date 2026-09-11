@@ -116,6 +116,10 @@ struct Backend {
     variants: Vec<vig_core::ids::VariantIdx>,
     /// NV-24: welches Modell, in Dispatchreihenfolge.
     dispatched_models: Vec<ModelIdx>,
+    /// NV-06: die tatsaechliche Laufzeit, falls sie von der geplanten
+    /// abweicht. Ohne sie lernt die Prognose genau das Profil und kann nie
+    /// etwas anderes entscheiden als der bisherige Weg.
+    actual: Option<Duration>,
 }
 
 impl Backend {
@@ -133,7 +137,9 @@ impl Backend {
                     self.dispatched.push(request);
                     self.variants.push(variant);
                     self.dispatched_models.push(model);
-                    let finish = now.checked_add(predicted_runtime).unwrap();
+                    let finish = now
+                        .checked_add(self.actual.unwrap_or(predicted_runtime))
+                        .unwrap();
                     self.pending.push((finish, request, slot));
                 }
                 Action::Terminate { request, state } => self.terminated.push((request, state)),
@@ -853,6 +859,96 @@ fn a_hardware_state_change_invalidates_the_learned_cells() {
     assert!(
         scheduler.predictor_ledger().fallbacks > fallbacks_before,
         "nach dem Zustandswechsel gibt es zunaechst keine belegte Zelle mehr"
+    );
+}
+
+/// Scharf geschaltet aendert die Prognose eine Entscheidung (Review R09).
+///
+/// Der Fall, fuer den NV-06 gebaut ist: das Profil der grossen Variante wurde
+/// unter einem Leistungslimit gemessen (40 ms), die Karte laeuft jetzt ohne
+/// (10 ms). Der bisherige Weg plant mit `max(offline_p99, online_p95)` und
+/// bleibt beim Profil — bei 30 ms Deadline passt die grosse Variante nach
+/// ihm nicht, und er weicht auf die kleine aus. Die belegte Zelle sagt 10 ms,
+/// und scharf geschaltet laeuft die grosse.
+///
+/// Warum die Variantenwahl und nicht die Zulassung: verworfen wird nach dem
+/// Hoechstalter und der **optimistischen** Laufzeit (ADR-0010), nicht nach
+/// der konservativen. Ein freier Slot nimmt den Auftrag in beiden Modi. Was
+/// die konservative Laufzeit entscheidet, ist, welche Qualitaet noch in die
+/// Deadline passt — und genau dort liest der scharfe Modus die Zelle.
+///
+/// Beide Scheduler erleben dieselbe Lernphase; der einzige Unterschied ist
+/// der Modus. Ohne diesen Test waere `backend.prediction: active` ein
+/// Schalter, von dem niemand wuesste, ob er etwas schaltet.
+#[test]
+fn an_active_predictor_keeps_the_quality_a_stale_profile_gives_away() {
+    use vig_core::predictor::{ClockClass, Mode, StateClass, ThrottleClass};
+
+    let learning = contract(
+        Criticality::Protected,
+        QueuePolicy::Latest,
+        Some(33),
+        60,
+        120,
+        &[40, 15],
+    );
+    let mut tight = learning.clone();
+    tight.deadline = ms(30);
+
+    let decide = |mode: Mode| -> Option<VariantIdx> {
+        let mut scheduler = build(vec![learning.clone()], 1);
+        scheduler.set_predictor_mode(mode);
+        scheduler.observe_hardware(
+            StateClass {
+                occupancy: 0,
+                throttle: ThrottleClass::Nominal,
+                clock: ClockClass::Full,
+            },
+            1,
+        );
+        let mut backend = Backend {
+            actual: Some(ms(10)),
+            ..Backend::default()
+        };
+        let mut next_id = 0_u64;
+        run(&mut scheduler, &mut backend, 3_000, |t| {
+            if t % 33 == 0 {
+                next_id = next_id.saturating_add(1);
+                vec![frame(next_id, 0, t, &learning)]
+            } else {
+                Vec::new()
+            }
+        });
+        assert!(
+            scheduler.predictor_ledger().more_optimistic > 0,
+            "die Zelle muss belegt sein und kuerzer als das Profil: {:?}",
+            scheduler.predictor_ledger()
+        );
+
+        // Der Slot ist frei, die Lernphase vorbei. Jetzt der knappe Auftrag.
+        let request = frame(10_000, 0, 3_100, &tight);
+        let mut actions = Vec::new();
+        scheduler.on_event(at(3_100), Event::Arrival(request), &mut |a| {
+            actions.push(a);
+        });
+        actions.iter().find_map(|a| match *a {
+            Action::Dispatch {
+                request, variant, ..
+            } if request == RequestId(10_000) => Some(variant),
+            _ => None,
+        })
+    };
+
+    assert_eq!(
+        decide(Mode::Shadow),
+        Some(VariantIdx(1)),
+        "im Schatten plant der bisherige Weg mit dem Profil: 40 ms passen nicht in \
+         30 ms, es laeuft die kleine Variante"
+    );
+    assert_eq!(
+        decide(Mode::Active),
+        Some(VariantIdx(0)),
+        "scharf geschaltet gilt die belegte Zelle: 10 ms passen, es laeuft die grosse"
     );
 }
 

@@ -346,9 +346,42 @@ pub struct BackendConfig {
     /// erreichbar" sind verschiedene Aussagen.
     #[serde(default)]
     pub miss_aware_policy: bool,
+    /// Ob die zustandsabhaengige Prognose entscheidet (NV-06, ADR-0023).
+    ///
+    /// Voreinstellung `shadow`: sie wird gefuettert und verglichen,
+    /// entschieden wird mit `max(offline_p99, online_p95)`. `active` laesst
+    /// eine belegte Zelle entscheiden, auch nach unten — und genau deshalb ist
+    /// es eine Handlung des Betreibers, keine, die die Policy selbst trifft.
+    ///
+    /// Vor dieser Zeile gab es den scharfen Betrieb nur als Methode am Kern;
+    /// kein Konfigurationsschritt erreichte ihn (Review R09).
+    #[serde(default)]
+    pub prediction: PredictionMode,
     /// Transport- und Zugangssicherung (TLS, mTLS, Token).
     #[serde(default)]
     pub security: SecurityConfig,
+}
+
+/// Wie die zustandsabhaengige Prognose wirkt (NV-06).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PredictionMode {
+    /// Mitschreiben und vergleichen, nicht entscheiden.
+    #[default]
+    Shadow,
+    /// Eine belegte Zelle entscheidet.
+    Active,
+}
+
+impl PredictionMode {
+    /// Die Kernform.
+    #[must_use]
+    pub const fn to_core(self) -> vig_core::predictor::Mode {
+        match self {
+            Self::Shadow => vig_core::predictor::Mode::Shadow,
+            Self::Active => vig_core::predictor::Mode::Active,
+        }
+    }
 }
 
 /// Ein Tensor in der zugesagten Schnittstelle eines logischen Modells.
@@ -1205,6 +1238,8 @@ pub struct Resolved {
     pub security: SecurityConfig,
     /// Ob das Missbudget in die Kandidatenwahl eingeht (NV-24).
     pub miss_aware_policy: bool,
+    /// Ob die zustandsabhaengige Prognose entscheidet (NV-06).
+    pub prediction: vig_core::predictor::Mode,
     /// Die Hinweispolicy des Betreibers (NV-18).
     pub hint_policy: vig_core::hints::HintPolicy,
     /// Die Aktuationskonfiguration, falls eine gesetzt ist (NV-13).
@@ -1620,6 +1655,7 @@ impl Config {
             max_inflight_bytes: self.backend.max_inflight_mib.saturating_mul(1024 * 1024),
             security: self.backend.security.clone(),
             miss_aware_policy: self.backend.miss_aware_policy,
+            prediction: self.backend.prediction.to_core(),
             actuation: self.backend.actuation.clone(),
             interference: resolve_interference(&self.backend.interference, &model_names, findings),
             hint_policy: self
