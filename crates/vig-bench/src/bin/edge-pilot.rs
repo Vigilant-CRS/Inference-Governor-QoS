@@ -1,6 +1,6 @@
 //! `edge-pilot` — der Vig-Edge-Pilot (`docs/pilot/edge-pilot.md`).
 //!
-//! Vier Kameras spielen annotierte Alarm-Clips in Echtzeit ab, der
+//! Vier Kameras spielen annotierte Clips mit Alarmobjekten in Echtzeit ab, der
 //! interne Detektor (RF-DETR, 23 Klassen) ist `protected`, ein Sprachmodell
 //! schreibt Lageberichte als `best_effort`. Gemessen wird, was der schnelle
 //! Alarmpfad unter Last verliert — gegen einen Referenzdurchlauf ohne jede
@@ -36,7 +36,8 @@
 //! ## Was dieses Werkzeug nicht tut
 //!
 //! Es liest nur vorbereitete Daten: sie kommen aus
-//! `tools/pilot/prepare-alarm.sh` (bzw. `prepare-data.sh`), der Detektor aus
+//! einem lokalen Aufbereitungsskript (nicht im Repository) bzw.
+//! `tools/pilot/prepare-data.sh`, der Detektor aus
 //! einer Kopie in einem eigenen Triton-Modellverzeichnis.
 
 #![allow(
@@ -84,7 +85,7 @@ use vig_protocol_oip::inference::{
 fn pilot_dir() -> String {
     std::env::var("VIG_PILOT_DIR").unwrap_or_else(|_| "pilot".to_owned())
 }
-/// Alarmobjekt, Klasse A, Klasse B in der Klassenkarte des internen 23-Klassen-Detektors.
+/// Die Alarmklassen des internen 23-Klassen-Detektors.
 const ALARM_CLASSES: [usize; 3] = [13, 14, 15];
 /// Person im selben Detektor.
 const PERSON_CLASS: usize = 0;
@@ -94,7 +95,7 @@ const SCENARIOS: [(&str, usize, f64); 4] =
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Dataset {
-    Guns,
+    Alarm,
     Mot,
 }
 
@@ -155,7 +156,7 @@ impl Options {
 fn options() -> Options {
     let mut o = Options {
         dataset: Dataset::Alarm,
-        data: format!("{}/guns", pilot_dir()),
+        data: format!("{}/alarm", pilot_dir()),
         seconds: 60,
         repeats: 3,
         scenarios: SCENARIOS.iter().map(|s| s.0.to_owned()).collect(),

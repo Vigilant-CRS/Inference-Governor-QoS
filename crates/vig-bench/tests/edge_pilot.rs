@@ -42,7 +42,7 @@ fn tensor(name: &str, shape: Vec<i64>) -> InferOutputTensor {
     }
 }
 
-/// Eine Klasse A (Klasse 14) mitten im Bild, in jeder Antwort.
+/// Ein Alarmobjekt (Klasse 14) mitten im Bild, in jeder Antwort.
 fn alarm_output() -> backend::FixedOutput {
     let dets: Vec<u8> = [0.5_f32, 0.5, 0.2, 0.2]
         .iter()
@@ -61,9 +61,9 @@ fn alarm_output() -> backend::FixedOutput {
 }
 
 /// 25 fps, 100 Frames: die erste Haelfte ist ein Clip ohne Alarmobjekt, ab Frame
-/// 50 steht die Alarmobjekt genau dort, wo das Backend sie meldet.
+/// 50 steht das Objekt genau dort, wo das Backend sie meldet.
 fn sequence() -> Arc<Sequence> {
-    let gun = BoxN {
+    let object = BoxN {
         x1: 0.4,
         y1: 0.4,
         x2: 0.6,
@@ -73,7 +73,7 @@ fn sequence() -> Arc<Sequence> {
     for frame in gt.iter_mut().skip(50) {
         frame.push(GtObject {
             id: 1,
-            bbox: gun,
+            bbox: object,
             visibility: 1.0,
         });
     }
@@ -154,7 +154,7 @@ fn check(label: &str, report: &ArmReport) {
         "{label}: zu wenige Lieferungen: {cam:?}"
     );
     assert_eq!(cam.rejected, 0, "{label}: {cam:?}");
-    // Die Alarmobjekt kommt bei 2,0 s an; der Lauf dauert 4 s, die Frist 2 s.
+    // Das Objekt kommt bei 2,0 s an; der Lauf dauert 4 s, die Frist 2 s.
     assert_eq!(cam.alarm.events, 1, "{label}: {:?}", cam.alarm);
     assert_eq!(cam.alarm.missed, 0, "{label}: {:?}", cam.alarm);
     assert!(
@@ -162,7 +162,7 @@ fn check(label: &str, report: &ArmReport) {
         "{label}: Alarm nach {} ms",
         cam.alarm.latencies_ms[0]
     );
-    // Das Backend meldet immer eine Alarmobjekt: auf dem Clip ohne Alarmobjekt ist jede
+    // Das Backend meldet immer ein Objekt: auf dem Clip ohne Objekt ist jede
     // Lieferung ein Fehlalarm.
     assert!(cam.negative_deliveries > 0, "{label}: {cam:?}");
     assert_eq!(

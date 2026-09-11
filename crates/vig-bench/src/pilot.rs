@@ -151,7 +151,7 @@ impl GtFilter {
         min_visibility: MIN_VISIBILITY,
         min_height: MIN_HEIGHT,
     };
-    /// Jede annotierte Box. Fuer Alarmobjekte: sie sind klein, und ein
+    /// Jede annotierte Box. Fuer kleine Alarmobjekte: ein
     /// Hoehenfilter wuerde genau die Faelle entfernen, um die es geht.
     pub const ALL: Self = Self {
         min_visibility: 0.0,
@@ -174,7 +174,7 @@ pub enum ArrivalRule {
     AfterStart,
     /// Die erste Sichtbarkeit jedes Tracks, auch am Beginn eines Clips. Fuer
     /// eine Wiedergabeliste aus Clips: ein Clipwechsel ist ein Szenenwechsel,
-    /// und eine Alarmobjekt, die dort schon zu sehen ist, ist trotzdem neu.
+    /// und ein Objekt, das dort schon zu sehen ist, ist trotzdem neu.
     FirstAppearance,
 }
 
@@ -748,7 +748,7 @@ pub struct CameraDef {
     /// Name, Datentyp und Form des Eingangs.
     pub input: (String, String, Vec<i64>),
     /// Die Klassenindizes, die als Zielobjekt zaehlen — Person, oder
-    /// Alarmobjekt/Klasse A/Klasse B.
+    /// die Alarmklassen.
     pub target_classes: Vec<usize>,
     /// Ab dieser Ueberlappung trifft eine Detektion.
     pub iou_threshold: f32,
@@ -1542,12 +1542,12 @@ mod tests {
         );
     }
 
-    /// In einer Wiedergabeliste ist eine Alarmobjekt, die beim Clipwechsel schon
+    /// In einer Wiedergabeliste ist ein Objekt, das beim Clipwechsel schon
     /// sichtbar ist, trotzdem ein neues Ereignis.
     #[test]
     fn first_appearance_counts_objects_visible_from_the_start() {
-        let gun = b(0.4, 0.4, 0.45, 0.45);
-        let gt = vec![vec![person(21, gun)]; 10];
+        let object = b(0.4, 0.4, 0.45, 0.45);
+        let gt = vec![vec![person(21, object)]; 10];
         let after = Sequence::from_frames_with("s", 10, gt.clone(), ArrivalRule::AfterStart);
         let first = Sequence::from_frames_with("s", 10, gt, ArrivalRule::FirstAppearance);
         assert!(after.arrivals().is_empty());
@@ -1555,11 +1555,11 @@ mod tests {
     }
 
     #[test]
-    fn negative_ranges_come_from_the_no_gun_clips() {
+    fn negative_ranges_come_from_the_negative_clips() {
         let clips = "start,frames,kind,clip\n\
-                     0,150,klasse_a,A\n\
+                     0,150,positive,A\n\
                      150,175,negative,B\n\
-                     325,200,Machine_Gun,C\n";
+                     325,200,positive,C\n";
         assert_eq!(negative_ranges(clips).unwrap(), vec![(150, 325)]);
         let seq = Sequence::from_frames("s", 25, vec![Vec::new(); 400])
             .with_negative(&negative_ranges(clips).unwrap());
