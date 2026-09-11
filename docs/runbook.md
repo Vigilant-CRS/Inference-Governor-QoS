@@ -186,6 +186,10 @@ production:
   Do not make a safety function depend on this governor.
 - **Numbers are per hardware configuration.** The logic is portable, the
   numbers are not. See [hardware qualification](hardware-qualification.md).
+- **Every request costs time.** On the shared-memory path at most 300 µs at
+  the median, independent of the frame size; the gRPC copy path is not a
+  supported path for camera frames. The budgets, and the two checks to run on
+  the release machine before a release: [datapath budgets](datapath-budgets.md).
 - **Contracts are never measured.** What has to be fresh is a statement about
   what the robot needs; only the operator can make it. A system that invents
   its own deadlines cannot be held to them.

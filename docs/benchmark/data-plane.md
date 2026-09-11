@@ -78,6 +78,13 @@ zu schlagen waere wertlos.
 
 ## Reproduzieren
 
+Die Berichtsmessung von damals ist seit NV-20 eine Pruefung mit Grenzen: die
+Zahlen oben sind die Grundlage der Datenpfadbudgets
+([`../datapath-budgets.md`](../datapath-budgets.md)), gemessen wird jetzt p50
+und p99 statt eines Mittelwerts, abwechselnd statt in zwei Bloecken.
+
 ```bash
-cargo test --release -p vig-gateway --test end_to_end report_data_plane -- --nocapture
+# auf ruhiger Maschine, nicht neben einem Build
+taskset -c 8-15 cargo test --release -p vig-gateway --test end_to_end \
+  datapath_budgets_hold -- --ignored --nocapture
 ```

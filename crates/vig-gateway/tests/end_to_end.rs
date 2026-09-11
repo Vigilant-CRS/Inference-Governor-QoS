@@ -24,6 +24,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use tonic::transport::Channel;
 use vig_config::Config;
+use vig_gateway::datapath_budget::{self, Latency, Path};
 use vig_gateway::{GatewayService, MonotonicClock, actor};
 use vig_protocol_oip::inference::grpc_inference_service_client::GrpcInferenceServiceClient;
 use vig_protocol_oip::inference::grpc_inference_service_server::GrpcInferenceServiceServer;
@@ -445,135 +446,150 @@ async fn report_proxy_overhead_on_the_grpc_copy_path() {
     println!();
 }
 
-/// Misst, was der Governor auf dem gRPC-Copy-Pfad bei **echten Tensorgroessen**
-/// kostet.
+/// Auf dem Shm-Pfad reist keine Nutzlast durch den Governor (ADR-0003).
 ///
-/// Das ist die Zahl, die ADR-0003 zum Kill-Kriterium erklaert: ein
-/// 1920x1080x3-uint8-Frame sind 6,2 MB, und auf dem Copy-Pfad durchlaeuft die
-/// Nutzlast pro Hop eine Deserialisierung und eine Reserialisierung. Der
-/// Aufwand ist damit eine Eigenschaft des Transports, nicht des Schedulings —
-/// und genau deshalb wird er getrennt ausgewiesen (Spec 4.4).
+/// Die strukturelle Haelfte der Datenpfadbudgets
+/// (`docs/datapath-budgets.md`). Die Zeitmessung faengt eine versehentliche
+/// Kopie erst ab etwa einem Megabyte; bei 150 KB kostete sie rund 240 us und
+/// bliebe unter der Grenze. Diese Pruefung faengt sie bei jeder Groesse — und
+/// ohne Zeitmessung, also in jedem Testlauf, auch auf einem geteilten Runner.
+///
+/// Mit Gegenprobe: ein Zaehler, der auch auf dem Copy-Pfad null bliebe,
+/// bewiese nichts.
 #[tokio::test(flavor = "multi_thread")]
-async fn report_data_plane_overhead_by_payload_size() {
-    println!("\n  Nutzlast   | direkt      | ueber Vigilant | Zusatz       | relativ");
-    println!("  -----------|-------------|----------------|--------------|--------");
+async fn the_shm_path_never_carries_the_payload() {
+    for point in datapath_budget::POINTS
+        .iter()
+        .filter(|p| p.path == Path::SharedMemory)
+    {
+        let (mut via_gateway, backend, _) =
+            start(Duration::from_millis(1), 1_000, 1_500, 60_000).await;
+        let bytes = usize::try_from(point.payload_bytes).unwrap();
+        for id in 0..5 {
+            via_gateway
+                .model_infer(request_with_shm_reference("detector", id, "frames", bytes))
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            backend.served.load(Ordering::Relaxed),
+            5,
+            "{}: die Requests muessen das Backend erreicht haben",
+            point.label
+        );
+        assert_eq!(
+            backend.raw_bytes_seen.load(Ordering::Relaxed),
+            0,
+            "{}: auf dem Shm-Pfad duerfen keine Rohdaten uebertragen werden",
+            point.label
+        );
 
-    // 224x224x3 (Klassifikation), 640x640x3 (YOLO), 1920x1080x3 (Vollbild).
-    for (label, bytes) in [
-        ("150 KB", 224 * 224 * 3_usize),
-        ("1,2 MB", 640 * 640 * 3),
-        ("6,2 MB", 1920 * 1080 * 3),
-    ] {
+        // Gegenprobe: derselbe Aufbau, dieselbe Groesse als Kopie — dann
+        // sieht das Backend die Bytes.
+        via_gateway
+            .model_infer(request_with_payload("detector", 99, bytes))
+            .await
+            .unwrap();
+        assert!(
+            backend.raw_bytes_seen.load(Ordering::Relaxed) > 0,
+            "{}: der Zaehler muss eine Kopie auch sehen",
+            point.label
+        );
+    }
+}
+
+/// Die Datenpfadbudgets halten (NV-20, `docs/datapath-budgets.md`).
+///
+/// Misst jede Zeile der Budgettabelle aus `vig_gateway::datapath_budget`
+/// gegen ein Mock-Backend mit 5 ms Rechenzeit: direkt und ueber den Governor,
+/// **abwechselnd** Request um Request. Zwei Bloecke hintereinander wuerden
+/// jede Drift der Maschine — Takt, ein Hintergrundprozess — einer Seite
+/// allein anrechnen.
+///
+/// Ersetzt die fruehere Berichtsmessung aus `data-plane.md` (Mittelwerte ueber
+/// 40 Runden): ein Mittelwert sagt nichts ueber den Schwanz, und eine Zahl
+/// ohne Grenze entscheidet nichts. Nicht budgetierte Zeilen — Kameraframes auf
+/// dem Copy-Pfad — werden weiter gemessen und berichtet, koennen aber weder
+/// bestehen noch scheitern.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "Zeitmessung: nur auf ruhiger Maschine zur Releasequalifikation, siehe docs/datapath-budgets.md"]
+async fn datapath_budgets_hold() {
+    const WARMUP: u64 = 30;
+    const ROUNDS: u64 = 300;
+
+    fn micros(started: Instant) -> u64 {
+        u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
+    }
+
+    println!(
+        "\n  Pfad         | Nutzlast | direkt p50/p99  | Vigilant p50/p99 | Zusatz p50/p99  | Anteil | Urteil"
+    );
+    println!(
+        "  -------------|----------|-----------------|------------------|-----------------|--------|-------"
+    );
+
+    let mut failures = Vec::new();
+    for point in &datapath_budget::POINTS {
         let (mut via_gateway, _, backend_address) =
             start(Duration::from_millis(5), 5_000, 7_000, 60_000).await;
         let mut direct = tuned_client(&backend_address.to_string()).await;
+        let bytes = usize::try_from(point.payload_bytes).unwrap();
+        let build = |model: &str, id: u64| match point.path {
+            Path::SharedMemory => request_with_shm_reference(model, id, "frames", bytes),
+            Path::GrpcCopy => request_with_payload(model, id, bytes),
+        };
 
-        let rounds = 40_u32;
-        for _ in 0..10 {
-            let _ = direct
-                .model_infer(request_with_payload("detector_large", 0, bytes))
-                .await;
-            let _ = via_gateway
-                .model_infer(request_with_payload("detector", 0, bytes))
-                .await;
+        // Aufwaermen: Verbindungsaufbau und Codepfad-Erstbenutzung gehoeren
+        // nicht in die Messung.
+        for id in 0..WARMUP {
+            let _ = direct.model_infer(build("detector_large", id)).await;
+            let _ = via_gateway.model_infer(build("detector", id)).await;
         }
 
-        let t0 = Instant::now();
-        for id in 0..rounds {
-            direct
-                .model_infer(request_with_payload("detector_large", u64::from(id), bytes))
-                .await
-                .unwrap();
-        }
-        let direct_us = t0.elapsed().as_micros() / u128::from(rounds);
+        // Der Request entsteht vor dem Zeitnehmen: 6 MB Nutzlast anzulegen
+        // ist Aufwand des Clients, nicht des Governors.
+        let mut direct_us = Vec::new();
+        let mut governed_us = Vec::new();
+        for id in 0..ROUNDS {
+            let request = build("detector_large", id);
+            let started = Instant::now();
+            direct.model_infer(request).await.unwrap();
+            direct_us.push(micros(started));
 
-        let t1 = Instant::now();
-        for id in 0..rounds {
-            via_gateway
-                .model_infer(request_with_payload("detector", u64::from(id), bytes))
-                .await
-                .unwrap();
+            let request = build("detector", id);
+            let started = Instant::now();
+            via_gateway.model_infer(request).await.unwrap();
+            governed_us.push(micros(started));
         }
-        let proxied_us = t1.elapsed().as_micros() / u128::from(rounds);
 
-        let overhead = proxied_us.saturating_sub(direct_us);
-        let relative = overhead
-            .saturating_mul(100)
-            .checked_div(direct_us)
-            .unwrap_or(0);
+        let d = Latency::from_samples(&mut direct_us).unwrap();
+        let g = Latency::from_samples(&mut governed_us).unwrap();
+        let a = datapath_budget::assess(point.limit, d, g);
+        let share = a
+            .relative_permille
+            .map_or_else(|| "—".to_owned(), |p| format!("{},{} %", p / 10, p % 10));
         println!(
-            "  {label:>10} | {direct_us:>6} us/R | {proxied_us:>9} us/R | \
-{overhead:>7} us/R | {relative:>4} %"
+            "  {:<12} | {:>8} | {:>6} / {:>6} | {:>7} / {:>6} | +{:>5} / +{:>5} | {share:>6} | {a}",
+            point.path.to_string(),
+            point.label,
+            d.p50_us,
+            d.p99_us,
+            g.p50_us,
+            g.p99_us,
+            a.overhead_p50_us,
+            a.overhead_p99_us,
         );
+        if a.outcome.is_fail() {
+            failures.push(format!("{} {}: {a}", point.path, point.label));
+        }
     }
-    // Zum Vergleich derselbe nominale Tensor, aber als Shm-Referenz.
-    let (mut via_gateway, backend, backend_address) =
-        start(Duration::from_millis(5), 5_000, 7_000, 60_000).await;
-    let mut direct = tuned_client(&backend_address.to_string()).await;
-    let bytes = 1920 * 1080 * 3_usize;
-
-    for _ in 0..10 {
-        let _ = direct
-            .model_infer(request_with_shm_reference(
-                "detector_large",
-                0,
-                "frames",
-                bytes,
-            ))
-            .await;
-        let _ = via_gateway
-            .model_infer(request_with_shm_reference("detector", 0, "frames", bytes))
-            .await;
-    }
-
-    let rounds = 40_u32;
-    let t0 = Instant::now();
-    for id in 0..rounds {
-        direct
-            .model_infer(request_with_shm_reference(
-                "detector_large",
-                u64::from(id),
-                "frames",
-                bytes,
-            ))
-            .await
-            .unwrap();
-    }
-    let direct_us = t0.elapsed().as_micros() / u128::from(rounds);
-
-    let t1 = Instant::now();
-    for id in 0..rounds {
-        via_gateway
-            .model_infer(request_with_shm_reference(
-                "detector",
-                u64::from(id),
-                "frames",
-                bytes,
-            ))
-            .await
-            .unwrap();
-    }
-    let proxied_us = t1.elapsed().as_micros() / u128::from(rounds);
-    let overhead = proxied_us.saturating_sub(direct_us);
-    let relative = overhead
-        .saturating_mul(100)
-        .checked_div(direct_us)
-        .unwrap_or(0);
     println!(
-        "  6,2 MB shm | {direct_us:>6} us/R | {proxied_us:>9} us/R | \
-{overhead:>7} us/R | {relative:>4} %"
+        "\n  Anteil: Median-Zusatz am direkten Aufruf, bewertet ab {} ms.",
+        datapath_budget::REFERENCE_CALL_US / 1_000
     );
 
-    // Der Nachweis, dass die Referenz wirklich durchgereicht wurde und nicht
-    // etwa aufgeloest: das Backend hat Rohdaten nie gesehen.
-    assert_eq!(
-        backend.raw_bytes_seen.load(Ordering::Relaxed),
-        0,
-        "auf dem Shm-Pfad duerfen keine Rohdaten uebertragen werden"
-    );
-
-    println!(
-        "\n  Auf dem Copy-Pfad waechst der Anteil mit der Nutzlast; auf dem\n  \
-         Shm-Pfad bleibt er flach. Genau das ist die Aussage von ADR-0003."
+    assert!(
+        failures.is_empty(),
+        "Datenpfadbudget gerissen: {failures:#?}"
     );
 }
