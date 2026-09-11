@@ -33,6 +33,7 @@
 
 pub mod baseline;
 pub mod coverage;
+pub mod decision;
 pub mod event;
 pub mod harness;
 pub mod rng;
