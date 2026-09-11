@@ -84,14 +84,22 @@ Werkzeugen:
   verwirft 165 ‰ eines nachrangigen Stroms. Die Marge ist es nicht: in der
   Simulation derselben Last entscheidet sie an der Kante nichts. Nächster
   Kandidat ist die Lücke zwischen zwei Aufträgen ohne Pipelining.
-- **Lastspitzen (Spec 19.4):** kein Gewinn (−1,1x, 1,2x) und bei langen
-  Spitzen über niedriger Grundlast ein Verlust (41 gegen 11 ‰). Die längste
-  Lücke hält er kürzer (12–14 gegen 21–22 ms). Ursache in Analyse; das
-  Szenario selbst wird überarbeitet ([Szenarien](benchmark/scenarios.md), S7).
+- **Lastspitzen (Spec 19.4):** gemeldet war kein Gewinn (−1,1x, 1,2x) und bei
+  langen Spitzen über niedriger Grundlast ein Verlust (41 gegen 11 ‰). Das
+  ist die Fenstersicht, und die misst unter Spitzen vor allem Phase: im
+  Simulator verfehlen Governor und FIFO dort gleichermaßen 6–10 % der
+  Fenster, in der Verbrauchersicht keine einzige Abtastung
+  ([Analyse](analysis/bursts-and-frontier.md)). Ob der Governor unter
+  Spitzen schlechter versorgt, ist damit offen; `load-ramp` zeigt jetzt beide
+  Sichten. Das Szenario selbst wird überarbeitet
+  ([Szenarien](benchmark/scenarios.md), S7).
 - **Variantenwahl (Spec 19.7):** Bei 150 % hält die automatische Wahl den
-  Strom (2 gegen 501 ‰ der großen Variante), bei 110–125 % schaltet sie zu
-  spät (66–84 ‰), bei 90 % gar nicht (143 ‰). Ursache in Analyse. Die echten
-  RF-DETR-Varianten geben keinen Betriebspunkt her
+  Strom (2 gegen 501 ‰ der großen Variante), bei 110–125 % verfehlte sie
+  66–84 ‰, bei 90 % 143 ‰. Ursache belegt und behoben: die Wahl prüfte die
+  Deadline (`1,5 P`), nicht die Versorgung (`max_age − P`); der Simulator
+  trifft 71 und 84 ‰, nach der Korrektur 0 ‰ wie die kleine Variante
+  ([Analyse](analysis/bursts-and-frontier.md)). GPU-Bestätigung steht aus.
+  Die echten RF-DETR-Varianten geben keinen Betriebspunkt her
   ([Messung](benchmark/rfdetr-variants.md)); gemessen ist der Mechanismus,
   nicht die Qualität.
 - **Datenpfad (NV-20): bestanden.** Shm-Zusatz +159 µs gegen Triton, +210 bis
@@ -189,11 +197,11 @@ per Voreinstellung nichts. Mit Marge ist `active` sicher, auf Gate M3 aber ohne 
 | Paket | Stand | Was fehlt |
 |---|---|---|
 | NV-15 XSched | gemessen, Gleichstand mit Triton + XSched | R messen statt schätzen: mit festem Takt (braucht Rechte) oder online aus dem Betrieb (ADR-0038). Die Antwort auf die Frage vom 11.09.: Die Lane schützt den Detektor (100 %), und das VLM bekommt unter dem Governor erstmals vollen Fortschritt (100 %). |
-| Lastspitzen und Variantenwahl | Schwäche gemessen, Analyse läuft | Lange Spitzen über niedriger Grundlast: 41 gegen 11 ‰. Variantenwahl bei 90 % ohne Herunterschalten, bei 110–125 % zu spät ([Messung](benchmark/messkette-2026-09-11.md)). |
 | Externer Review vom 11.09. | **alle Befunde behoben** (R01–R08) | R01/R02 ([ADR-0040](adr/0040-a-restart-proves-only-what-died-with-it.md)): ein Backend-Neustart beendet nur Aufrufe, deren Verbindung schon abgebrochen ist; abgeglichen wird je Server und Backendmodell über alle Versionen. R03/R04: Puffer in Pilot und ROS-Brücke werden erst nach belegtem Ende wieder benutzt, sonst Quarantäne. R05: Samplingparameter über einen JSON-Parser. R06–R08: XSched-Level, Bereitschaft, Pilotmatrix mit Wiederaufnahme und Exitcodes. R09 (Gültigkeit je Messzelle) ist Regel in [scenarios.md](benchmark/scenarios.md), aber noch nicht automatisiert ([Review](reviews/2026-09-11-runtime/REVIEW.md)). |
+| Lastspitzen und Variantenwahl | Variantenwahl behoben (Simulator), Lastspitzen neu zu messen | Die Wahl achtet jetzt auf die Versorgung, nicht nur auf die Deadline; im Simulator verfehlt `auto` unter Überlast nichts mehr. Die Lastspitzen-Zahl war die Fenstersicht, die dort Phase misst. Nächster Schritt: `frontier` und `load-ramp bursts` mit beiden Sichten auf der GPU ([Analyse](analysis/bursts-and-frontier.md)). |
 | Zweiter Betriebspunkt | offen | Zwei Ausführungseinheiten (`slots: 2`, Instance Groups mit zwei Instanzen) samt gemessener Parallelprofile. Die Lastrampe sagt selbst, dass sich ihre Kante damit verschiebt. |
 | NV-22 mehrere Ressourcendomänen | **erreichbar, nicht qualifiziert** ([ADR-0037](adr/0037-a-domain-is-a-gpu-with-one-owner.md)) | Gebaut: ein Scheduler je GPU (`backend.domains`, `domain:` am Modell), feste Zuordnung, kein Failover, Kennzahlen je Domäne, `vig doctor` je GPU; mit zwei Fake-Executoren belegt, dass eine belegte oder ausgefallene GPU der anderen weder Slot noch Kredit nimmt. Es fehlt: eine zweite GPU für die Qualifikation (Interferenz über PCIe, Hauptspeicher, Leistungsbudget), Shared-Memory-Registrierung an allen Endpunkten, Domänen in `vig calibrate`. Erledigt aus diesem Block: NV-21 ([ROS-2-Brücke](integrations/ros2.md)) und NV-23 ([begrenzter Nachweis](analysis/nv23-bounded-claim.md)). |
-| Kante bei 100 % | **Ursache offen; Kalibrierung gebaut, opt-in, ungemessen** ([ADR-0038](adr/0038-the-plan-calibrates-to-the-card.md)) | Befund der Rampe vom 11.09.: bei 100 % verliert Triton nichts, Vigilant 165 ‰ eines `high`-Stroms. Die Simulation derselben Last zeigt: an der Kante entscheidet die Marge nichts (110 %, 100 % und gelernt liefern bis 105 % dieselbe Abdeckung); naechster Kandidat ist die Dispatchluecke bei `pipelining_depth: 0`. Gebaut ist trotzdem `backend.margin_learning`: je GPU ein Faktor zwischen Profil und gemessener Laufzeit (Quantilschaetzer auf ein Prozent Ueberziehung, multiplikativ, Geraetefaktor mal Rest je Modell, Boden aus dem beobachteten Median) — in der Simulation konvergiert er auf das p99 der Karte und verhaelt sich wie ein richtiges Profil (±25 ‰). Nach ADR-0036 hungert ein doppelt so langsames Profil mit fester Marge alle anderen Stroeme aus (1000 ‰); gelernt bekommen sie Arbeit zurueck (441–770 ‰), und der Detektor zahlt hoechstens, was ihn ein richtiges Profil kostet. Die Kalibrierung schuetzt nicht staerker als ein richtiges Profil; wer mehr Schutz will, stellt ihn im Vertrag ein. Es fehlt: die Rampe mit `VIG_RAMP_PIPELINING=1`, die Rampe mit Kalibrierung und falschen Profilen (×2, ×0,7), und die Speicherung des Faktors ueber einen Neustart. |
+| Kante bei 100 % | **Ursache offen; Kalibrierung gebaut, opt-in, ungemessen** ([ADR-0038](adr/0038-the-plan-calibrates-to-the-card.md)) | Befund der Rampe vom 11.09.: bei 100 % verliert Triton nichts, Vigilant 165 ‰ eines `high`-Stroms. Die Simulation derselben Last zeigt: an der Kante entscheidet die Marge nichts (110 %, 100 % und gelernt liefern bis 105 % dieselbe Abdeckung); naechster Kandidat ist die Dispatchluecke bei `pipelining_depth: 0` — im Simulator kostet eine Luecke von 0,3–0,6 ms nur auf der Governorseite bei 95–100 % deutlich Abdeckung, ohne Luecke sind beide gleichauf ([Nachstellung](analysis/bursts-and-frontier.md#die-kante-bei-100-)). Gebaut ist trotzdem `backend.margin_learning`: je GPU ein Faktor zwischen Profil und gemessener Laufzeit (Quantilschaetzer auf ein Prozent Ueberziehung, multiplikativ, Geraetefaktor mal Rest je Modell, Boden aus dem beobachteten Median) — in der Simulation konvergiert er auf das p99 der Karte und verhaelt sich wie ein richtiges Profil (±25 ‰). Nach ADR-0036 hungert ein doppelt so langsames Profil mit fester Marge alle anderen Stroeme aus (1000 ‰); gelernt bekommen sie Arbeit zurueck (441–770 ‰), und der Detektor zahlt hoechstens, was ihn ein richtiges Profil kostet. Die Kalibrierung schuetzt nicht staerker als ein richtiges Profil; wer mehr Schutz will, stellt ihn im Vertrag ein. Es fehlt: die Rampe mit `VIG_RAMP_PIPELINING=1`, die Rampe mit Kalibrierung und falschen Profilen (×2, ×0,7), und die Speicherung des Faktors ueber einen Neustart. |
 
 ## Offen für eine Produktionsfreigabe
 

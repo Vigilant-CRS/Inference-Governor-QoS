@@ -139,6 +139,28 @@ impl Coverage {
     pub fn uncovered_permille(&self) -> u64 {
         1_000_u64.saturating_sub(self.covered_permille())
     }
+
+    /// Der Anteil der Abtastzeitpunkte ohne brauchbares Ergebnis, in Promille
+    /// (Verbrauchersicht, NV-01).
+    ///
+    /// Anders als [`Coverage::uncovered_permille`] fragt diese Groesse nicht,
+    /// ob **in** einem Fenster etwas ankam, sondern ob am Ende des Fensters
+    /// etwas Frisches **vorliegt**. Die Fensterfrage kippt, wenn Laufzeit und
+    /// Periode fast gleich lang sind: eine Lieferung knapp nach der
+    /// Fenstergrenze laesst ein Fenster leer und fuellt das naechste doppelt,
+    /// ohne dass dem Verbraucher je etwas fehlte — und unter Saettigung zaehlt
+    /// sie ein Fenster als abgedeckt, dessen Ergebnis beim Abtasten schon zu
+    /// alt ist (docs/analysis/bursts-and-frontier.md).
+    #[must_use]
+    pub fn consumer_uncovered_permille(&self) -> u64 {
+        if self.total == 0 {
+            return 0;
+        }
+        self.total
+            .saturating_sub(self.consumer_covered)
+            .saturating_mul(1_000)
+            / self.total
+    }
 }
 
 impl CoverageTracker {

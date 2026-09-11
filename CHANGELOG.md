@@ -230,6 +230,17 @@ Verbindungsgrenze am Metrikport.
   Eintrag. `vig_reconcile_baseline_missing` zaehlt eindeutige Identitaeten:
   zwei Kameras auf dasselbe Modell erschienen vorher dauerhaft als eine
   fehlende Basislinie.
+- **Die Variantenwahl hielt die Deadline, aber nicht die Versorgung.** Sie
+  nahm die beste Variante, deren Fertigstellung vor der Deadline des Frames
+  lag. Mit `deadline = 1,5 P` und `max_age = 2 P` laeuft das vorige Ergebnis
+  aber schon `P` nach der Aufnahme ab; eine grosse Variante mit Laufzeit ueber
+  der Periode hielt jede Deadline und liess trotzdem Luecken. In `frontier`
+  verfehlte die automatische Wahl deshalb bei 110 und 125 % Last 66 bzw.
+  84 ‰, die kleine Variante allein keine; der Simulator trifft beide Zahlen.
+  Jetzt gewinnt die beste Variante, die vor `Aufnahme + max_age - P` fertig
+  wird, und erst wenn keine das schafft, die beste, die ihre Deadline haelt.
+  Ohne Periode oder ohne `max_age` ueber der Periode aendert sich nichts
+  ([Analyse](docs/analysis/bursts-and-frontier.md)).
 - **Der Abhaengigkeitsgraph lief nach 256 Aufnahmen voll** (NV-17). Kein
   Pfad setzte einen Knoten je auf einen Endzustand; danach lehnte das Gateway
   jede Anfrage mit `vig_capture_id` ab. Jedes Ende — Fertigstellung,
@@ -310,6 +321,16 @@ Verbindungsgrenze am Metrikport.
 
 ### Geaendert
 
+- **`frontier` und `load-ramp` zeigen die Verbrauchersicht** neben den
+  Lieferfenstern. Die Fenstersicht kippt, wenn die Laufzeit an die Periode
+  heranreicht: unter Lastspitzen verfehlte sie im Simulator fuer Governor und
+  FIFO gleichermassen 6–10 % der Detektorfenster, obwohl der Verbraucher nie
+  ohne frisches Ergebnis war, und unter Saettigung meldete sie 7 %, wo 53 %
+  der Abtastungen kein brauchbares Ergebnis hatten. Die bisherigen Zahlen
+  bleiben in der ersten Tabelle vergleichbar. Dazu `Coverage::
+  consumer_uncovered_permille` und `harness::run_captures` fuer
+  Ankunftsprozesse ohne festen Takt
+  ([Analyse](docs/analysis/bursts-and-frontier.md)).
 - **Der Look-ahead rechnet ab der Aufnahme und sieht jede naechste Ankunft**
   ([ADR-0036](docs/adr/0036-the-look-ahead-counts-from-the-capture.md)),
   aus den drei Befunden von NV-23:

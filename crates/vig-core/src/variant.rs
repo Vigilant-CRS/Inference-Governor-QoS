@@ -181,7 +181,9 @@ pub fn resolve(
         start.saturating_add(1)
     };
 
+    let supply = supply_deadline(contract, deadline);
     let mut best_feasible: Option<VariantSelection> = None;
+    let mut best_supplied: Option<VariantSelection> = None;
     let mut fastest: Option<(VariantSelection, Duration)> = None;
     let mut held: Option<VariantSelection> = None;
     let mut any_variant_considered = false;
@@ -268,6 +270,9 @@ pub fn resolve(
             if best_feasible.is_none() {
                 best_feasible = Some(selection);
             }
+            if best_supplied.is_none() && supply.is_none_or(|s| feasibility.finish <= s) {
+                best_supplied = Some(selection);
+            }
             if fastest_feasible.is_none_or(|(_, best)| runtime < best) {
                 fastest_feasible = Some((selection, runtime));
             }
@@ -277,13 +282,16 @@ pub fn resolve(
     // Unter Abwertung gewinnt die schnellste machbare Variante, nicht die
     // beste. Beide erfuellen `min_quality` — die Auswahlschleife laesst nichts
     // anderes zu.
-    let chosen = if ctx.degrade {
-        fastest_feasible
-            .map(|(selection, _)| selection)
-            .or(best_feasible)
+    //
+    // Sonst gewinnt die beste Variante, die den Verbraucher lueckenlos
+    // versorgt; erst wenn keine das schafft, die beste, die ihre Deadline
+    // haelt (siehe [`supply_deadline`]).
+    let preferred = if ctx.degrade {
+        fastest_feasible.map(|(selection, _)| selection)
     } else {
-        best_feasible
+        best_supplied
     };
+    let chosen = preferred.or(best_feasible);
 
     match (chosen, fastest) {
         (Some(best), _) => Resolution::Feasible(apply_hysteresis(contract, state, now, best, held)),
@@ -291,6 +299,43 @@ pub fn resolve(
         (None, None) if any_variant_considered && !any_slot_available => Resolution::NoSlot,
         (None, None) => Resolution::NoVariant,
     }
+}
+
+/// Bis wann das Ergebnis dieses Frames vorliegen muss, damit der Verbraucher
+/// lueckenlos versorgt bleibt (NV-01).
+///
+/// Das Ergebnis des vorigen Frames laeuft `max_age` nach dessen Aufnahme ab,
+/// also `max_age - period` nach der Aufnahme dieses Frames. Kommt dieses
+/// spaeter, hat der Verbraucher dazwischen nichts Brauchbares — auch wenn der
+/// Frame seine eigene Deadline haelt. Ein Vertrag mit `deadline = 1,5 P` und
+/// `max_age = 2 P` erlaubt genau das: die Deadline laesst `1,5 P`, die
+/// Versorgung nur `P`.
+///
+/// Gemessen (docs/analysis/bursts-and-frontier.md): mit einer grossen
+/// Variante, deren geplante Laufzeit ueber der Periode lag, waehlte die
+/// Variantenwahl sie bei 110 und 125 % Last immer wieder, weil jeder einzelne
+/// Frame seine Deadline hielt, und verfehlte 66 bzw. 84 ‰ der Perioden,
+/// waehrend die kleine Variante allein keine verfehlte.
+///
+/// Die Aufnahmezeit steht nicht im Planungskontext; sie folgt aus der
+/// absoluten Deadline und der Vertragsdeadline. Hat ein Hinweis die Deadline
+/// verschaerft (ADR-0029), liegt die Versorgungsfrist dadurch frueher — das
+/// ist die vorsichtige Richtung.
+///
+/// `None`, wenn der Vertrag keine Periode oder kein Hoechstalter nennt, wenn
+/// `max_age` die Periode nicht uebersteigt (dann versorgt nichts lueckenlos,
+/// und es bleibt bei der Deadline) oder wenn die Versorgungsfrist ohnehin
+/// nicht vor der Deadline liegt.
+fn supply_deadline(contract: &ModelContract, deadline: Option<Instant>) -> Option<Instant> {
+    let deadline = deadline?;
+    let window = contract.max_age?.saturating_sub(contract.period?);
+    if window.as_nanos() == 0 {
+        return None;
+    }
+    let supply = deadline
+        .saturating_sub(contract.deadline)
+        .checked_add(window)?;
+    (supply < deadline).then_some(supply)
 }
 
 /// Bremst Aufwertungen, laesst Abwertungen sofort zu (Spec 12.4).

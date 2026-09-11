@@ -177,9 +177,53 @@ pub fn run(scenario: &Scenario, governor: Governor, label: String, seed: u64) ->
 #[must_use]
 pub fn run_observed<F>(
     scenario: &Scenario,
+    governor: Governor,
+    label: String,
+    seed: u64,
+    step: F,
+) -> RunResult
+where
+    F: FnMut(&mut Governor, Instant, Event, &mut Actions),
+{
+    run_inner(scenario, governor, label, seed, None, step)
+}
+
+/// Faehrt einen Lauf mit vorgegebenen Aufnahmezeitpunkten je Strom.
+///
+/// Fuer Ankunftsprozesse, die kein fester Takt sind — etwa Lastspitzen, in
+/// denen dieselbe Kamera zeitweise schneller liefert (`load-ramp bursts`).
+/// Vertraege, Laufzeiten, Transport und Abdeckung kommen weiter aus dem
+/// Szenario; nur die Aufnahmezeitpunkte ersetzen den periodischen Prozess.
+/// `captures[i]` gehoert zu `scenario.streams[i]`; Zeitpunkte nach dem Ende
+/// des Laufs werden ignoriert.
+///
+/// # Panics
+///
+/// Wie [`run`].
+#[must_use]
+pub fn run_captures(
+    scenario: &Scenario,
+    governor: Governor,
+    label: String,
+    seed: u64,
+    captures: &[Vec<Instant>],
+) -> RunResult {
+    run_inner(
+        scenario,
+        governor,
+        label,
+        seed,
+        Some(captures),
+        Governor::on_event,
+    )
+}
+
+fn run_inner<F>(
+    scenario: &Scenario,
     mut governor: Governor,
     label: String,
     seed: u64,
+    captures: Option<&[Vec<Instant>]>,
     mut step: F,
 ) -> RunResult
 where
@@ -214,6 +258,7 @@ where
         scenario,
         &contracts,
         seed,
+        captures,
         &mut clock,
         &mut meta,
         &mut pending,
@@ -299,6 +344,7 @@ fn schedule_arrivals(
     scenario: &Scenario,
     contracts: &ArrayVec<ModelContract, MAX_MODELS>,
     seed: u64,
+    captures: Option<&[Vec<Instant>]>,
     clock: &mut crate::event::SimClock,
     meta: &mut HashMap<u64, (usize, Instant)>,
     pending: &mut HashMap<u64, RequestDescriptor>,
@@ -310,9 +356,18 @@ fn schedule_arrivals(
         .unwrap_or(Instant::from_nanos(u64::MAX));
 
     for (model, stream) in scenario.streams.iter().enumerate() {
+        let given = captures.map(|c| c.get(model).map_or(&[][..], Vec::as_slice));
         let mut n = 0_u64;
         loop {
-            let capture = stream.capture_spec().capture_at(n, &mut arrival_rng);
+            let capture = match given {
+                Some(list) => {
+                    let Some(at) = usize::try_from(n).ok().and_then(|i| list.get(i)) else {
+                        break;
+                    };
+                    *at
+                }
+                None => stream.capture_spec().capture_at(n, &mut arrival_rng),
+            };
             if capture >= end {
                 break;
             }

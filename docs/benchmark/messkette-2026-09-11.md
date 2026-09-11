@@ -77,6 +77,15 @@ Szenario selbst — hier heißt eine Spitze, dass dieselbe Kamera schneller
 liefert, als ihr Vertrag sagt. Realistischer ist eine zusätzliche Kamera oder
 eine Häufung von Anfragen nach einem Alarm (S7).
 
+**Nachtrag, Analyse ([bursts-and-frontier](../analysis/bursts-and-frontier.md)).**
+Die Zahlen oben sind die Fenstersicht. Im Simulator mit denselben Strömen,
+Verträgen und Aufnahmezeitpunkten verfehlen Governor und FIFO dort
+gleichermaßen 59–95 ‰ der Detektorfenster und in der Verbrauchersicht keine
+einzige Abtastung; eine halbe Millisekunde mehr Transport verschiebt die
+Fenstersicht um 20 ‰. Der Unterschied 41 gegen 11 ‰ ist deshalb kein
+belegter Unterschied in der Versorgung. `load-ramp` zeigt ab jetzt beide
+Sichten; die Messung ist zu wiederholen.
+
 ## Variantenwahl (Frontier): stark bei Überlast, eine Anomalie bei 90 %
 
 Nachlauf, ohne Fremdlast. Ein Detektor allein, große und kleine Variante.
@@ -98,6 +107,19 @@ beiden Läufen gezeigt, in der Kette mit 126/162 ‰ bei 90 %. Die Hysterese
 (Dwell) hilft: ohne sie ist es bei 110–125 % schlechter. Eine Analyse läuft;
 die Vermutung ist Aliasing zwischen Periode und Laufzeit bei 90 % und eine
 Wahl, die auf die geplante Laufzeit statt auf verfehlte Perioden schaut.
+
+**Nachtrag, Analyse ([bursts-and-frontier](../analysis/bursts-and-frontier.md)).**
+Beides trifft zu, mit einer genaueren Ursache. Der Vertrag (`deadline =
+1,5 P`, `max_age = 2 P`) lässt zu, dass ein Frame seine Deadline hält und der
+Verbraucher trotzdem eine Lücke hat: das vorige Ergebnis läuft schon `P` nach
+dieser Aufnahme ab. Die Variantenwahl prüfte nur die Deadline und blieb
+deshalb auf der großen Variante, auch wo deren Laufzeit an die Periode
+reichte. Der Simulator trifft `auto` bei 110 und 125 % mit 71 und 84 ‰; seit
+der Korrektur wählt sie die beste Variante, die vor `Aufnahme + max_age − P`
+fertig wird, und verfehlt dort 0 ‰ wie die kleine. Die 1–2 ‰ bei 100 % sind
+die zu gute Fenstersicht einer gesättigten Variante: im Simulator fehlt dort
+bei der Hälfte der Abtastungen ein brauchbares Ergebnis. `frontier` zeigt ab
+jetzt beide Sichten.
 
 ## XSched und Präemption (NV-15)
 
@@ -143,7 +165,7 @@ Zeile oben stammt aus dem Nachlauf mit Level 3.
 | Stationäre Überlast: 21–125x beim Detektor | hält | — |
 | Datenpfad: +159–236 µs, alle Budgets | bestanden | Budgets je Plattform (ARM, [arm-serve](arm-serve.md)) |
 | Kante bei 100 %: 165 ‰ Verlust eines nachrangigen Stroms | Schwäche, Ursache offen (nicht die Marge) | Messung mit Pipelining |
-| Lastspitzen: kein Gewinn, einmal −3,7x | Schwäche | Analyse; Szenario S7 statt schnellerer Kamera |
-| Variantenwahl: stark bei 150 %, falsch bei 90 %, spät bei 110–125 % | Schwäche | Analyse |
+| Lastspitzen: kein Gewinn, einmal −3,7x | Fenstersicht misst dort Phase, Versorgung unbelegt ([Analyse](../analysis/bursts-and-frontier.md)) | Neu messen mit Verbrauchersicht; Szenario S7 statt schnellerer Kamera |
+| Variantenwahl: stark bei 150 %, falsch bei 90 %, spät bei 110–125 % | Ursache belegt, behoben im Simulator ([Analyse](../analysis/bursts-and-frontier.md)) | `frontier` auf dem neuen Stand |
 | Präemption: Triton + XSched ≈ Vigilant + Lane | Gleichstand, VLM erstmals 100 % unter dem Governor | R messen (ADR-0038 oder fester Takt) |
 | Pilot (Aufgabenmetriken) | nicht gelaufen | erst nach den Pufferfehlern aus dem Review (R03, R07) |

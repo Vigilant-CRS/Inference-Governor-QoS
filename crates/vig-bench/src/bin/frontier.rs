@@ -316,6 +316,51 @@ fn uncovered(reports: &[StreamReport]) -> u64 {
         .map_or(1_000, |r| r.coverage.uncovered_permille())
 }
 
+/// Die Verbrauchersicht: Abtastzeitpunkte ohne brauchbares Ergebnis.
+///
+/// Neben der Fenstersicht, weil die hier kippt: liegt die Laufzeit der
+/// grossen Variante nahe an der Periode, faellt eine Lieferung mal knapp vor,
+/// mal knapp hinter eine Fenstergrenze, und die Fenstersicht zaehlt leere
+/// Fenster, in denen dem Verbraucher nichts fehlte. Unter Saettigung zaehlt
+/// sie umgekehrt Fenster als abgedeckt, deren Ergebnis beim Abtasten schon zu
+/// alt ist (docs/analysis/bursts-and-frontier.md).
+fn consumer_uncovered(reports: &[StreamReport]) -> u64 {
+    reports
+        .iter()
+        .find(|r| r.name == "detector")
+        .map_or(1_000, |r| r.coverage.consumer_uncovered_permille())
+}
+
+/// Eine Tabellenzeile: je Policy Median und Spannweite, dazu die Systemlast.
+fn table_row(load: u64, effective: u64, columns: &[Vec<u64>; 4], loads: &[String]) -> String {
+    let mut row = format!("  {load:>3} % ({effective:>3} %) |");
+    for column in columns {
+        let (lo, hi) = spread(column);
+        let _ = write!(row, " {:>4} ‰ [{lo}-{hi}]", median(column.clone()));
+        let width = row.len();
+        // Spalten ausrichten, auch wenn die Spannweite unterschiedlich lang ist.
+        let pad = 19_usize.saturating_sub(width.saturating_sub(row.rfind('|').unwrap_or(0)));
+        row.push_str(&" ".repeat(pad));
+        row.push('|');
+    }
+    let _ = write!(row, " {}", loads.join(" "));
+    row
+}
+
+fn print_table(title: &str, rows: &[String]) {
+    println!("{title}\n");
+    println!(
+        "  Last (eff.) | gross            | klein            | auto             | auto ohne Dwell  | Last-Ø"
+    );
+    println!(
+        "  ------------|------------------|------------------|------------------|------------------|-------"
+    );
+    for row in rows {
+        println!("{row}");
+    }
+    println!();
+}
+
 /// Ein laufendes Gateway, das sich wieder beenden laesst.
 struct Gateway {
     address: String,
@@ -479,21 +524,16 @@ async fn run() {
          Das Paar ist ein Laufzeitpaar, kein Detektorpaar.\n"
     );
 
-    println!("Unabgedeckte Perioden (Median [Spannweite]), je Variantenpolicy:\n");
-    println!(
-        "  Last (eff.) | gross            | klein            | auto             | auto ohne Dwell  | Last-Ø"
-    );
-    println!(
-        "  ------------|------------------|------------------|------------------|------------------|-------"
-    );
-
     let duration = Duration::from_secs(SECONDS);
     let mut decision_rows = Vec::new();
+    let mut window_rows = Vec::new();
+    let mut consumer_rows = Vec::new();
     for load in LOADS {
         let period = period_ms(large, load);
         let effective = large.p50.saturating_mul(100) / period.saturating_mul(1_000).max(1);
 
         let mut unc: [Vec<u64>; 4] = Default::default();
+        let mut cons: [Vec<u64>; 4] = Default::default();
         let mut auto: Vec<Decisions> = Vec::new();
         let mut no_dwell: Vec<Decisions> = Vec::new();
         let mut loads = Vec::new();
@@ -509,6 +549,9 @@ async fn run() {
                 if let Some(column) = unc.get_mut(policy.index()) {
                     column.push(uncovered(&reports));
                 }
+                if let Some(column) = cons.get_mut(policy.index()) {
+                    column.push(consumer_uncovered(&reports));
+                }
                 match policy {
                     Policy::Auto => auto.push(decisions(&metrics, SECONDS)),
                     Policy::AutoNoDwell => no_dwell.push(decisions(&metrics, SECONDS)),
@@ -517,22 +560,25 @@ async fn run() {
             }
         }
 
-        let mut row = format!("  {load:>3} % ({effective:>3} %) |");
-        for column in &unc {
-            let (lo, hi) = spread(column);
-            let _ = write!(row, " {:>4} ‰ [{lo}-{hi}]", median(column.clone()));
-            let width = row.len();
-            // Spalten ausrichten, auch wenn die Spannweite unterschiedlich lang ist.
-            let pad = 19_usize.saturating_sub(width.saturating_sub(row.rfind('|').unwrap_or(0)));
-            row.push_str(&" ".repeat(pad));
-            row.push('|');
-        }
-        let _ = write!(row, " {}", loads.join(" "));
-        println!("{row}");
+        let window_row = table_row(load, effective, &unc, &loads);
+        // Fortschritt schon waehrend des Laufs; die Tabellen folgen am Ende.
+        println!("{window_row}");
+        window_rows.push(window_row);
+        consumer_rows.push(table_row(load, effective, &cons, &loads));
         decision_rows.push((load, effective, auto, no_dwell));
     }
 
-    println!("\nEntscheidungen der automatischen Wahl (Median ueber {REPEATS} Wiederholungen):\n");
+    println!();
+    print_table(
+        "Unabgedeckte Lieferfenster (Median [Spannweite]), je Variantenpolicy:",
+        &window_rows,
+    );
+    print_table(
+        "Verbrauchersicht: Abtastzeitpunkte ohne brauchbares Ergebnis (Median [Spannweite]):",
+        &consumer_rows,
+    );
+
+    println!("Entscheidungen der automatischen Wahl (Median ueber {REPEATS} Wiederholungen):\n");
     println!(
         "  Last (eff.) | Anteil gross auto | ohne Dwell | Wechsel/min auto (auf/ab) | ohne Dwell  | Deadline-Erfolg auto | ohne Dwell"
     );
@@ -555,8 +601,11 @@ async fn run() {
     }
 
     println!(
-        "\nUnabgedeckt nach ADR-0005: Anteil der Perioden ohne ein Ergebnis unter\n\
-         max_age. Effektive Last: Median der grossen Variante durch die auf ganze\n\
+        "\nLieferfenster nach ADR-0005: Anteil der Perioden, in denen kein Ergebnis\n\
+         unter max_age ankam. Verbrauchersicht (NV-01): Anteil der Periodenenden,\n\
+         an denen kein Ergebnis unter max_age vorlag — die Groesse, die einem\n\
+         Regler fehlt. Liegt die Laufzeit nahe an der Periode, weichen beide\n\
+         stark voneinander ab (docs/analysis/bursts-and-frontier.md). Effektive Last: Median der grossen Variante durch die auf ganze\n\
          Millisekunden gerundete Periode. Anteil gross: Dispatches auf Index 0; der\n\
          Detektor laeuft allein, `vig_variant_selected_total` ist deshalb eindeutig.\n\
          Deadline-Erfolg: weitergereichte Auftraege ohne verletzte Deadline.\n\

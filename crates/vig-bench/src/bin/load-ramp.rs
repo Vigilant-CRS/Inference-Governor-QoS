@@ -355,6 +355,30 @@ fn protected_uncovered(reports: &[StreamReport]) -> u64 {
         .map_or(0, |r| r.coverage.uncovered_permille())
 }
 
+/// Die Verbrauchersicht des geschuetzten Stroms: Abtastzeitpunkte ohne
+/// brauchbares Ergebnis, in Promille.
+///
+/// Neben der Fenstersicht, weil die unter Lastspitzen die Phase misst statt
+/// die Versorgung: nach einer Spitze liegen Aufnahmen und Fenstergrenzen
+/// gegeneinander verschoben, eine Lieferung faellt mal vor, mal hinter die
+/// Grenze, und leere Fenster entstehen, ohne dass dem Verbraucher etwas
+/// fehlte (docs/analysis/bursts-and-frontier.md).
+fn protected_consumer(reports: &[StreamReport]) -> u64 {
+    reports
+        .iter()
+        .find(|r| r.name == "detector")
+        .map_or(0, |r| r.coverage.consumer_uncovered_permille())
+}
+
+/// Die schlechteste Verbrauchersicht über alle Ströme, in Promille.
+fn worst_consumer(reports: &[StreamReport]) -> u64 {
+    reports
+        .iter()
+        .map(|r| r.coverage.consumer_uncovered_permille())
+        .max()
+        .unwrap_or(0)
+}
+
 /// Die schlechteste Abdeckung über alle Ströme, in Promille unabgedeckt.
 fn worst_uncovered(reports: &[StreamReport]) -> u64 {
     reports
@@ -422,11 +446,11 @@ async fn bursts(triton_endpoint: &str, specs: &HashMap<String, InputSpec>, knobs
     );
     println!(
         "  Profil                  | Mittel | Detektor Triton | Vigilant | Faktor | \
-         laengste Luecke T/O | alle Stroeme T/O | Last-Ø"
+         laengste Luecke T/O | alle Stroeme T/O | Verbraucher Det. T/O | alle T/O | Last-Ø"
     );
     println!(
         "  ------------------------|--------|-----------------|----------|--------|\
-         ---------------------|------------------|-------"
+         ---------------------|------------------|----------------------|----------|-------"
     );
 
     let duration = Duration::from_secs(BURST_SECONDS);
@@ -446,6 +470,10 @@ async fn bursts(triton_endpoint: &str, specs: &HashMap<String, InputSpec>, knobs
         let mut gov_gap = Vec::new();
         let mut direct_all = Vec::new();
         let mut gov_all = Vec::new();
+        let mut direct_cons = Vec::new();
+        let mut gov_cons = Vec::new();
+        let mut direct_cons_all = Vec::new();
+        let mut gov_cons_all = Vec::new();
         let mut loads = Vec::new();
 
         for _ in 0..REPEATS {
@@ -453,6 +481,8 @@ async fn bursts(triton_endpoint: &str, specs: &HashMap<String, InputSpec>, knobs
             let (mut bd, mut bg) = (u64::MAX, u64::MAX);
             let (mut bd_gap, mut bg_gap) = (u64::MAX, u64::MAX);
             let (mut bd_all, mut bg_all) = (u64::MAX, u64::MAX);
+            let (mut bd_cons, mut bg_cons) = (u64::MAX, u64::MAX);
+            let (mut bd_cons_all, mut bg_cons_all) = (u64::MAX, u64::MAX);
             for cap in CAPS {
                 let d = drive(
                     triton_endpoint,
@@ -464,6 +494,8 @@ async fn bursts(triton_endpoint: &str, specs: &HashMap<String, InputSpec>, knobs
                 bd = bd.min(protected_uncovered(&d));
                 bd_gap = bd_gap.min(protected_gap_ms(&d));
                 bd_all = bd_all.min(worst_uncovered(&d));
+                bd_cons = bd_cons.min(protected_consumer(&d));
+                bd_cons_all = bd_cons_all.min(worst_consumer(&d));
 
                 let g = drive(
                     &gateway,
@@ -475,6 +507,8 @@ async fn bursts(triton_endpoint: &str, specs: &HashMap<String, InputSpec>, knobs
                 bg = bg.min(protected_uncovered(&g));
                 bg_gap = bg_gap.min(protected_gap_ms(&g));
                 bg_all = bg_all.min(worst_uncovered(&g));
+                bg_cons = bg_cons.min(protected_consumer(&g));
+                bg_cons_all = bg_cons_all.min(worst_consumer(&g));
             }
             direct_unc.push(bd);
             gov_unc.push(bg);
@@ -482,6 +516,10 @@ async fn bursts(triton_endpoint: &str, specs: &HashMap<String, InputSpec>, knobs
             gov_gap.push(bg_gap);
             direct_all.push(bd_all);
             gov_all.push(bg_all);
+            direct_cons.push(bd_cons);
+            gov_cons.push(bg_cons);
+            direct_cons_all.push(bd_cons_all);
+            gov_cons_all.push(bg_cons_all);
         }
 
         let d = median(direct_unc.clone());
@@ -491,21 +529,29 @@ async fn bursts(triton_endpoint: &str, specs: &HashMap<String, InputSpec>, knobs
         println!(
             "  {base:>3} → {peak:>3} %, {length_ms:>4}/{every_ms:>4} ms | {mean:>4} % | \
              {d:>6} ‰ [{dmin}-{dmax}] | {g:>3} ‰ [{gmin}-{gmax}] | {:>6} | \
-             {:>7} / {:>4} ms | {:>5} / {:>5} ‰ | {}",
+             {:>7} / {:>4} ms | {:>5} / {:>5} ‰ | {:>9} / {:>5} ‰ | {:>3} / {:>3} ‰ | {}",
             factor(d, g),
             median(direct_gap),
             median(gov_gap),
             median(direct_all),
             median(gov_all),
+            median(direct_cons),
+            median(gov_cons),
+            median(direct_cons_all),
+            median(gov_cons_all),
             loads.join(" "),
         );
     }
 
     println!(
-        "\nUnabgedeckte Perioden des geschuetzten Stroms nach ADR-0005, Median und\n\
-         Spannweite ueber {REPEATS} Wiederholungen. Mittel ist die zeitgewichtete\n\
+        "\nUnabgedeckte Lieferfenster des geschuetzten Stroms nach ADR-0005, Median\n\
+         und Spannweite ueber {REPEATS} Wiederholungen. Mittel ist die zeitgewichtete\n\
          Angebotslast. Der Vertrag ist der der Grundlast; waehrend einer Spitze\n\
          liefert die Kamera schneller, der Verbraucher tastet im Grundtakt ab.\n\
+         Verbraucher: Anteil der Periodenenden ohne Ergebnis unter max_age (NV-01).\n\
+         Unter Spitzen weichen Fenster- und Verbrauchersicht stark voneinander ab;\n\
+         die Fenstersicht misst dort vor allem die Phase zwischen Aufnahme und\n\
+         Fenstergrenze (docs/analysis/bursts-and-frontier.md).\n\
          Die laengste Luecke ist der Median der Maxima — ein einzelnes Maximum\n\
          ist keine Aussage (gate-m3-r03.md)."
     );
