@@ -40,6 +40,142 @@ fn a_corun_rule_pointing_at_nothing_is_reported() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// ADR-0035 — praemptierbare Hintergrundarbeit
+// ---------------------------------------------------------------------------
+
+/// Ein Detektor im Prozess hoher Prioritaet, ein VLM daneben.
+fn preemption_yaml(backend_extra: &str, vlm_extra: &str) -> String {
+    format!(
+        "version: 1
+backend:
+  type: triton
+  grpc_endpoint: \"127.0.0.1:9201\"
+  slots: 1
+{backend_extra}models:
+  detector:
+    class: protected
+    queue: {{ policy: latest, capacity: 1 }}
+    contract: {{ period_ms: 33, deadline_ms: 33, max_age_ms: 66 }}
+    variants:
+      - id: main
+        backend_model: rfdetr
+        quality: {{ value: 1.0, source: measured }}
+        profile: {{ p50_us: 15000, p95_us: 16000, p99_us: 17000, samples: 200 }}
+  vlm:
+    class: best_effort
+{vlm_extra}    queue: {{ policy: fifo, capacity: 4 }}
+    contract: {{ deadline_ms: 800, max_age_ms: 1500 }}
+    variants:
+      - id: main
+        backend_model: vlm_main
+        quality: {{ value: 1.0, source: measured }}
+        profile: {{ p50_us: 90000, p95_us: 95000, p99_us: 99000, samples: 200 }}
+"
+    )
+}
+
+const LANE: &str = "  preemptible_lanes: 1\n";
+const PREEMPTIBLE_VLM: &str = "    backend_endpoint: \"127.0.0.1:9101\"\n    \
+                               preemptible: { residual_blocking_us: 5000, source: measured }\n";
+
+/// Eine Spur fuer das VLM, der geschuetzte Slot bleibt fuer den Detektor —
+/// und die geschuetzte Auslastung bezieht sich weiter auf ihn allein.
+#[test]
+fn a_preemptible_model_gets_its_own_lane() {
+    use vig_config::schema::ResolvedPreemptible;
+
+    let config = Config::from_yaml(&preemption_yaml(LANE, PREEMPTIBLE_VLM)).unwrap();
+    assert!(config.diagnose().is_empty(), "{:?}", config.diagnose());
+    let resolved = config.resolve().unwrap();
+    assert_eq!(resolved.slots.len(), 2);
+    assert_eq!(resolved.slots.lanes(), 1);
+    assert_eq!(resolved.slots.regular_len(), 1);
+
+    let vlm = resolved.model_index("vlm").unwrap();
+    let detector = resolved.model_index("detector").unwrap();
+    assert_eq!(
+        resolved.preemptible[vlm.get()],
+        Some(ResolvedPreemptible {
+            residual_blocking: vig_core::Duration::from_millis(5).unwrap(),
+            measured: true,
+        })
+    );
+    assert_eq!(resolved.preemptible[detector.get()], None);
+
+    let without = Config::from_yaml(&preemption_yaml(
+        "",
+        "    backend_endpoint: \"127.0.0.1:9101\"\n",
+    ))
+    .unwrap()
+    .resolve()
+    .unwrap();
+    assert_eq!(without.slots.len(), 1, "ohne Angabe keine Spur");
+    assert!(without.preemptible.iter().all(Option::is_none));
+    assert_eq!(
+        resolved.protected_utilization_permille(),
+        without.protected_utilization_permille(),
+        "eine Spur rechnet keine geschuetzte Arbeit"
+    );
+}
+
+/// Jede Konfiguration, die sich widerspricht, wird an ihrer Fundstelle
+/// abgelehnt — nicht still repariert (Spec L-020).
+#[test]
+fn preemption_contradictions_are_refused() {
+    let cases: [(String, &str); 7] = [
+        // praemptierbar, aber keine Spur
+        (
+            preemption_yaml("", PREEMPTIBLE_VLM),
+            "backend.preemptible_lanes",
+        ),
+        // eine Spur, aber nichts Praemptierbares
+        (
+            preemption_yaml(LANE, "    backend_endpoint: \"127.0.0.1:9101\"\n"),
+            "backend.preemptible_lanes",
+        ),
+        // eine Restblockierung von null
+        (
+            preemption_yaml(LANE, &PREEMPTIBLE_VLM.replace("5000", "0")),
+            "models.vlm.preemptible.residual_blocking_us",
+        ),
+        // im selben Prozess wie der Detektor
+        (
+            preemption_yaml(
+                LANE,
+                "    preemptible: { residual_blocking_us: 5000, source: measured }\n",
+            ),
+            "models.vlm.backend_endpoint",
+        ),
+        // eine Herkunft, die es nicht gibt
+        (
+            preemption_yaml(LANE, &PREEMPTIBLE_VLM.replace("measured", "geschaetzt")),
+            "models.vlm.preemptible.source",
+        ),
+        // no_corun genau zwischen den beiden
+        (
+            preemption_yaml(
+                "  preemptible_lanes: 1\n  no_corun:\n    - [detector, vlm]\n",
+                PREEMPTIBLE_VLM,
+            ),
+            "backend.no_corun[0]",
+        ),
+        // geschuetzte Arbeit, die unterbrochen werden soll
+        (
+            preemption_yaml(LANE, PREEMPTIBLE_VLM)
+                .replace("class: best_effort", "class: protected"),
+            "models.vlm.class",
+        ),
+    ];
+    for (text, path) in cases {
+        let findings = Config::from_yaml(&text).unwrap().diagnose();
+        assert!(
+            findings.iter().any(|f| f.to_string().starts_with(path)),
+            "erwartet ein Befund an {path}, gefunden: {findings:?}"
+        );
+    }
+}
+
 /// NV-06: die Prognose entscheidet nur, wenn der Betreiber es sagt.
 ///
 /// Ohne Angabe bleibt sie im Schatten; `active` schaltet sie scharf; ein

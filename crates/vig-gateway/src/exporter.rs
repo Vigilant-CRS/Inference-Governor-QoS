@@ -122,6 +122,7 @@ pub fn render(metrics: &Metrics) -> String {
         "Best-Effort-Requests, die terminal wurden, ohne je gelaufen zu sein (ADR-0012).",
         metrics.best_effort_starved,
     );
+    render_preemption(&mut out, metrics);
     render_generative(&mut out, metrics);
 
     render_derived(&mut out, metrics);
@@ -133,6 +134,34 @@ pub fn render(metrics: &Metrics) -> String {
 /// Sie stehen zusammen, weil sie nur zusammen etwas sagen: Prefill gegen
 /// Dekodierung ist das Verhaeltnis, an dem sich entscheidet, ob die Zerlegung
 /// noch traegt.
+/// Die Kennzahlen praemptierbarer Hintergrundarbeit (ADR-0035).
+///
+/// Die Mehrlaufzeit geteilt durch die Zahl der Ueberlappungen ist die
+/// mittlere Restblockierung im Betrieb — die Zahl, an der sich der von
+/// `vig calibrate` gemessene Wert messen lassen muss.
+fn render_preemption(out: &mut String, metrics: &Metrics) {
+    let mut counter = |name: &str, help: &str, value: u64| {
+        let _ = writeln!(out, "# HELP {name} {help}");
+        let _ = writeln!(out, "# TYPE {name} counter");
+        let _ = writeln!(out, "{name} {value}");
+    };
+    counter(
+        "vig_preemptible_dispatched_total",
+        "Auftraege auf einer Spur praemptierbarer Arbeit (ADR-0035).",
+        metrics.preemptible_dispatched,
+    );
+    counter(
+        "vig_protected_overlapped_total",
+        "Geschuetzte Auftraege, gestartet waehrend praemptierbare Arbeit lief (ADR-0035).",
+        metrics.protected_overlapped,
+    );
+    counter(
+        "vig_protected_overlap_extra_us_total",
+        "Mehrlaufzeit ueberlappter geschuetzter Auftraege gegen ihr Alleinprofil, in us (ADR-0035).",
+        metrics.protected_overlap_extra_us,
+    );
+}
+
 fn render_generative(out: &mut String, metrics: &Metrics) {
     let mut counter = |name: &str, help: &str, value: u64| {
         let _ = writeln!(out, "# HELP {name} {help}");
@@ -713,6 +742,9 @@ mod tests {
             "vig_requests_stale_total",
             "vig_deferred_for_protected_total",
             "vig_best_effort_starved_total",
+            "vig_preemptible_dispatched_total",
+            "vig_protected_overlapped_total",
+            "vig_protected_overlap_extra_us_total",
             "vig_generative_prefill_us_total",
             "vig_generative_decode_us_total",
             "vig_generative_fixed_us_total",

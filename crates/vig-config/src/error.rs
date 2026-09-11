@@ -56,6 +56,14 @@ pub enum ConfigError {
         /// Beschreibung des zulaessigen Bereichs.
         expected: &'static str,
     },
+    /// Zwei Angaben widersprechen einander.
+    ///
+    /// Jede fuer sich waere zulaessig; zusammen beschreiben sie keinen
+    /// Betrieb, den es geben kann.
+    Inconsistent {
+        /// Was sich widerspricht und warum.
+        what: &'static str,
+    },
     /// Ein Aufzaehlungswert ist unbekannt.
     UnknownValue {
         /// Der gefundene Wert.
@@ -95,7 +103,7 @@ impl core::fmt::Display for ConfigError {
                     "{found} Modelle konfiguriert, hoechstens {maximum} moeglich"
                 )
             }
-            Self::Missing { what } => write!(f, "{what}"),
+            Self::Missing { what } | Self::Inconsistent { what } => write!(f, "{what}"),
             Self::OutOfRange { expected } => write!(f, "Wert ausserhalb des Bereichs: {expected}"),
             Self::UnknownValue { found, allowed } => {
                 write!(f, "unbekannter Wert {found:?}; zulaessig sind {allowed}")

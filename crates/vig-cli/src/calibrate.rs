@@ -26,13 +26,14 @@
 
 use crate::identity::IdentityArgs;
 use crate::profile::WARMUP;
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use vig_backend_triton::TritonClient;
 use vig_config::manifest::{ArtifactIdentity, ProfileManifest};
-use vig_config::schema::{Config, ProfileConfig};
+use vig_config::schema::{Config, PreemptibleConfig, ProfileConfig};
 use vig_protocol_oip::inference::{
     ModelInferRequest, ModelMetadataResponse, ServerMetadataRequest, ServerMetadataResponse,
 };
@@ -243,6 +244,8 @@ async fn stop_load(stop: &Arc<AtomicBool>, tasks: Vec<tokio::task::JoinHandle<()
 struct VariantMeasurement {
     logical: String,
     backend_model: String,
+    /// Der Backendprozess, in dem das Modell lebt und gemessen wurde.
+    endpoint: String,
     solo: Measured,
     under_load: Vec<Measured>,
     fingerprint: String,
@@ -269,6 +272,18 @@ pub(crate) async fn run(
     let (endpoint, models) = config.profiling_targets();
     let slots = config.backend.slots.max(1);
     let client = Arc::new(TritonClient::new(&endpoint));
+    // Je Endpunkt ein Client. Ein praemptierbares Modell lebt in einem
+    // eigenen Backendprozess (ADR-0035), und dort muss es auch gemessen
+    // werden; vorher fragte dieser Befehl jedes Modell am Standardendpunkt.
+    let mut clients: HashMap<String, Arc<TritonClient>> = HashMap::new();
+    clients.insert(endpoint.clone(), Arc::clone(&client));
+    let endpoint_of = |logical: &str| -> String {
+        config
+            .models
+            .get(logical)
+            .and_then(|m| m.backend_endpoint.clone())
+            .unwrap_or_else(|| endpoint.clone())
+    };
 
     if !client.health().await?.ready {
         eprintln!("FEHLER das Backend ist nicht bereit");
@@ -295,6 +310,12 @@ pub(crate) async fn run(
     for (logical, backend_models) in &models {
         for backend_model in backend_models {
             eprintln!("  {logical} -> {backend_model}");
+            let model_endpoint = endpoint_of(logical);
+            let client = Arc::clone(
+                clients
+                    .entry(model_endpoint.clone())
+                    .or_insert_with(|| Arc::new(TritonClient::new(model_endpoint.as_str()))),
+            );
             // Ein Modell, das sich nicht mit Nulltensoren vermessen laesst —
             // Texteingaben, ein anderes Backend, ein Stream-Endpunkt — darf
             // den ganzen Lauf nicht beenden. Sonst erreicht die
@@ -397,6 +418,7 @@ pub(crate) async fn run(
             measurements.push(VariantMeasurement {
                 logical: logical.clone(),
                 backend_model: backend_model.clone(),
+                endpoint: model_endpoint,
                 solo,
                 under_load,
                 fingerprint,
@@ -407,17 +429,26 @@ pub(crate) async fn run(
     }
 
     let (pairs, directed) = if slots > 1 {
-        Box::pin(measure_pairs(&client, &measurements, samples, period_us)).await
+        Box::pin(measure_pairs(&clients, &measurements, samples, period_us)).await
     } else {
         eprintln!("\nEin Slot: Modellpaare koennen sich nicht behindern, keine Paarmessung.");
         (Vec::new(), Vec::new())
     };
 
     let cooperative = Box::pin(measure_all_cooperative(&config)).await;
+    let preemption = Box::pin(measure_preemption(
+        &config,
+        &clients,
+        &measurements,
+        samples,
+        period_us,
+    ))
+    .await;
 
     apply(&mut config, &measurements, &pairs, &directed);
     report_qualification();
     apply_cooperative(&mut config, &cooperative);
+    apply_preemption(&mut config, &preemption);
     report(&pairs);
 
     let yaml = config.to_yaml()?;
@@ -463,7 +494,7 @@ struct Pair {
 
 /// Misst fuer jedes Modellpaar, wie stark das eine das andere bremst.
 async fn measure_pairs(
-    client: &Arc<TritonClient>,
+    clients: &HashMap<String, Arc<TritonClient>>,
     measurements: &[VariantMeasurement],
     samples: usize,
     period_us: Option<u64>,
@@ -478,21 +509,30 @@ async fn measure_pairs(
             if victim.logical == co_tenant.logical {
                 continue;
             }
+            let (Some(victim_client), Some(load_client)) = (
+                clients.get(&victim.endpoint),
+                clients.get(&co_tenant.endpoint),
+            ) else {
+                continue;
+            };
             let stop = Arc::new(AtomicBool::new(false));
-            let tasks = spawn_load(client, &co_tenant.request, 1, &stop);
+            let tasks = spawn_load(load_client, &co_tenant.request, 1, &stop);
             let under = Box::pin(measure(
-                client,
+                victim_client,
                 &victim.backend_model,
                 &victim.request,
                 samples,
                 period_us,
             ))
             .await;
+            // Die Last endet **vor** der Pruefung: vorher liess eine
+            // verworfene Reihe ihre Lasttasks weiterlaufen, und jede folgende
+            // Messung lief unter einer Nebenlast, die niemand angegeben hatte.
+            stop_load(&stop, tasks).await;
             let Some(under) = under.as_ref().map(quantiles) else {
                 eprintln!("    Paarmessung ohne verwertbare Reihe; das Paar faellt aus");
                 continue;
             };
-            stop_load(&stop, tasks).await;
 
             let slowdown = slowdown_percent(under.p50_us, victim.solo.p50_us);
             let added_us = under.p50_us.saturating_sub(victim.solo.p50_us);
@@ -837,6 +877,119 @@ fn apply_cooperative(config: &mut Config, measured: &[CooperativeMeasurement]) {
     }
 }
 
+/// Die gemessene Restblockierung eines praemptierbaren Modells (ADR-0035).
+struct Preemption {
+    logical: String,
+    residual_us: u64,
+}
+
+/// Wie viel spaeter geschuetzte Arbeit fertig wird, waehrend praemptierbare
+/// Arbeit laeuft: p99 mit Hintergrundlast minus p99 allein.
+///
+/// Mindestens eine Mikrosekunde: eine Praemption ohne Restblockierung gibt
+/// es nicht, und null lehnt die Konfiguration ab. Liegt die Messung darunter,
+/// ist die Aufloesung der Messung erreicht — nicht eine perfekte Praemption.
+fn residual_blocking_us(alone_p99_us: u64, under_p99_us: u64) -> u64 {
+    under_p99_us.saturating_sub(alone_p99_us).max(1)
+}
+
+/// Die Restblockierung, mit der geplant wird: das Maximum ueber alle
+/// geschuetzten Modelle, denn sie muss fuer jedes gelten.
+fn worst_residual_us(per_victim: impl IntoIterator<Item = u64>) -> Option<u64> {
+    per_victim.into_iter().max()
+}
+
+/// Misst je praemptierbarem Modell die Restblockierung (ADR-0035).
+///
+/// Die Hintergrundlast laeuft in **ihrem** Prozess, gemessen wird jedes
+/// geschuetzte Modell in **seinem** — genau der Aufbau, in dem der Governor
+/// spaeter plant. Die Allein-Reihe ist die Solomessung von oben; sie lief
+/// ohne Hintergrundlast.
+async fn measure_preemption(
+    config: &Config,
+    clients: &HashMap<String, Arc<TritonClient>>,
+    measurements: &[VariantMeasurement],
+    samples: usize,
+    period_us: Option<u64>,
+) -> Vec<Preemption> {
+    let guarded = |logical: &str| {
+        config
+            .models
+            .get(logical)
+            .is_some_and(|m| matches!(m.class.as_str(), "protected" | "high"))
+    };
+    let mut out = Vec::new();
+    for (name, model) in &config.models {
+        if model.preemptible.is_none() {
+            continue;
+        }
+        let Some(background) = measurements.iter().find(|m| m.logical == *name) else {
+            eprintln!(
+                "\n{name}: praemptierbar, aber ohne verwertbare Solomessung; die \
+                 Restblockierung bleibt, wie sie ist"
+            );
+            continue;
+        };
+        let Some(load_client) = clients.get(&background.endpoint) else {
+            continue;
+        };
+        eprintln!("\nRestblockierung durch {name} (ADR-0035):");
+        let mut per_victim = Vec::new();
+        for victim in measurements.iter().filter(|m| guarded(&m.logical)) {
+            let Some(victim_client) = clients.get(&victim.endpoint) else {
+                continue;
+            };
+            let stop = Arc::new(AtomicBool::new(false));
+            let tasks = spawn_load(load_client, &background.request, 1, &stop);
+            let under = Box::pin(measure(
+                victim_client,
+                &victim.backend_model,
+                &victim.request,
+                samples,
+                period_us,
+            ))
+            .await;
+            stop_load(&stop, tasks).await;
+            let Some(under) = under.as_ref().map(quantiles) else {
+                eprintln!(
+                    "    {}: keine verwertbare Reihe; faellt aus",
+                    victim.logical
+                );
+                continue;
+            };
+            let residual = residual_blocking_us(victim.solo.p99_us, under.p99_us);
+            eprintln!(
+                "    {:<10} p99 allein {:>7} us, mit {name} {:>7} us  ->  +{residual} us",
+                victim.logical, victim.solo.p99_us, under.p99_us
+            );
+            per_victim.push(residual);
+        }
+        match worst_residual_us(per_victim) {
+            Some(residual_us) => out.push(Preemption {
+                logical: name.clone(),
+                residual_us,
+            }),
+            None => eprintln!(
+                "    kein geschuetztes Modell verwertbar gemessen; die Restblockierung \
+                 bleibt, wie sie ist"
+            ),
+        }
+    }
+    out
+}
+
+/// Traegt die gemessene Restblockierung als `source: measured` ein.
+fn apply_preemption(config: &mut Config, measured: &[Preemption]) {
+    for m in measured {
+        if let Some(model) = config.models.get_mut(&m.logical) {
+            model.preemptible = Some(PreemptibleConfig {
+                residual_blocking_us: m.residual_us,
+                source: "measured".to_owned(),
+            });
+        }
+    }
+}
+
 fn apply(
     config: &mut Config,
     measurements: &[VariantMeasurement],
@@ -917,5 +1070,80 @@ fn report(pairs: &[Pair]) {
             pair.worst.co_tenant,
             pair.worst.added_us,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
+
+    use super::*;
+
+    /// p99 mit Hintergrundlast minus p99 allein.
+    #[test]
+    fn the_residual_is_the_p99_difference() {
+        assert_eq!(residual_blocking_us(19_596, 33_600), 14_004);
+    }
+
+    /// Eine Messung ohne messbaren Unterschied ergibt keine null — die
+    /// Konfiguration lehnt null ab, und null waere eine perfekte Praemption,
+    /// die es nicht gibt. Und ein Lauf, der zufaellig schneller war, ergibt
+    /// keinen Unterlauf.
+    #[test]
+    fn the_residual_never_drops_to_zero_or_wraps() {
+        assert_eq!(residual_blocking_us(15_000, 15_000), 1);
+        assert_eq!(residual_blocking_us(15_000, 14_000), 1);
+    }
+
+    /// Geplant wird mit dem schlechtesten geschuetzten Modell: die Zahl muss
+    /// fuer jedes gelten.
+    #[test]
+    fn the_worst_protected_model_decides() {
+        assert_eq!(worst_residual_us([4_000, 14_000, 9_000]), Some(14_000));
+        assert_eq!(worst_residual_us([]), None);
+    }
+
+    /// Die Messung landet als `source: measured` in der Konfiguration — und
+    /// nur beim praemptierbaren Modell.
+    #[test]
+    fn a_measured_residual_is_written_as_measured() {
+        let yaml = "version: 1
+backend:
+  type: triton
+  grpc_endpoint: \"127.0.0.1:9201\"
+  slots: 1
+  preemptible_lanes: 1
+models:
+  detector:
+    class: protected
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 33, deadline_ms: 33, max_age_ms: 66 }
+    variants:
+      - id: main
+        backend_model: rfdetr
+        quality: { value: 1.0, source: measured }
+  vlm:
+    class: best_effort
+    backend_endpoint: \"127.0.0.1:9101\"
+    preemptible: { residual_blocking_us: 14000, source: declared }
+    queue: { policy: fifo, capacity: 4 }
+    contract: { deadline_ms: 800, max_age_ms: 1500 }
+    variants:
+      - id: main
+        backend_model: vlm_main
+        quality: { value: 1.0, source: measured }
+";
+        let mut config = Config::from_yaml(yaml).unwrap();
+        apply_preemption(
+            &mut config,
+            &[Preemption {
+                logical: "vlm".to_owned(),
+                residual_us: 11_250,
+            }],
+        );
+        let vlm = config.models["vlm"].preemptible.as_ref().unwrap();
+        assert_eq!(vlm.residual_blocking_us, 11_250);
+        assert_eq!(vlm.source, "measured");
+        assert!(config.models["detector"].preemptible.is_none());
     }
 }

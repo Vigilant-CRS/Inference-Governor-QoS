@@ -1147,6 +1147,138 @@ fn the_dwell_time_damps_switching_under_alternating_pressure() {
 }
 
 // ---------------------------------------------------------------------------
+// ADR-0035 — praemptierbare Hintergrundarbeit
+// ---------------------------------------------------------------------------
+
+/// Ein Detektor im 33-ms-Takt (15 ms) und ein VLM-artiger 90-ms-Block alle
+/// 500 ms — die Lage aus Gate M3, in der das VLM nie startet (ADR-0012).
+fn detector_and_background() -> (ModelContract, ModelContract) {
+    let detector = contract(
+        Criticality::Protected,
+        QueuePolicy::Latest,
+        Some(33),
+        33,
+        66,
+        &[15],
+    );
+    let background = contract(
+        Criticality::BestEffort,
+        QueuePolicy::Fifo,
+        None,
+        2_000,
+        4_000,
+        &[90],
+    );
+    (detector, background)
+}
+
+/// Ein Slot, und — falls angegeben — eine Spur fuer Modell 1 mit dieser
+/// gemessenen Restblockierung.
+fn build_with_lane(contracts: Vec<ModelContract>, residual_ms: Option<u64>) -> Scheduler {
+    let mut list = ArrayVec::new();
+    for c in contracts {
+        list.push(c).unwrap();
+    }
+    let mut slots = SlotSet::homogeneous(1, 0).unwrap();
+    if residual_ms.is_some() {
+        slots
+            .add_preemptible_lanes(1, vig_core::slots::ModelMask::NONE.with(ModelIdx(1)))
+            .unwrap();
+    }
+    let mut scheduler = Scheduler::new(
+        list,
+        slots,
+        OverloadController::new(OverloadConfig::default(), at(0)).unwrap(),
+        SafetyMargin::NONE,
+    )
+    .unwrap();
+    if let Some(residual) = residual_ms {
+        scheduler.set_preemptible(ModelIdx(1), ms(residual));
+    }
+    scheduler
+}
+
+fn run_detector_and_background(scheduler: &mut Scheduler, backend: &mut Backend) {
+    let (detector, background) = detector_and_background();
+    let mut next_id = 0_u64;
+    run(scheduler, backend, 3_000, |t| {
+        let mut out = Vec::new();
+        if t % 33 == 0 {
+            next_id = next_id.saturating_add(1);
+            out.push(frame(next_id, 0, t, &detector));
+        }
+        if t % 500 == 0 {
+            next_id = next_id.saturating_add(1);
+            out.push(frame(next_id, 1, t, &background));
+        }
+        out
+    });
+}
+
+fn background_runs(backend: &Backend) -> usize {
+    backend
+        .dispatched_models()
+        .iter()
+        .filter(|m| **m == ModelIdx(1))
+        .count()
+}
+
+/// Ohne Praemption startet der 90-ms-Block unter dem 33-ms-Takt nie — die
+/// Aussage von ADR-0012, und die Voreinstellung: ohne Spur aendert sich
+/// nichts.
+#[test]
+fn without_preemption_the_long_background_job_starves() {
+    let (detector, background) = detector_and_background();
+    let mut scheduler = build_with_lane(vec![detector, background], None);
+    let mut backend = Backend::default();
+    run_detector_and_background(&mut scheduler, &mut backend);
+
+    assert_eq!(background_runs(&backend), 0);
+    assert_eq!(scheduler.metrics().preemptible_dispatched, 0);
+    assert_eq!(scheduler.metrics().protected_overlapped, 0);
+}
+
+/// Mit einer Spur und 5 ms gemessener Restblockierung laeuft der Block —
+/// und der Detektor haelt jede Frist. Er plant waehrend der Ueberlappung
+/// mit 20 statt 15 ms, und genau diese 5 ms stehen in der Mehrlaufzeit.
+#[test]
+fn a_preemptible_background_job_runs_and_the_protected_stream_keeps_its_deadline() {
+    let (detector, background) = detector_and_background();
+    let mut scheduler = build_with_lane(vec![detector, background], Some(5));
+    let mut backend = Backend::default();
+    run_detector_and_background(&mut scheduler, &mut backend);
+
+    assert!(
+        background_runs(&backend) >= 5,
+        "der Hintergrund kommt voran: {}",
+        background_runs(&backend)
+    );
+    let metrics = scheduler.metrics();
+    assert_eq!(metrics.protected_deadline_misses, 0);
+    assert!(metrics.preemptible_dispatched >= 5);
+    assert!(metrics.protected_overlapped > 0);
+    assert_eq!(
+        metrics.protected_overlap_extra_us,
+        metrics.protected_overlapped * 5_000,
+        "jeder ueberlappte Lauf traegt genau die Restblockierung"
+    );
+}
+
+/// Passt die Restblockierung nicht in den Slack des Detektors (15 + 25 ms
+/// gegen 33 ms Frist), haelt der Look-ahead den Block weiter zurueck. Die
+/// Spur allein ist kein Freibrief; entscheidend ist die gemessene Zahl.
+#[test]
+fn a_residual_that_breaks_the_protected_slack_keeps_the_job_back() {
+    let (detector, background) = detector_and_background();
+    let mut scheduler = build_with_lane(vec![detector, background], Some(25));
+    let mut backend = Backend::default();
+    run_detector_and_background(&mut scheduler, &mut backend);
+
+    assert_eq!(background_runs(&backend), 0);
+    assert_eq!(scheduler.metrics().protected_deadline_misses, 0);
+}
+
+// ---------------------------------------------------------------------------
 // NV-24 — das Missbudget in Entscheidungen einbeziehen
 // ---------------------------------------------------------------------------
 

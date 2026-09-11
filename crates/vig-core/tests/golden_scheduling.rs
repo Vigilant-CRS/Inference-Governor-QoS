@@ -101,6 +101,7 @@ fn resolve_with(
             profile_revision: 0,
             margin,
             now,
+            residual: vig_core::Duration::ZERO,
         },
     )
 }

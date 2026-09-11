@@ -67,6 +67,12 @@ impl ModelMask {
         Self(self.0 & !(1_u32 << m.0))
     }
 
+    /// Alle Modelle aus `self`, die nicht in `other` stehen.
+    #[must_use]
+    pub const fn minus(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
+    }
+
     /// Wahr, wenn das Modell enthalten ist.
     #[must_use]
     pub const fn contains(self, m: ModelIdx) -> bool {
@@ -118,6 +124,14 @@ struct SlotState {
     /// Request ist: sie belegt Zeit, verbraucht aber kein Pipelining-Kontingent
     /// und darf nie mit echter Arbeit verwechselt werden.
     reserved_until: Option<Instant>,
+    /// Wahr fuer eine Spur praemptierbarer Hintergrundarbeit (ADR-0035).
+    ///
+    /// Eine Spur ist kein zusaetzlicher Rechenkern: sie steht fuer einen
+    /// Backendprozess niedriger Prioritaet, dessen Arbeit die geschuetzte
+    /// Arbeit auf der Karte unterbricht. Sie belegt deshalb keinen
+    /// geschuetzten Slot — was sie kostet, ist die gemessene
+    /// Restblockierung, und die rechnet die Planung der geschuetzten Arbeit.
+    lane: bool,
 }
 
 impl SlotState {
@@ -213,6 +227,7 @@ impl SlotSet {
                     allowed: ModelMask::ALL,
                     inflight: ArrayVec::new(),
                     reserved_until: None,
+                    lane: false,
                 })
                 .map_err(|_| SlotError::TooManySlots { requested: count })?;
         }
@@ -238,7 +253,73 @@ impl SlotSet {
         }
     }
 
-    /// Die Anzahl konfigurierter Slots.
+    /// Legt Spuren fuer praemptierbare Hintergrundarbeit an (ADR-0035).
+    ///
+    /// Eine Spur ist ein Slot, der **nur** die genannten Modelle ausfuehrt —
+    /// und die regulaeren Slots fuehren sie dafuer nicht mehr aus. Beides
+    /// gehoert zusammen: ein praemptierbares Modell auf einem regulaeren Slot
+    /// wuerde dort wieder als unteilbarer Block geplant (ADR-0012), und ein
+    /// geschuetztes auf der Spur liefe im Prozess niedriger Prioritaet.
+    ///
+    /// # Errors
+    ///
+    /// [`SlotError::TooManySlots`], wenn Slots und Spuren zusammen mehr als
+    /// [`MAX_SLOTS`] ergaeben.
+    pub fn add_preemptible_lanes(
+        &mut self,
+        count: usize,
+        models: ModelMask,
+    ) -> Result<(), SlotError> {
+        let requested = self.slots.len().saturating_add(count);
+        if requested > MAX_SLOTS {
+            return Err(SlotError::TooManySlots { requested });
+        }
+        for i in 0..self.slots.len() {
+            if let Some(slot) = self.slots.get_mut(i) {
+                slot.allowed = slot.allowed.minus(models);
+            }
+        }
+        for _ in 0..count {
+            self.slots
+                .push(SlotState {
+                    allowed: models,
+                    inflight: ArrayVec::new(),
+                    reserved_until: None,
+                    lane: true,
+                })
+                .map_err(|_| SlotError::TooManySlots { requested })?;
+        }
+        Ok(())
+    }
+
+    /// Die Anzahl der Spuren fuer praemptierbare Arbeit.
+    #[must_use]
+    pub fn lanes(&self) -> usize {
+        self.slots.iter().filter(|s| s.lane).count()
+    }
+
+    /// Die Anzahl der regulaeren Slots, ohne Spuren.
+    ///
+    /// Die Kapazitaet, auf die sich die geschuetzte Auslastung bezieht: eine
+    /// Spur rechnet keine geschuetzte Arbeit.
+    #[must_use]
+    pub fn regular_len(&self) -> usize {
+        self.slots.len().saturating_sub(self.lanes())
+    }
+
+    /// Wahr, wenn auf einer Spur gerade praemptierbare Arbeit laeuft.
+    #[must_use]
+    pub fn lane_busy(&self) -> bool {
+        self.slots.iter().any(|s| s.lane && !s.inflight.is_empty())
+    }
+
+    /// Wahr, wenn der Slot eine Spur ist.
+    #[must_use]
+    pub fn is_lane(&self, slot: SlotIdx) -> bool {
+        self.slots.get(slot.get()).is_some_and(|s| s.lane)
+    }
+
+    /// Die Anzahl konfigurierter Slots, Spuren eingeschlossen.
     #[must_use]
     pub const fn len(&self) -> usize {
         self.slots.len()
@@ -503,5 +584,97 @@ impl SlotSet {
     #[must_use]
     pub fn snapshot(&self) -> Self {
         self.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
+
+    use super::*;
+
+    const DETECTOR: ModelIdx = ModelIdx(0);
+    const VLM: ModelIdx = ModelIdx(1);
+
+    fn at(ms: u64) -> Instant {
+        Instant::from_nanos(ms.saturating_mul(1_000_000))
+    }
+
+    fn ms(v: u64) -> Duration {
+        Duration::from_nanos_unbounded(v.saturating_mul(1_000_000))
+    }
+
+    fn with_lane() -> SlotSet {
+        let mut slots = SlotSet::homogeneous(1, 0).unwrap();
+        slots
+            .add_preemptible_lanes(1, ModelMask::NONE.with(VLM))
+            .unwrap();
+        slots
+    }
+
+    /// Das praemptierbare Modell laeuft nur auf der Spur, das geschuetzte nur
+    /// auf dem regulaeren Slot — und die Spur belegt den Slot nicht.
+    #[test]
+    fn a_lane_takes_only_preemptible_work_and_leaves_the_slot_free() {
+        let mut slots = with_lane();
+        assert_eq!(slots.len(), 2);
+        assert_eq!(slots.lanes(), 1);
+        assert_eq!(slots.regular_len(), 1);
+
+        let lane = slots.ready_slot(VLM, at(0)).unwrap();
+        assert!(slots.is_lane(lane));
+        slots
+            .dispatch(lane, RequestId(1), VLM, at(0), ms(90))
+            .unwrap();
+        assert!(slots.lane_busy());
+
+        // Der Detektor startet sofort, obwohl 90 ms Hintergrundarbeit laufen.
+        let slot = slots.ready_slot(DETECTOR, at(0)).unwrap();
+        assert!(!slots.is_lane(slot));
+        assert_eq!(slots.projected_start(DETECTOR, at(0)), Some((slot, at(0))));
+        assert!(
+            slots
+                .dispatch(lane, RequestId(2), DETECTOR, at(0), ms(15))
+                .is_err()
+        );
+    }
+
+    /// Das praemptierbare Modell kann den regulaeren Slot nicht mehr belegen:
+    /// dort waere es wieder ein unteilbarer Block.
+    #[test]
+    fn a_preemptible_model_never_takes_the_regular_slot() {
+        let mut slots = with_lane();
+        let lane = slots.ready_slot(VLM, at(0)).unwrap();
+        slots
+            .dispatch(lane, RequestId(1), VLM, at(0), ms(90))
+            .unwrap();
+        // Die Spur ist belegt; einen anderen Slot gibt es fuer das VLM nicht.
+        assert_eq!(slots.ready_slot(VLM, at(0)), None);
+        assert!(
+            slots
+                .dispatch(SlotIdx(0), RequestId(2), VLM, at(0), ms(90))
+                .is_err()
+        );
+    }
+
+    /// Ohne Spuren aendert sich nichts.
+    #[test]
+    fn without_lanes_nothing_changes() {
+        let slots = SlotSet::homogeneous(1, 0).unwrap();
+        assert_eq!(slots.lanes(), 0);
+        assert_eq!(slots.regular_len(), 1);
+        assert!(!slots.lane_busy());
+        assert!(slots.ready_slot(VLM, at(0)).is_some());
+    }
+
+    #[test]
+    fn lanes_count_against_the_slot_limit() {
+        let mut slots = SlotSet::homogeneous(MAX_SLOTS, 0).unwrap();
+        assert_eq!(
+            slots.add_preemptible_lanes(1, ModelMask::NONE.with(VLM)),
+            Err(SlotError::TooManySlots {
+                requested: MAX_SLOTS + 1
+            })
+        );
     }
 }

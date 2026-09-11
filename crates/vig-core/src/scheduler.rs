@@ -173,6 +173,12 @@ struct Dispatched {
     /// stimmt jetzt, aber ein Zustandswechsel **waehrend** der Ausfuehrung
     /// bleibt ein Fall, ueber den diese Zelle nichts aussagt.
     hardware_state: crate::predictor::StateClass,
+    /// Ob ein geschuetzter Auftrag startete, waehrend auf einer Spur
+    /// praemptierbare Arbeit lief (ADR-0035).
+    ///
+    /// Nur solche Laeufe sagen etwas ueber die Restblockierung; ihre
+    /// Mehrlaufzeit gegen das Alleinprofil wird dafuer mitgezaehlt.
+    overlapped: bool,
 }
 
 /// Die Planung eines Kandidaten: welche Variante, wie lange, und reicht es.
@@ -245,6 +251,12 @@ pub struct Scheduler {
     margin: SafetyMargin,
     /// Je Modell eine langsam angepasste Marge (Spec 13.3).
     margins: [MarginController; MAX_MODELS],
+    /// Je praemptierbarem Modell die gemessene Restblockierung (ADR-0035).
+    ///
+    /// `None` fuer jedes Modell, dessen Arbeit nicht unterbrochen werden
+    /// kann — also fuer alle, solange der Betreiber nichts anderes
+    /// konfiguriert. Dann aendert sich keine einzige Entscheidung.
+    residual: [Option<Duration>; MAX_MODELS],
     /// Beobachtete Backendlaufzeiten je Modell, Variante und Belegungsgrad.
     estimator: RuntimeEstimator,
     /// Beobachtete Ankunftsabstaende je Modell.
@@ -412,6 +424,7 @@ impl Scheduler {
             overload,
             margin,
             margins,
+            residual: [None; MAX_MODELS],
             estimator: RuntimeEstimator::new(),
             horizon: DEFAULT_HORIZON,
             inflight: ArrayVec::new(),
@@ -461,6 +474,39 @@ impl Scheduler {
         self.margins
             .get(model.get())
             .map_or(self.margin, MarginController::margin)
+    }
+
+    /// Meldet ein Modell als praemptierbar, mit seiner gemessenen
+    /// Restblockierung (ADR-0035).
+    ///
+    /// Die Angabe gehoert zu einer Spur ([`SlotSet::add_preemptible_lanes`]):
+    /// dort laeuft das Modell, ohne einen geschuetzten Slot zu belegen, und
+    /// die geschuetzte Arbeit plant solange mit der Restblockierung. Die
+    /// Konfiguration prueft, dass es beides zusammen gibt.
+    ///
+    /// Der Wert ist eine **Messung** des Backends (`vig calibrate`), keine
+    /// Annahme: der Governor ruft keine Praemption auf, er plant mit dem,
+    /// was sie nachweislich kostet (ADR-0033).
+    pub fn set_preemptible(&mut self, model: ModelIdx, residual_blocking: Duration) {
+        if let Some(cell) = self.residual.get_mut(model.get()) {
+            *cell = Some(residual_blocking);
+        }
+    }
+
+    /// Die gemessene Restblockierung eines praemptierbaren Modells.
+    #[must_use]
+    pub fn residual_blocking_of(&self, model: ModelIdx) -> Option<Duration> {
+        self.residual.get(model.get()).copied().flatten()
+    }
+
+    /// Die Restblockierung, die geschuetzte Arbeit **jetzt** traegt: das
+    /// Maximum ueber die laufenden praemptierbaren Auftraege.
+    fn active_residual(&self) -> Duration {
+        self.inflight
+            .iter()
+            .filter_map(|d| self.residual_blocking_of(d.descriptor.logical_model))
+            .max()
+            .unwrap_or(Duration::ZERO)
     }
 
     /// Setzt den Ueberlastzustand von aussen.
@@ -609,6 +655,26 @@ impl Scheduler {
             compute,
         );
         self.observe_for_predictor(&entry, compute);
+        // ADR-0035: was die Ueberlappung tatsaechlich gekostet hat, gegen das
+        // Alleinprofil. Die Beobachtung selbst liegt schon im Schaetzer —
+        // unter dem Belegungsgrad mit belegter Spur, getrennt vom Alleinlauf.
+        if entry.overlapped
+            && let Some(solo) = self
+                .contracts
+                .get(entry.descriptor.logical_model.get())
+                .and_then(|c| c.variant(entry.variant))
+                .and_then(|v| v.profile.at_occupancy(0))
+        {
+            let extra_us = compute
+                .as_nanos()
+                .saturating_sub(solo.p50.as_nanos())
+                .checked_div(1_000)
+                .unwrap_or(0);
+            self.metrics.protected_overlap_extra_us = self
+                .metrics
+                .protected_overlap_extra_us
+                .saturating_add(extra_us);
+        }
         sink.emit(Action::ObservedRuntime {
             model: entry.descriptor.logical_model,
             variant: entry.variant,
@@ -1295,24 +1361,24 @@ impl Scheduler {
             // dafuer ein passendes Quantum zugeschnitten worden waere. Die
             // Zerlegung bliebe dann wirkungslos, und die Messung „mit und ohne
             // Quanten identisch" waere ihr erwartetes Ergebnis.
-            let (predicted_runtime, quantum) = self.size_quantum(
+            let residual = self.residual_blocking_of(model);
+            let (predicted_runtime, quantum) = self.quantum_for(
                 model,
-                descriptor.criticality,
                 &descriptor,
                 predicted_runtime,
                 now,
-                forecast.iter(),
+                &forecast,
+                residual,
             );
 
             // Look-ahead auf erwartbare wichtigere Arbeit (Spec 10.7).
-            match guard_protected(
-                &self.slots,
+            match self.look_ahead(
                 model,
                 descriptor.criticality,
                 predicted_runtime,
                 now,
-                forecast.iter(),
-                self.horizon,
+                &forecast,
+                residual,
             ) {
                 GuardVerdict::WouldEndanger { retry_after, .. } => {
                     self.metrics.deferred_for_protected =
@@ -1337,6 +1403,9 @@ impl Scheduler {
             // verwertbar. Nach dem Dispatch gemessen waere jede Zelle um eins
             // verschoben und der Schaetzer wirkungslos.
             let occupancy_at_start = self.slots.occupancy();
+            // Vor dem eigenen Dispatch: laeuft schon praemptierbare Arbeit,
+            // traegt dieser geschuetzte Auftrag deren Restblockierung.
+            let overlapped = descriptor.criticality.is_guarded() && self.slots.lane_busy();
             if self
                 .slots
                 .dispatch(slot, id, model, now, predicted_runtime)
@@ -1346,13 +1415,7 @@ impl Scheduler {
                 continue;
             }
 
-            if let Some(queue) = self.queues.get_mut(model.get()) {
-                queue.take(id);
-            }
-            if let Some(vs) = self.variant_states.get_mut(model.get()) {
-                self.metrics.count_switch(model, vs.current(), variant);
-                vs.record(variant, now);
-            }
+            self.accept_candidate(model, id, variant, now);
             let _ = self.inflight.push(Dispatched {
                 hardware_state: self.hardware_state,
                 descriptor,
@@ -1360,8 +1423,10 @@ impl Scheduler {
                 at: now,
                 occupancy: occupancy_at_start,
                 predicted: predicted_runtime,
+                overlapped,
             });
             self.metrics.forwarded = self.metrics.forwarded.saturating_add(1);
+            self.count_preemption(residual.is_some(), overlapped);
             self.metrics.count_variant(variant);
             if !feasible {
                 // Erst hier zaehlen, nicht in der Kandidatenschleife: ein
@@ -1379,6 +1444,103 @@ impl Scheduler {
                 quantum,
             });
             return true;
+        }
+    }
+
+    /// Laufzeit und Quantum dessen, was gestartet wird.
+    ///
+    /// Ein praemptierbarer Auftrag wird nicht zugeschnitten (ADR-0035): er
+    /// muss in keine Luecke passen, die geschuetzte Arbeit unterbricht ihn.
+    /// Alles andere geht wie bisher durch [`Self::size_quantum`].
+    fn quantum_for(
+        &self,
+        model: ModelIdx,
+        descriptor: &RequestDescriptor,
+        predicted_runtime: Duration,
+        now: Instant,
+        forecast: &ArrayVec<ExpectedArrival, MAX_MODELS>,
+        residual: Option<Duration>,
+    ) -> (Duration, Option<u32>) {
+        if residual.is_some() {
+            return (predicted_runtime, None);
+        }
+        self.size_quantum(
+            model,
+            descriptor.criticality,
+            descriptor,
+            predicted_runtime,
+            now,
+            forecast.iter(),
+        )
+    }
+
+    /// Der Look-ahead auf erwartbare wichtigere Arbeit (Spec 10.7).
+    ///
+    /// Fuer einen praemptierbaren Kandidaten lautet die Frage, ob seine
+    /// Restblockierung in den Slack der geschuetzten Arbeit passt — nicht, ob
+    /// seine ganze Laufzeit in die Luecke passt (ADR-0035). Fuer jeden
+    /// anderen bleibt es exakt der bisherige Guard.
+    fn look_ahead(
+        &self,
+        model: ModelIdx,
+        criticality: Criticality,
+        runtime: Duration,
+        now: Instant,
+        forecast: &ArrayVec<ExpectedArrival, MAX_MODELS>,
+        residual: Option<Duration>,
+    ) -> GuardVerdict {
+        match residual {
+            Some(residual) => crate::feasibility::guard_protected_with_residual(
+                &self.slots,
+                model,
+                criticality,
+                runtime,
+                now,
+                forecast.iter(),
+                self.horizon,
+                residual,
+            ),
+            None => guard_protected(
+                &self.slots,
+                model,
+                criticality,
+                runtime,
+                now,
+                forecast.iter(),
+                self.horizon,
+            ),
+        }
+    }
+
+    /// Nimmt einen weitergereichten Auftrag aus seiner Queue und uebernimmt
+    /// die Variantenwahl.
+    ///
+    /// Erst nach dem erfolgreichen Dispatch: eine verworfene Planung darf
+    /// weder die Queue noch den Hysteresezustand verschieben.
+    fn accept_candidate(
+        &mut self,
+        model: ModelIdx,
+        id: RequestId,
+        variant: VariantIdx,
+        now: Instant,
+    ) {
+        if let Some(queue) = self.queues.get_mut(model.get()) {
+            queue.take(id);
+        }
+        if let Some(vs) = self.variant_states.get_mut(model.get()) {
+            self.metrics.count_switch(model, vs.current(), variant);
+            vs.record(variant, now);
+        }
+    }
+
+    /// Zaehlt, was ein Dispatch fuer die Praemption bedeutet (ADR-0035).
+    fn count_preemption(&mut self, preemptible: bool, overlapped: bool) {
+        if preemptible {
+            self.metrics.preemptible_dispatched =
+                self.metrics.preemptible_dispatched.saturating_add(1);
+        }
+        if overlapped {
+            self.metrics.protected_overlapped = self.metrics.protected_overlapped.saturating_add(1);
         }
     }
 
@@ -1542,6 +1704,11 @@ impl Scheduler {
                 margin: self.margin_of(model),
                 now,
                 degrade: self.overload.state().forces_degradation(),
+                residual: if descriptor.criticality.is_guarded() {
+                    self.active_residual()
+                } else {
+                    Duration::ZERO
+                },
             },
         );
         // NV-11: die gemessene, gerichtete Interferenz kommt auf die
@@ -1753,6 +1920,26 @@ impl Scheduler {
                 self.margin_of(model),
             ) else {
                 continue;
+            };
+            // ADR-0035: laeuft gerade praemptierbare Arbeit, traegt die
+            // erwartete Ankunft deren Restblockierung — als Untergrenze ueber
+            // dem Alleinwert, nicht zusaetzlich zu einer Beobachtung, die sie
+            // schon enthaelt. Ohne Praemption ist das Maximum null, und die
+            // Prognose bleibt bitgleich.
+            let residual = self.active_residual();
+            let runtime = if residual > Duration::ZERO {
+                self.estimator
+                    .conservative(
+                        model,
+                        VariantIdx(0),
+                        0,
+                        &best.profile,
+                        self.margin_of(model),
+                    )
+                    .and_then(|solo| solo.checked_add(residual))
+                    .map_or(runtime, |floor| runtime.max(floor))
+            } else {
+                runtime
             };
             let _ = out.push(ExpectedArrival {
                 model,

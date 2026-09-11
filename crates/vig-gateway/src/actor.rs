@@ -665,6 +665,14 @@ fn spawn_owned(
     // NV-11: die gemessene Interferenztabelle. Leer heisst „nicht gemessen",
     // und dann bleibt der Belegungsgrad die Naeherung (ADR-0006).
     scheduler.set_interference(config.interference.clone());
+    // ADR-0035: praemptierbare Modelle und ihre gemessene Restblockierung.
+    // Die Spuren stehen schon in der Slotmenge der Konfiguration; ohne
+    // `preemptible:` bleibt diese Schleife leer und nichts aendert sich.
+    for (index, preemptible) in config.preemptible.iter().enumerate() {
+        if let (Some(p), Ok(raw)) = (preemptible, u16::try_from(index)) {
+            scheduler.set_preemptible(vig_core::ModelIdx(raw), p.residual_blocking);
+        }
+    }
 
     // G-010: Profile, deren Umgebung sich geaendert hat, werden vorsichtiger
     // geplant, bis der Estimator eigene Messungen hat (ADR-0016).
