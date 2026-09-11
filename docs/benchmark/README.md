@@ -22,6 +22,8 @@ beschrieben und **nicht** als allgemeingültige Produktleistung zu lesen.
 | [`arm-phones.md`](arm-phones.md) | Ist der Kern auf schwacher ARM-Hardware ein Engpass? | **nein** — p99 3–20 µs je Ereignis (Pixel 2/5, A53 bis A76); eine Entscheidung kostet auf dem ältesten Kern 0,08 % einer 33-ms-Periode |
 | [`arm-serve.md`](arm-serve.md) | Was kostet der ganze Governor je Request auf schwacher ARM-Hardware? | **mehr als die Laptop-Budgets erlauben** — Pixel 2: +2,1 ms je Request auf dem Shm-Pfad statt +0,17 ms, größtenteils Kernelzeit; nicht größenabhängig; `vig serve` läuft dort |
 | [`tensorrt.md`](tensorrt.md) | Beseitigt TensorRT den Engpass? | **nein** — Auslastung 103 % → 76 %, Vorsprung halbiert, Engpass bleibt |
+| [`messkette-2026-09-11.md`](messkette-2026-09-11.md) | Was hält auf dem neuen Treiber, mit korrigierten Werkzeugen? | Überlast 21–125x und Datenpfad bestanden; **Schwächen** an der Kante bei 100 %, bei Lastspitzen und in der Variantenwahl; mit XSched Gleichstand mit Triton, das VLM läuft erstmals unter dem Governor |
+| [`scenarios.md`](scenarios.md) | Welche Lastfälle tragen die Aussagen, wogegen, mit welchem Preis? | Plan für S1–S12, darunter Detektor + LLM, zwei LLMs nebeneinander, langer Job unter Sättigung, zweite GPU |
 
 ## Regeln, die für jede Zahl hier gelten
 

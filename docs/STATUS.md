@@ -74,15 +74,27 @@ Auslastung 103 → 76 %, der Vorsprung des Governors halbiert sich (24,7x →
 13,3x). Der Engpass bleibt: bei 76 % verfehlt ein getunter Triton weiter
 jeden zehnten Detektorzyklus ([Messung](benchmark/tensorrt.md)).
 
-**Lastspitzen (Spec 19.4).** Werkzeug fertig (`load-ramp bursts`). Die Messung vom 11.09. wurde abgebrochen, weil eine andere Sitzung auf derselben Maschine kompilierte (Systemlast bis 3,8); sie wird auf ruhiger Maschine wiederholt. Veröffentlicht wird keine Zahl aus diesem Lauf.
+**Messkette vom 11.09.** ([Bericht](benchmark/messkette-2026-09-11.md)) —
+was hält und was nicht, auf dem neuen Treiber und mit `TCP_NODELAY` in den
+Werkzeugen:
 
-**Lastrampe auf dem neuen Treiber.** Aus demselben Grund noch nicht wiederholt; es gilt die Rampe vom 01.09. ([load-ramp.md](benchmark/load-ramp.md)).
-
-**Variantenwahl (Spec 19.7).** Werkzeug fertig (`frontier`: automatische Wahl gegen feste Varianten, mit und ohne Hysterese); die Messung steht auf ruhiger Maschine aus. Die echten RF-DETR-Varianten
-geben dafür keinen Betriebspunkt her: die Auflösung bestimmt die Laufzeit,
-das Modell fast nicht ([Messung](benchmark/rfdetr-variants.md)).
-
-**Datenpfad (NV-20).** Budgets definiert und prüfbar ([datapath-budgets.md](datapath-budgets.md)): eine Tabelle, ein Mock-Check und ein Urteil in `shm-latency`. Das Urteil auf dieser Maschine steht auf ruhiger Maschine aus.
+- **Stationäre Rampe:** Über 100 % Last verfehlt Triton 342–500 ‰ der
+  Detektorperioden, der Governor 4–22 ‰ (21–125x); die nachrangigen Ströme
+  zahlen dafür. **Genau bei 100 %** verfehlt Triton nichts, der Governor
+  verwirft 165 ‰ eines nachrangigen Stroms — er plant mit 110 % Marge.
+- **Lastspitzen (Spec 19.4):** kein Gewinn (−1,1x, 1,2x) und bei langen
+  Spitzen über niedriger Grundlast ein Verlust (41 gegen 11 ‰). Die längste
+  Lücke hält er kürzer (12–14 gegen 21–22 ms). Ursache in Analyse; das
+  Szenario selbst wird überarbeitet ([Szenarien](benchmark/scenarios.md), S7).
+- **Variantenwahl (Spec 19.7):** Bei 150 % hält die automatische Wahl den
+  Strom (2 gegen 501 ‰ der großen Variante), bei 110–125 % schaltet sie zu
+  spät (66–84 ‰), bei 90 % gar nicht (143 ‰). Ursache in Analyse. Die echten
+  RF-DETR-Varianten geben keinen Betriebspunkt her
+  ([Messung](benchmark/rfdetr-variants.md)); gemessen ist der Mechanismus,
+  nicht die Qualität.
+- **Datenpfad (NV-20): bestanden.** Shm-Zusatz +159 µs gegen Triton, +210 bis
+  +236 µs gegen den Mock, größenunabhängig; alle budgetierten Zeilen PASS
+  ([datapath-budgets.md](datapath-budgets.md)).
 
 **Planbarkeit im begrenzten Modell (NV-23).** Unter neun benannten Annahmen —
 ein Slot, ein geschützter Strom, Laufzeiten innerhalb des Plans, Jitter J,
@@ -128,7 +140,7 @@ Vier Zustände, nicht zwei: **gebaut**, **erreichbar**, **angeschlossen**,
 | NV-12 CUDA-Graphs | **abgeschlossen, negativ**: 3,7 % weniger p50, mehrere Modelle mit Graphs laden nicht mehr | [0033](adr/0033-native-code-lives-in-the-backend-process.md), [Messung](benchmark/cuda-graphs.md) |
 | NV-13 Energieregler | erreichbar, opt-in, beobachtet statt angenommen; auf dieser Maschine fehlen die Rechte | [0030](adr/0030-actuation-is-an-exception-and-must-be-observed.md) |
 | NV-14 Green Contexts | **abgeschlossen, negativ für den Engpass**: begrenzt SMs, schützt nicht gegen Bandbreite, löst kein Zeitproblem | [0033](adr/0033-native-code-lives-in-the-backend-process.md), [Qualifikation](spikes/nv14-green-contexts.md) |
-| NV-15 XSched | **funktioniert unter Triton 26.06, ungemessen**: die scheinbare CUDA-13-Blockade war eine zweite `libcuda` im Prozess; mit `CUXTRA_CUDA_LIB` und einem Patch für die Level-2-Queue auf sm86 läuft Präemption ([Einrichtung](../deploy/xsched/README.md)). Die Governorseite ist **erreichbar**: präemptierbare Lanes planen mit dem gemessenen Restblocking R, `vig calibrate` misst es ([ADR-0035](adr/0035-preemption-is-a-measured-backend-property.md)). Beides wird am 11.09. gemessen | [0033](adr/0033-native-code-lives-in-the-backend-process.md), [Spike und Nachtrag](spikes/nv15-xsched.md) |
+| NV-15 XSched | **gemessen**: die scheinbare CUDA-13-Blockade war eine zweite `libcuda` im Prozess; mit `CUXTRA_CUDA_LIB` und einem Patch für die Level-2-Queue auf sm86 läuft Präemption ([Einrichtung](../deploy/xsched/README.md)). Triton + XSched hält die geschützten Ströme bei 100 % und lässt das VLM laufen; der Governor mit präemptierbarer Lane und R = 4 ms zieht gleich (alle Ströme 100 %, Detektor frischer, VLM etwas älter). R ist **nicht gemessen** — `vig calibrate` verwarf jede Reihe wegen wandernden Takts; 4 ms sind aus den Läufen geschätzt ([Messung](benchmark/messkette-2026-09-11.md#xsched-und-präemption-nv-15), [ADR-0035](adr/0035-preemption-is-a-measured-backend-property.md)) | [0033](adr/0033-native-code-lives-in-the-backend-process.md), [Spike und Nachtrag](spikes/nv15-xsched.md) |
 | NV-16 Fortschrittskosten | fertig und gemessen | [0031](adr/0031-a-re-prefill-is-not-free-progress.md), [Messung](benchmark/nv16-prefill.md) |
 | NV-17 Gültigkeitsbewusster DAG | **erreichbar**: der Client nennt `vig_capture_id` und `vig_depends_on`; eine Zusammenführung über Aufnahmegrenzen wird abgelehnt, bevor sie rechnet. Der Fehler, dass nach 256 Aufnahmen je Prozess jede weitere abgelehnt wurde (gefunden live von der ROS-2-Brücke), ist behoben: jedes Ende schließt seinen Knoten, ein Test liefert 2000 Aufnahmen aus. Kennungen gelten je Aufrufer, mit Kontingent je Identität | [0028](adr/0028-a-fusion-needs-a-common-capture.md), [Clientparameter](getting-started.md#results-from-the-same-capture) |
 | NV-18 Anwendungssemantik | erreichbar: ein Hinweis darf verschärfen, nie lockern | [0029](adr/0029-a-hint-may-tighten-never-loosen.md) |
@@ -171,7 +183,10 @@ per Voreinstellung nichts. Mit Marge ist `active` sicher, auf Gate M3 aber ohne 
 
 | Paket | Stand | Was fehlt |
 |---|---|---|
-| NV-15 XSched | funktioniert, Planung erreichbar, ungemessen | Die Messung steht in der Warteschlange vom 11.09.: zwei Tritonprozesse ohne XSched, mit Level 2, mit TSG, je drei Läufe; danach R per `vig calibrate` unter Level 2 und Gate M3 mit dem VLM auf seiner Lane. Die Frage: schützt die Lane den Detektor, und bekommt das VLM endlich Fortschritt? |
+| NV-15 XSched | gemessen, Gleichstand mit Triton + XSched | R messen statt schätzen: mit festem Takt (braucht Rechte) oder online aus dem Betrieb (ADR-0038). Die Antwort auf die Frage vom 11.09.: Die Lane schützt den Detektor (100 %), und das VLM bekommt unter dem Governor erstmals vollen Fortschritt (100 %). |
+| Kante bei 100 % | Ursache vermutet, Korrektur in Arbeit | Der Governor plant mit 110 % Marge und verwirft bei echten 100 % einen nachrangigen Strom (165 ‰). Die Marge darf lernen, auch nach unten (ADR-0038); Messung als Szenario S10. |
+| Lastspitzen und Variantenwahl | Schwäche gemessen, Analyse läuft | Lange Spitzen über niedriger Grundlast: 41 gegen 11 ‰. Variantenwahl bei 90 % ohne Herunterschalten, bei 110–125 % zu spät ([Messung](benchmark/messkette-2026-09-11.md)). |
+| Externer Review vom 11.09. | Skriptbefunde behoben, Produktbefunde in Arbeit | R01–R05: Abschlussabgleich nach Backend-Neustart, Identität von Endpunkt und Version, Pufferlebensdauer in Pilot und ROS-Brücke, Sampling-JSON ([Review](reviews/2026-09-11-runtime/REVIEW.md)). R06–R08 behoben. |
 | Zweiter Betriebspunkt | offen | Zwei Ausführungseinheiten (`slots: 2`, Instance Groups mit zwei Instanzen) samt gemessener Parallelprofile. Die Lastrampe sagt selbst, dass sich ihre Kante damit verschiebt. |
 | NV-22 mehrere Ressourcendomänen | **erreichbar, nicht qualifiziert** ([ADR-0037](adr/0037-a-domain-is-a-gpu-with-one-owner.md)) | Gebaut: ein Scheduler je GPU (`backend.domains`, `domain:` am Modell), feste Zuordnung, kein Failover, Kennzahlen je Domäne, `vig doctor` je GPU; mit zwei Fake-Executoren belegt, dass eine belegte oder ausgefallene GPU der anderen weder Slot noch Kredit nimmt. Es fehlt: eine zweite GPU für die Qualifikation (Interferenz über PCIe, Hauptspeicher, Leistungsbudget), Shared-Memory-Registrierung an allen Endpunkten, Domänen in `vig calibrate`. Erledigt aus diesem Block: NV-21 ([ROS-2-Brücke](integrations/ros2.md)) und NV-23 ([begrenzter Nachweis](analysis/nv23-bounded-claim.md)). |
 | Look-ahead nach NV-23 | offen | Die drei Schwächen aus der Gegenbeispielsuche beheben: verspätete Frames nicht aufgeben, Deadline ab Aufnahme, Horizont aus den Perioden ableiten statt fest 100 ms. |
