@@ -6,7 +6,7 @@ what runs now, what waits, what is thrown away because newer data arrived, and
 which model variant still fits the time budget.
 
 [![Status](https://img.shields.io/badge/status-pre--production-orange)](#status-what-works-and-what-does-not)
-[![Tests](https://img.shields.io/badge/tests-628%20passing-brightgreen)](#build-and-verify)
+[![Tests](https://img.shields.io/badge/tests-721%20passing-brightgreen)](#build-and-verify)
 [![License](https://img.shields.io/badge/license-BUSL--1.1-blue)](LICENSE)
 
 ---
@@ -151,6 +151,7 @@ The break-even is between 100 % and 110 % offered load
 | [**Getting started**](docs/getting-started.md) | configure, calibrate, run, and read the metrics |
 | [**How it works**](docs/how-it-works.md) | the four decision stages, time handling, slots, decomposition, failure behaviour |
 | [**Runbook**](docs/runbook.md) | what to do when something is wrong — every symptom the system reports about itself |
+| [**Security**](docs/security.md) | threat model, what is checked, the deployment checklist, accepted residual risks |
 | [**Support matrix**](docs/support-matrix.md) | what is qualified, what is built but unmeasured, what is not supported |
 | [**Hardware qualification**](docs/hardware-qualification.md) | what is portable, what is untested, and what to run before trusting a new platform |
 | [**Releases and upgrades**](docs/releases.md) | signed artifacts, how to verify them, versioning and the upgrade path |
@@ -308,7 +309,7 @@ We would rather you read that list before the benchmark table.
 ```bash
 cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace          # 628 tests, one timing check ignored by design
+cargo test --workspace          # 721 tests, two timing checks ignored by design
 cargo deny check licenses bans advisories sources
 ```
 

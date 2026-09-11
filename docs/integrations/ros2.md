@@ -129,21 +129,23 @@ sends its own request with `vig_capture_id` and `vig_depends_on`; the governor
 refuses a fusion across captures before it computes
 ([results from the same capture](../getting-started.md#results-from-the-same-capture)).
 
-### Known issue: the capture graph fills up
+### Fixed: the capture graph filled up (releases up to 0.2.0)
 
 The governor keeps one node per announced capture in a bounded graph of 256
-nodes ([`MAX_NODES`](../../crates/vig-core/src/dag.rs)). As of this release it
-never moves a node out of the open state once its request has finished, so the
-graph is only cleaned of nodes that were never there: after 256 captures in
-the lifetime of a governor process, every request carrying `vig_capture_id` is
-refused with `FAILED_PRECONDITION` — "der Graph fasst hoechstens 256 Knoten".
-At 30 Hz that is about eight seconds.
+nodes ([`MAX_NODES`](../../crates/vig-core/src/dag.rs)). Up to release 0.2.0
+it never moved a node out of the open state once its request had finished:
+after 256 captures in the lifetime of a governor process, every request
+carrying `vig_capture_id` was refused with `FAILED_PRECONDITION`. At 30 Hz
+that is about eight seconds. The bridge reported these as `fusion_refused`
+events, and a live run against `vig serve` showed exactly this: 256 frames
+delivered, every later one refused.
 
-The bridge reports these as `fusion_refused` events, and a live run against
-`vig serve` shows exactly this: 256 frames delivered, every later one refused.
-Until the governor retires finished capture nodes, run the bridge with
-`send_capture_id: false` unless a downstream node actually fuses results.
-Freshness, supersession and the shared-memory path do not depend on it.
+Every terminal path now closes its node, and a completed result is kept for
+its model's `max_age` so a fusion node still finds it
+([details](../security.md#not-a-security-finding-nv-17)). Against 0.2.0 or
+older, run the bridge with `send_capture_id: false` unless a downstream node
+actually fuses results; freshness, supersession and the shared-memory path do
+not depend on it.
 
 ## What the bridge does not do
 

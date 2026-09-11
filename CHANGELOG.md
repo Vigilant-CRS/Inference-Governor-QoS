@@ -123,8 +123,64 @@ bedeutet, steht in [docs/releases.md](docs/releases.md).
   Ein-Byte-Token als eines. Verbraucht wird jetzt das Kleinere aus zwei
   Obergrenzen — der bestellten und der aus den Bytes.
 
+### Sicherheit — Review vom 11.09. ([docs/security.md](docs/security.md))
+
+Bedrohungsmodell, Checkliste fuer den sicheren Betrieb und die Tabelle
+Befund → Fix → Test stehen in docs/security.md. Die hohen Befunde:
+
+- **H1: Der Quickstart stellte Triton am Governor vorbei ins Netz.** Triton
+  hat in der Compose-Datei keinen veroeffentlichten Port mehr; `vig`
+  veroeffentlicht 9001 und 9090 nur auf `127.0.0.1`, laeuft schreibgeschuetzt,
+  ohne Capabilities und mit `no-new-privileges`. `.dockerignore` haelt Token,
+  Schluessel und lokale Konfigurationen aus dem Build-Kontext.
+- **H2: Shared-Memory-Schluessel liefen ungeprueft durch.** Jede Registrierung
+  ueber den Governor prueft Praefix, Ausdehnung und Besitz; unter
+  `trust: strict` nennt eine Inferenz nur eigene Regionen.
+- **H3: Die Administrationsendpunkte standen jedem Tokeninhaber offen.** Sie
+  sind in jedem Modus gesperrt, bis `backend.security.admin_token_file`
+  gesetzt ist.
+
+Dazu M1–M5 und N1–N7: Tokenpruefung vor dem Dekodieren, Transportgrenzen,
+durchgereichte Modelle im Nutzlastbudget, gepinnte Actions und Basisimages,
+Tokennamen statt Hashes im Log, Kennungen im Abhaengigkeitsgraph je
+Aufrufer, gedrosselte Zeitstempelwarnung, Obergrenze fuer Hinweis-TTL,
+Verbindungsgrenze am Metrikport.
+
+### Geaendert — bricht bestehende Konfigurationen
+
+- **`vig serve` verweigert eine Adresse ausserhalb von Loopback**, solange
+  weder mTLS (`client_ca`) noch Token (`token_file`) den Aufrufer pruefen.
+  TLS allein genuegt nicht. Der ausdrueckliche Weg vorbei ist
+  `--insecure-open`, gedacht fuer einen Containerport, der auf dem Loopback
+  des Hosts veroeffentlicht ist.
+- **Modelle laden und entladen, Trace, Log und CUDA-Speicher** antworten
+  `PERMISSION_DENIED`, bis `backend.security.admin_token_file` gesetzt ist.
+- **Token brauchen mindestens 16 Zeichen.** Anwendungshinweise darf nur ein
+  benanntes Token senden (`robot:<token>`); die Hinweiskennung kommt aus dem
+  Namen.
+- **Shared-Memory-Schluessel muessen mit `backend.security.shm_key_prefix`
+  beginnen** (Voreinstellung `/vig_`); hoechstens `max_shm_regions` (256)
+  Regionen. Alle Regionen abmelden (leerer Name) braucht ein
+  Administrationstoken.
+- **Durchgereichte Modelle zaehlen gegen das Nutzlastbudget.**
+- **Hinweise laenger als `hints.max_ttl_ms`** (Voreinstellung 60 s) werden
+  verworfen.
+- **`vig doctor`** meldet TLS ohne Identitaetspruefung als Warnung und
+  `trust: strict` ohne Identitaetspruefung als nicht bereit.
+- **Die Compose-Datei veroeffentlicht Triton nicht mehr.** Wer Triton vom
+  Host aus direkt angesprochen hat (Benchmarks), braucht dafuer eine eigene
+  Portfreigabe.
+
 ### Behoben
 
+- **Der Abhaengigkeitsgraph lief nach 256 Aufnahmen voll** (NV-17). Kein
+  Pfad setzte einen Knoten je auf einen Endzustand; danach lehnte das Gateway
+  jede Anfrage mit `vig_capture_id` ab. Jedes Ende — Fertigstellung,
+  Verwerfen, Ablehnung, Abbruch, Backendfehler, Drain — schliesst jetzt
+  seinen Knoten; ein fertiges Ergebnis haelt fuer das Hoechstalter seines
+  Modells (100 ms bis 5 s), unter Druck gehen die aeltesten zuerst.
+  Ablehnungen tragen `vig-reason` (`graph_full`, `capture_mismatch`, ...).
+  Gefunden live von der ROS-2-Bruecke.
 - **Ein nicht zerlegter Auftrag wurde als Quantum eingeplant.** Ein Request
   ohne Texteingang auf einem `cooperative`-Vertrag bekam vom Kern eine
   Quantendauer zugewiesen, waehrend das Backend den ganzen Auftrag rechnete;
