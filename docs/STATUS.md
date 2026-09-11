@@ -14,8 +14,8 @@ fortgeschrieben.
 | | |
 |---|---|
 | Rust, ohne Kommentare und Leerzeilen gezählt | ~34 500 Zeilen in 9 Crates |
-| Tests | 751 grün, zwei bewusst ignoriert (die Zeitprüfung der Datenpfadbudgets und das große NV-23-Gitter — beide gehören auf die Releasemaschine, nicht auf geteilte CI-Runner) |
-| Architekturentscheidungen | 37 ADRs |
+| Tests | 758 grün, zwei bewusst ignoriert (die Zeitprüfung der Datenpfadbudgets und das große NV-23-Gitter — beide gehören auf die Releasemaschine, nicht auf geteilte CI-Runner) |
+| Architekturentscheidungen | 38 ADRs |
 | Gate | fmt, clippy `-D warnings`, test, `cargo deny`, `reuse lint`, aarch64 unter Emulation |
 
 Die Crates und ihre Zuständigkeit:
@@ -191,7 +191,7 @@ per Voreinstellung nichts. Mit Marge ist `active` sicher, auf Gate M3 aber ohne 
 | NV-15 XSched | gemessen, Gleichstand mit Triton + XSched | R messen statt schätzen: mit festem Takt (braucht Rechte) oder online aus dem Betrieb (ADR-0038). Die Antwort auf die Frage vom 11.09.: Die Lane schützt den Detektor (100 %), und das VLM bekommt unter dem Governor erstmals vollen Fortschritt (100 %). |
 | Kante bei 100 % | Ursache offen; die Marge ist es nicht (Simulation) | Bei 100 % verliert Triton nichts, der Governor 165 ‰ eines nachrangigen Stroms. In der Simulation derselben Last liefern feste 110 %, feste 100 % und eine gelernte Marge bis 105 % dieselbe Abdeckung. Nächster Kandidat: die Lücke zwischen zwei Aufträgen bei `pipelining_depth: 0`; Messung nach dem Dauerlauf. Die gelernte Marge (ADR-0038) wird nach dem Look-ahead-Fix nachgeprüft. |
 | Lastspitzen und Variantenwahl | Schwäche gemessen, Analyse läuft | Lange Spitzen über niedriger Grundlast: 41 gegen 11 ‰. Variantenwahl bei 90 % ohne Herunterschalten, bei 110–125 % zu spät ([Messung](benchmark/messkette-2026-09-11.md)). |
-| Externer Review vom 11.09. | Skriptbefunde behoben, Produktbefunde in Arbeit | R01–R05: Abschlussabgleich nach Backend-Neustart, Identität von Endpunkt und Version, Pufferlebensdauer in Pilot und ROS-Brücke, Sampling-JSON ([Review](reviews/2026-09-11-runtime/REVIEW.md)). R06–R08 behoben. |
+| Externer Review vom 11.09. | R01, R02, R06–R08 behoben; R03–R05 in Arbeit | R01/R02 ([ADR-0040](adr/0040-a-restart-proves-only-what-died-with-it.md)): ein Backend-Neustart beendet nur Aufrufe, deren Verbindung schon abgebrochen ist; abgeglichen wird je Server und Backendmodell über alle Versionen, mit höchstens einem Poller. Offen: Pufferlebensdauer in Pilot und ROS-Brücke, Sampling-JSON ([Review](reviews/2026-09-11-runtime/REVIEW.md)). |
 | Zweiter Betriebspunkt | offen | Zwei Ausführungseinheiten (`slots: 2`, Instance Groups mit zwei Instanzen) samt gemessener Parallelprofile. Die Lastrampe sagt selbst, dass sich ihre Kante damit verschiebt. |
 | NV-22 mehrere Ressourcendomänen | **erreichbar, nicht qualifiziert** ([ADR-0037](adr/0037-a-domain-is-a-gpu-with-one-owner.md)) | Gebaut: ein Scheduler je GPU (`backend.domains`, `domain:` am Modell), feste Zuordnung, kein Failover, Kennzahlen je Domäne, `vig doctor` je GPU; mit zwei Fake-Executoren belegt, dass eine belegte oder ausgefallene GPU der anderen weder Slot noch Kredit nimmt. Es fehlt: eine zweite GPU für die Qualifikation (Interferenz über PCIe, Hauptspeicher, Leistungsbudget), Shared-Memory-Registrierung an allen Endpunkten, Domänen in `vig calibrate`. Erledigt aus diesem Block: NV-21 ([ROS-2-Brücke](integrations/ros2.md)) und NV-23 ([begrenzter Nachweis](analysis/nv23-bounded-claim.md)). |
 

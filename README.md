@@ -6,7 +6,7 @@ what runs now, what waits, what is thrown away because newer data arrived, and
 which model variant still fits the time budget.
 
 [![Status](https://img.shields.io/badge/status-pre--production-orange)](#status-what-works-and-what-does-not)
-[![Tests](https://img.shields.io/badge/tests-751%20passing-brightgreen)](#build-and-verify)
+[![Tests](https://img.shields.io/badge/tests-758%20passing-brightgreen)](#build-and-verify)
 [![License](https://img.shields.io/badge/license-BUSL--1.1-blue)](LICENSE)
 
 ---
@@ -309,7 +309,7 @@ We would rather you read that list before the benchmark table.
 ```bash
 cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace          # 751 tests, two timing checks ignored by design
+cargo test --workspace          # 758 tests, two timing checks ignored by design
 cargo deny check licenses bans advisories sources
 ```
 
