@@ -16,7 +16,7 @@ Three levels are used throughout, and the difference matters:
 
 | Configuration | Level | Notes |
 |---|---|---|
-| RTX 3070 Laptop (8 GB), driver 580.173.02 | **Qualified** | The machine every published number comes from. It runs power-capped at 1830 of 2100 MHz; `vig doctor` reports this. |
+| RTX 3070 Laptop (8 GB), driver 580.173.02 and 580.178.04 | **Qualified** | The machine every published number comes from. Most numbers were taken under 580.173.02, where the card ran power-capped at 1830 of 2100 MHz. Gate M3 was repeated under 580.178.04 on 11 September and holds ([report](benchmark/gate-m3-r04.md)); `vig doctor` reports the current clock state. |
 | Other consumer Ampere (RTX 30xx desktop) | Untested | Same architecture, different power and memory behaviour. Expect the logic to hold and the numbers not to. |
 | RTX A2000 / professional Ampere | Untested | — |
 | Ada / Blackwell consumer or professional | Untested | — |
@@ -32,8 +32,8 @@ Three levels are used throughout, and the difference matters:
 | NVIDIA Triton Inference Server | **Qualified** | 2.70.0 (26.06-py3), gRPC, system shared memory |
 | Triton, other 2.x versions | Untested | The protocol is stable; the statistics endpoint and the rate limiter are not guaranteed to behave identically. |
 | ONNX Runtime backend in Triton | **Qualified** | The measured configuration. |
-| TensorRT backend in Triton | Untested | Planned as NV-08. The profile manifest already distinguishes it (`runtime.platform`). |
-| TensorRT direct, without Triton | **Not supported** | Planned as NV-09. No code today. |
+| TensorRT backend in Triton | **Qualified** | Measured as NV-08 with the same weights as TensorRT engines: detector runtime 15.6 → 11.5 ms, the governor's advantage halves (24.7× → 13.3×) because the baseline improves ([tensorrt.md](benchmark/tensorrt.md)). No code path of its own. |
+| TensorRT direct, without Triton | **Not supported** | NV-09 spike measured: 500–730 µs gained per inference, almost entirely Triton's I/O copies. Not built into the product — see [ADR-0033](adr/0033-native-code-lives-in-the-backend-process.md). |
 | Any other inference server | **Not supported** | The backend seam exists ([ADR-0024](adr/0024-the-backend-is-a-seam-not-a-type.md)) and has exactly one implementation. |
 | Linux, glibc | **Qualified** | `x86_64-unknown-linux-gnu` |
 | Linux, `aarch64` | Built and tested | Cross-built and unit-tested under emulation in CI. |
@@ -59,7 +59,7 @@ was that no documented configuration step could reach them at all
 | Freshness-aware admission, supersession, look-ahead | **Qualified** | always on |
 | Variant selection by quality | **Qualified** | on where variants are interchangeable |
 | Cooperative decomposition of generative jobs | **Qualified** | `cooperative:` on the model |
-| Context-dependent progress cost for generative jobs | Connected | `cooperative.prefill_per_token_us`; **not measured on this machine** ([ADR-0031](adr/0031-a-re-prefill-is-not-free-progress.md)) |
+| Context-dependent progress cost for generative jobs | **Qualified** | `cooperative.prefill_per_token_us`; measured against vLLM (Qwen): 0–5 µs per context token with prefix caching, 35–39 µs without ([measurement](benchmark/nv16-prefill.md), [ADR-0031](adr/0031-a-re-prefill-is-not-free-progress.md)) |
 | Slot credits with proof-based release | **Qualified** | always on |
 | Active per-backend readiness probe | Connected | always on |
 | Payload budget bound to execution, not to the client | Connected | `backend.max_inflight_mib` |
@@ -68,9 +68,9 @@ was that no documented configuration step could reach them at all
 | Weakly-hard **policy** — the budget influencing dispatch | Reachable | `backend.miss_aware_policy: true` ([ADR-0027](adr/0027-a-miss-budget-that-decides-not-only-observes.md)) |
 | Application hints (action horizon, elevated, mode) | Reachable | `backend.hints:` plus a bearer token; the authority is derived from the token and printed at startup ([ADR-0029](adr/0029-a-hint-may-tighten-never-loosen.md)) |
 | Clock actuation | Reachable | `backend.actuation:`; needs the permission to set clocks, which this machine does not have ([ADR-0030](adr/0030-actuation-is-an-exception-and-must-be-observed.md)) |
-| State-aware runtime prediction | Built | shadow only; no configuration switches it to deciding ([ADR-0023](adr/0023-state-aware-prediction-runs-in-the-shadow-first.md)) |
+| State-aware runtime prediction | Reachable | `backend.prediction: active`; the default is `shadow`. Needs hardware observation, which `vig serve` starts — without it every cell falls back to the profile ([ADR-0023](adr/0023-state-aware-prediction-runs-in-the-shadow-first.md)) |
 | Directed interference table | Reachable | `backend.interference:`, written by `vig calibrate`; a measured pair adds its surcharge to the planned runtime, an unmeasured one adds nothing ([ADR-0026](adr/0026-interference-is-directed-and-not-additive.md)) |
-| Validity-aware dependency graph | Built | needs a protocol extension ([ADR-0028](adr/0028-a-fusion-needs-a-common-capture.md)) |
+| Validity-aware dependency graph | Reachable | the client sends `vig_capture_id` and `vig_depends_on` ([how](getting-started.md#results-from-the-same-capture)); a fusion across captures is refused before it runs ([ADR-0028](adr/0028-a-fusion-needs-a-common-capture.md)) |
 | Hardware observation | **Qualified** | started explicitly by `vig serve`, not by the scheduler; read-only, no root. Without it the governor plans without device state ([ADR-0022](adr/0022-measurement-is-a-method-not-a-loop.md)) |
 | Bearer-token authentication, mTLS | Reachable | `backend.security` |
 | `trust: strict` | Reachable | `backend.trust: strict`; the default is `open` (Spec L-002) |

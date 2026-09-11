@@ -160,17 +160,76 @@ client.infer("detector", inputs, parameters={
 })
 ```
 
-| Parameter | Meaning |
-|---|---|
-| `vig_age_us` | how old the input is, in microseconds |
-| `vig_generation_ns` | absolute monotonic capture timestamp (alternative to the above) |
-| `vig_max_age_us` | beyond this age the result is worthless |
-| `vig_deadline_us` | this request's own deadline, overriding the contract |
-| `vig_supersession_key` | which stream this belongs to (camera id, object id) |
-| `vig_class` | requested importance class |
+| Parameter | Type | Meaning |
+|---|---|---|
+| `vig_age_us` | int64 | how old the input is, in microseconds |
+| `vig_generation_ns` | int64 | absolute monotonic capture timestamp — only valid if client and governor share one clock, i.e. run on the same host. Mutually exclusive with `vig_age_us` |
+| `vig_max_age_us` | int64 | beyond this age the result is worthless |
+| `vig_deadline_us` | int64 | this request's own deadline, overriding the contract |
+| `vig_stream_id` | int64 | which sensor stream this request comes from |
+| `vig_supersession_key` | int64 | which stream this belongs to for replacement (camera id, object id) |
+| `vig_class` | string | requested importance class: `protected`, `high`, `normal`, `best_effort`. Under `trust: strict` a client can only lower its class below the configured one, never raise it |
+| `vig_capture_id` | int64 | the capture this request belongs to — see [results from the same capture](#results-from-the-same-capture) |
+| `vig_depends_on` | string | comma-separated request `id`s whose results this request combines |
+| `vig_hint_elevated_max_age_us` | int64 | "I need this stream fresher right now" — see [application hints](#application-hints) |
+| `vig_hint_action_horizon_us` | int64 | "I do not need this stream fresher for this long" |
+| `vig_hint_mode` | int64 | an operating mode the operator has named |
+| `vig_hint_ttl_us` | int64 | how long the hint holds; a hint without it is not accepted |
 
 Without any of these the request still works — it simply uses the contract's
 defaults and counts its age from arrival instead of capture.
+
+A misspelled `vig_` parameter is **refused**, not ignored: a typo in a
+freshness parameter would otherwise run the request without the meaning you
+intended. Parameters without the prefix pass through untouched.
+
+### Results from the same capture
+
+Two results can both be fresh and still come from **different** captures — a
+depth map from frame 41 and detections from frame 42. Freshness alone cannot
+see that. If your pipeline fuses results, say which capture each request
+belongs to:
+
+```python
+# depth and detector on the same frame
+client.infer("depth",    depth_in,  request_id="4101", parameters={"vig_capture_id": 41})
+client.infer("detector", det_in,    request_id="4102", parameters={"vig_capture_id": 41})
+# the fusion step names both
+client.infer("fusion",   fusion_in, request_id="4103", parameters={
+    "vig_capture_id": 41,
+    "vig_depends_on": "4101,4102",
+})
+```
+
+A fusion across two captures is refused with `FAILED_PRECONDITION` **before**
+it runs — the backend never sees it. The request `id` must be a number when
+`vig_capture_id` is set, otherwise no later request could name it; at most
+eight parents per request. Without `vig_capture_id` nothing changes and the
+governor plans by freshness alone ([ADR-0028](adr/0028-a-fusion-needs-a-common-capture.md)).
+
+### Application hints
+
+Hints let the application say what it needs **right now**, within bounds the
+operator set. They are off until `backend.hints` is configured, and a hint is
+only accepted from a caller that authenticates with a bearer token
+(`backend.security`). The authority is a number derived from that token;
+`vig serve` prints it at startup for every configured token.
+
+```yaml
+backend:
+  hints:
+    authority: 1234567890123     # the number `vig serve` printed for the hint sender's token
+    allow_loosening: false       # action horizons weaken a promise; off by default
+    approved_modes: [1, 2]       # modes the operator has named
+    min_max_age_ms: 20           # how far "fresher" may go
+    max_action_horizon_ms: 200   # how long "not fresher" may last
+```
+
+A hint may **tighten** a promise, never silently loosen it: an elevated
+freshness requirement is accepted within `min_max_age_ms`; an action horizon
+only with `allow_loosening: true`. A stale, contradictory or unauthorised hint
+leaves the operator's contract in force
+([ADR-0029](adr/0029-a-hint-may-tighten-never-loosen.md)).
 
 ## Step 5 — see what it decided
 
