@@ -11,10 +11,11 @@
 //! * **[`RuntimeEstimator`]** — gleitendes Fenster beobachteter Laufzeiten je
 //!   Modell, Variante und Slot-Belegungsgrad. Der Belegungsgrad gehoert dazu,
 //!   weil er der Ersatz fuer die Interferenzmatrix ist (ADR-0006).
-//! * **[`MarginController`]** — passt die Sicherheitsmarge langsam an. Nach
-//!   einer Unterprognose steigt sie schnell, in ruhigen Phasen faellt sie
-//!   langsam. Die Asymmetrie ist dieselbe wie bei der Variantenhysterese: der
-//!   teurere Fehler wird schneller korrigiert.
+//! * **[`MarginController`]** — lernt die Sicherheitsmarge je Modell. Nach
+//!   einer Unterprognose steigt sie schnell, nach einem eingehaltenen Plan
+//!   faellt sie langsam — und zwar so, dass im Gleichgewicht genau der
+//!   vereinbarte Anteil der Ausfuehrungen ueberzieht (ADR-0034). Der teurere
+//!   Fehler wird schneller korrigiert; wie viel schneller, sagt das Ziel.
 //! * **[`ProfileHealth`]** — der Circuit Breaker aus Spec 30.3. Liegt die
 //!   Wirklichkeit dauerhaft weit neben dem Profil, ist das kein Fall fuer eine
 //!   immer groessere Marge, sondern fuer eine Meldung.
@@ -292,23 +293,76 @@ impl Default for RuntimeEstimator {
     }
 }
 
-/// Die langsam angepasste Sicherheitsmarge eines Modells (Spec 13.3).
+/// Die selbst lernende Sicherheitsmarge eines Modells (Spec 13.3, ADR-0034).
+///
+/// ## Ein Regler mit Ziel
+///
+/// Die Marge steigt nach jeder Ausfuehrung, die ihre geplante Laufzeit
+/// ueberzogen hat, und sinkt nach jeder, die es nicht tat. Wie weit, sagt
+/// **ein Ziel**: der Anteil der Ausfuehrungen, die ueberziehen duerfen.
+///
+/// ```text
+/// Ueberziehung:  + G * (1 - Ziel)
+/// sonst:         - G * Ziel
+/// ```
+///
+/// Im Gleichgewicht heben sich beide auf, und das ist genau dann der Fall,
+/// wenn der Anteil der Ueberziehungen gleich dem Ziel ist. Das ist die
+/// bekannte Online-Schaetzung eines Quantils, nur auf die Marge statt auf
+/// den Messwert angewandt: der Regler findet die Marge, unter der der Plan
+/// das gewuenschte Quantil der tatsaechlichen Laufzeit ist.
+///
+/// Die Fassung davor stieg um 10 und sank um 1 Prozentpunkt. Ihr
+/// Gleichgewicht lag bei 10·p = 1·(1-p), also bei **p = 1/11 — jede elfte
+/// Ausfuehrung ueberzog ihren Plan**, und niemand hatte diese Zahl gewaehlt.
+/// Sie ergab sich aus zwei Schrittweiten.
+///
+/// ## Wo das Ziel herkommt
+///
+/// Aus dem **ausdruecklich vereinbarten** Missbudget des Vertrags, wenn es
+/// eines gibt (`M/K`, begrenzt auf [`Self::MAX_TARGET_PERMILLE`]), sonst ein
+/// Prozent: die Planung beginnt beim Profil-p99, und ein Prozent
+/// Ueberziehung heisst, dass der Plan auch im Betrieb ein p99 bleibt.
+///
+/// Warum je Modell und nicht je Kamera: die Laufzeit eines Modells haengt
+/// nicht davon ab, welcher Sensor das Bild geliefert hat. Welche Kamera
+/// wichtiger ist, sagt der Vertrag, nicht die Marge.
+///
+/// ## Was bleibt
+///
+/// Die konfigurierte Marge ist der Boden. Der Regler darf vorsichtiger
+/// werden als der Betreiber, nie leichtsinniger.
 #[derive(Debug, Clone, Copy)]
 pub struct MarginController {
-    percent: u32,
+    /// Die aktuelle Marge in Hundertstelprozent.
+    ///
+    /// Feiner als die Marge selbst, weil ein Ziel von einem Prozent Schritte
+    /// von einem Zehntelprozentpunkt braucht.
+    basis_points: u32,
     floor: u32,
     ceiling: u32,
+    /// Wie viele Ausfuehrungen je tausend ihren Plan ueberziehen duerfen.
+    target_permille: u32,
 }
 
 impl MarginController {
-    /// Schrittweite nach oben nach einer Unterprognose.
-    pub const TIGHTEN_STEP: u32 = 10;
-    /// Schrittweite nach unten in ruhigen Phasen.
+    /// Die Verstaerkung in Hundertstelprozent: so weit steigt die Marge nach
+    /// einer Ueberziehung, wenn das Ziel null waere (10 Prozentpunkte).
     ///
-    /// Deutlich kleiner als der Schritt nach oben: eine zu knappe Marge kostet
-    /// eine verpasste Deadline, eine zu grosse nur Durchsatz.
-    pub const RELAX_STEP: u32 = 1;
-    /// Aufschlag fuer ein nicht verifiziertes Profil (G-010, ADR-0016).
+    /// Gross genug, dass eine einzelne Ueberziehung spuerbar vorsichtiger
+    /// macht; die Asymmetrie zum Absenken ergibt sich aus dem Ziel und muss
+    /// nicht zusaetzlich eingestellt werden.
+    pub const GAIN_BASIS_POINTS: u32 = 1_000;
+    /// Das Ziel ohne Vertragsangabe: ein Prozent.
+    pub const DEFAULT_TARGET_PERMILLE: u32 = 10;
+    /// Das hoechste Ziel, auch wenn der Vertrag mehr Misses erlaubt.
+    ///
+    /// Ein Missbudget zaehlt verpasste Verbraucherzyklen, nicht ueberzogene
+    /// Plaene. Ein grosszuegiges Budget soll die Marge nicht so weit
+    /// loesen, dass die Planung ihren Namen verliert.
+    pub const MAX_TARGET_PERMILLE: u32 = 50;
+    /// Aufschlag fuer ein nicht verifiziertes Profil (G-010, ADR-0016), in
+    /// Prozentpunkten.
     ///
     /// Der Wert muss nicht richtig sein, weil der Estimator ihn korrigiert,
     /// sobald er eigene Beobachtungen hat. Er muss nur deutlich konservativ
@@ -316,13 +370,15 @@ impl MarginController {
     /// stillschweigend falsches Versprechen — und genau das verbietet G-010.
     pub const UNVERIFIED_SURCHARGE: u32 = 40;
 
-    /// Startet bei der uebergebenen Marge.
+    /// Startet bei der uebergebenen Marge, mit dem Ziel von einem Prozent.
     #[must_use]
     pub fn new(start: SafetyMargin) -> Self {
+        let basis_points = start.as_percent().saturating_mul(100);
         Self {
-            percent: start.as_percent(),
-            floor: start.as_percent(),
-            ceiling: SafetyMargin::MAX_PERCENT,
+            basis_points,
+            floor: basis_points,
+            ceiling: SafetyMargin::MAX_PERCENT.saturating_mul(100),
+            target_permille: Self::DEFAULT_TARGET_PERMILLE,
         }
     }
 
@@ -334,40 +390,88 @@ impl MarginController {
     /// und nach wenigen Sekunden Betrieb misst das System ohnehin selbst.
     #[must_use]
     pub fn provisional(configured: SafetyMargin) -> Self {
-        let floor = configured.as_percent();
+        let floor = configured.as_percent().saturating_mul(100);
         Self {
-            percent: floor
+            basis_points: configured
+                .as_percent()
                 .saturating_add(Self::UNVERIFIED_SURCHARGE)
-                .min(SafetyMargin::MAX_PERCENT),
+                .min(SafetyMargin::MAX_PERCENT)
+                .saturating_mul(100),
             floor,
-            ceiling: SafetyMargin::MAX_PERCENT,
+            ceiling: SafetyMargin::MAX_PERCENT.saturating_mul(100),
+            target_permille: Self::DEFAULT_TARGET_PERMILLE,
         }
     }
 
-    /// Die aktuelle Marge.
+    /// Dasselbe mit einem anderen Ziel, begrenzt auf `1..=MAX_TARGET_PERMILLE`.
+    ///
+    /// Null ist kein Ziel: ein Regler, der keine einzige Ueberziehung
+    /// hinnimmt, sinkt nie und steigt mit jeder — er waere eine Ratsche.
+    #[must_use]
+    pub const fn with_target_permille(mut self, permille: u32) -> Self {
+        self.target_permille = if permille == 0 {
+            1
+        } else if permille > Self::MAX_TARGET_PERMILLE {
+            Self::MAX_TARGET_PERMILLE
+        } else {
+            permille
+        };
+        self
+    }
+
+    /// Das Ziel aus einem vereinbarten Missbudget: `M/K` in Promille.
+    #[must_use]
+    pub fn target_from_budget(budget: crate::contract_ext::MissBudget) -> u32 {
+        let permille = u64::from(budget.max_misses)
+            .saturating_mul(1_000)
+            .checked_div(u64::from(budget.window_cycles))
+            .unwrap_or(u64::from(Self::DEFAULT_TARGET_PERMILLE));
+        u32::try_from(permille).unwrap_or(u32::MAX)
+    }
+
+    /// Das Ziel dieses Reglers, in Promille.
+    #[must_use]
+    pub const fn target_permille(&self) -> u32 {
+        self.target_permille
+    }
+
+    /// Die aktuelle Marge, auf ganze Prozent **aufgerundet**.
+    ///
+    /// Aufgerundet, weil die Marge eine Sicherheitsgroesse ist: ein Rest von
+    /// einem halben Prozentpunkt gehoert zur Vorsicht, nicht zum Mut.
     #[must_use]
     pub fn margin(&self) -> SafetyMargin {
-        SafetyMargin::from_percent(self.percent).unwrap_or(SafetyMargin::DEFAULT)
+        SafetyMargin::from_percent(self.basis_points.div_ceil(100)).unwrap_or(SafetyMargin::DEFAULT)
     }
 
-    /// Reagiert auf eine Unterprognose oder eine verpasste Deadline.
-    pub const fn tighten(&mut self) {
-        self.percent = self.percent.saturating_add(Self::TIGHTEN_STEP);
-        if self.percent > self.ceiling {
-            self.percent = self.ceiling;
-        }
+    /// Die aktuelle Marge in Hundertstelprozent, fuer Pruefungen.
+    #[must_use]
+    pub const fn basis_points(&self) -> u32 {
+        self.basis_points
     }
 
-    /// Entspannt die Marge nach einer stabilen Phase.
+    /// Reagiert auf eine Ausfuehrung, die ihren Plan ueberzogen hat.
+    pub fn tighten(&mut self) {
+        let step = Self::scaled(1_000_u32.saturating_sub(self.target_permille));
+        self.basis_points = self.basis_points.saturating_add(step).min(self.ceiling);
+    }
+
+    /// Reagiert auf eine Ausfuehrung, die ihren Plan eingehalten hat.
     ///
     /// Nie unter den konfigurierten Startwert: der ist eine bewusste
     /// Entscheidung des Betreibers und keine Obergrenze, die der Regler
     /// unterbieten darf.
-    pub const fn relax(&mut self) {
-        self.percent = self.percent.saturating_sub(Self::RELAX_STEP);
-        if self.percent < self.floor {
-            self.percent = self.floor;
-        }
+    pub fn relax(&mut self) {
+        let step = Self::scaled(self.target_permille);
+        self.basis_points = self.basis_points.saturating_sub(step).max(self.floor);
+    }
+
+    /// `GAIN_BASIS_POINTS * permille / 1000`.
+    fn scaled(permille: u32) -> u32 {
+        Self::GAIN_BASIS_POINTS
+            .saturating_mul(permille)
+            .checked_div(1_000)
+            .unwrap_or(0)
     }
 }
 
@@ -414,6 +518,78 @@ mod tests {
         let high = SafetyMargin::from_percent(SafetyMargin::MAX_PERCENT).unwrap();
         let controller = MarginController::provisional(high);
         assert_eq!(controller.margin().as_percent(), SafetyMargin::MAX_PERCENT);
+    }
+
+    /// Ein Zyklus aus einer Ueberziehung und 99 eingehaltenen Plaenen bringt
+    /// die Marge bei einem Ziel von einem Prozent genau dorthin zurueck, wo
+    /// sie war — das ist das Gleichgewicht, und es liegt beim Ziel.
+    #[test]
+    fn at_the_target_rate_the_margin_holds_still() {
+        let mut controller = MarginController::new(SafetyMargin::from_percent(110).unwrap());
+        // Erst ueber den Boden heben, sonst verdeckt der Boden das Absenken.
+        for _ in 0..5 {
+            controller.tighten();
+        }
+        let start = controller.basis_points();
+        for _ in 0..10 {
+            controller.tighten();
+            for _ in 0..99 {
+                controller.relax();
+            }
+        }
+        assert_eq!(controller.basis_points(), start);
+    }
+
+    /// Doppelt so viele Ueberziehungen wie erlaubt: die Marge steigt.
+    #[test]
+    fn above_the_target_rate_the_margin_rises() {
+        let mut controller = MarginController::new(SafetyMargin::from_percent(110).unwrap());
+        let start = controller.basis_points();
+        for _ in 0..10 {
+            controller.tighten();
+            controller.tighten();
+            for _ in 0..98 {
+                controller.relax();
+            }
+        }
+        assert!(controller.basis_points() > start);
+    }
+
+    /// Die Rate, bei der die alte Fassung stillhielt — jede elfte Ausfuehrung
+    /// ueberzieht —, ist jetzt kein Gleichgewicht mehr, sondern ein Grund,
+    /// deutlich vorsichtiger zu werden.
+    #[test]
+    fn one_overrun_in_eleven_is_no_longer_accepted() {
+        let mut controller = MarginController::new(SafetyMargin::from_percent(110).unwrap());
+        for _ in 0..20 {
+            controller.tighten();
+            for _ in 0..10 {
+                controller.relax();
+            }
+        }
+        assert!(
+            controller.margin().as_percent() >= 250,
+            "{}",
+            controller.margin().as_percent()
+        );
+    }
+
+    /// Das Ziel kommt aus einem vereinbarten Missbudget, begrenzt nach oben;
+    /// null ist kein Ziel.
+    #[test]
+    fn the_target_follows_the_contract_within_bounds() {
+        use crate::contract_ext::MissBudget;
+        let two_in_hundred = MissBudget {
+            max_misses: 2,
+            window_cycles: 100,
+            max_consecutive: Some(1),
+        };
+        assert_eq!(MarginController::target_from_budget(two_in_hundred), 20);
+
+        let base = MarginController::new(SafetyMargin::DEFAULT);
+        assert_eq!(base.target_permille(), 10);
+        assert_eq!(base.with_target_permille(800).target_permille(), 50);
+        assert_eq!(base.with_target_permille(0).target_permille(), 1);
     }
 
     /// Ein einzelner Ausreisser darf die Planung nicht verschieben.
@@ -524,6 +700,9 @@ mod tests {
     }
 
     /// Spec 13.3: schnell straffen, langsam entspannen, harte Grenzen.
+    ///
+    /// Wie viel langsamer, sagt seit ADR-0034 das Ziel: bei einem Prozent
+    /// steigt die Marge um 9,9 Prozentpunkte und sinkt um 0,1.
     #[test]
     fn the_margin_tightens_fast_and_relaxes_slowly() {
         let mut controller = MarginController::new(SafetyMargin::DEFAULT);
@@ -531,12 +710,13 @@ mod tests {
 
         controller.tighten();
         assert_eq!(controller.margin().as_percent(), 120);
+        let raised = controller.basis_points();
 
         controller.relax();
         assert_eq!(
-            controller.margin().as_percent(),
-            119,
-            "Entspannung ist langsamer"
+            raised.saturating_sub(controller.basis_points()),
+            10,
+            "Entspannung ist langsamer: ein Zehntelprozentpunkt je eingehaltenem Plan"
         );
 
         for _ in 0..1_000 {

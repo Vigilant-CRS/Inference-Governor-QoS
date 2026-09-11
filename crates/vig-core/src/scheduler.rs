@@ -380,6 +380,18 @@ impl Scheduler {
             .unwrap_or(1);
         let slot_count = slots.len();
 
+        // Je Modell ein Margenregler mit Ziel (ADR-0034): vereinbart der
+        // Vertrag ein Missbudget, gibt es den erlaubten Anteil ueberzogener
+        // Plaene vor; sonst ein Prozent.
+        let mut margins = [MarginController::new(margin); MAX_MODELS];
+        for (i, contract) in contracts.iter().enumerate() {
+            let budget = contract.extension.as_ref().and_then(|e| e.miss_budget);
+            if let (Some(controller), Some(budget)) = (margins.get_mut(i), budget) {
+                *controller =
+                    controller.with_target_permille(MarginController::target_from_budget(budget));
+            }
+        }
+
         Ok(Self {
             contracts,
             queues,
@@ -399,7 +411,7 @@ impl Scheduler {
             slots,
             overload,
             margin,
-            margins: [MarginController::new(margin); MAX_MODELS],
+            margins,
             estimator: RuntimeEstimator::new(),
             horizon: DEFAULT_HORIZON,
             inflight: ArrayVec::new(),
@@ -437,7 +449,9 @@ impl Scheduler {
     /// dadurch vorsichtiger, ohne den Betrieb zu verweigern (ADR-0016).
     pub fn mark_profile_unverified(&mut self, model: ModelIdx) {
         if let Some(controller) = self.margins.get_mut(model.get()) {
-            *controller = MarginController::provisional(self.margin);
+            // Das Ziel aus dem Vertrag bleibt; nur der Startwert steigt.
+            *controller = MarginController::provisional(self.margin)
+                .with_target_permille(controller.target_permille());
         }
     }
 

@@ -42,6 +42,7 @@ Spec-Stelle explizit.
 | [0031](0031-a-re-prefill-is-not-free-progress.md) | Ein Re-Prefill ist kein kostenloser Fortschritt | NV-16, ADR-0012, ADR-0014 | Akzeptiert |
 | [0032](0032-four-promises-that-fell-apart-between-components.md) | Beendet, frisch, angenommen, verfuegbar — vier Zusagen zwischen den Komponenten | Review 10.09., ADR-0005, ADR-0018 | Akzeptiert |
 | [0033](0033-native-code-lives-in-the-backend-process.md) | Nativer Code gehoert in den Backendprozess, nicht in den Governor | NV-09, NV-12, NV-14, NV-15, ADR-0024 | Akzeptiert |
+| [0034](0034-the-margin-has-a-target.md) | Die Sicherheitsmarge hat ein Ziel | Spec 13.3, NV-06, ADR-0016, ADR-0027 | Akzeptiert |
 
 ## Format
 
