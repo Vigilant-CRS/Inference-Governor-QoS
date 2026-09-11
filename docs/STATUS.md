@@ -74,15 +74,15 @@ Auslastung 103 → 76 %, der Vorsprung des Governors halbiert sich (24,7x →
 13,3x). Der Engpass bleibt: bei 76 % verfehlt ein getunter Triton weiter
 jeden zehnten Detektorzyklus ([Messung](benchmark/tensorrt.md)).
 
-**Lastspitzen (Spec 19.4).** _Neumessung läuft (11.09.), Ergebnis folgt._
+**Lastspitzen (Spec 19.4).** Werkzeug fertig (`load-ramp bursts`). Die Messung vom 11.09. wurde abgebrochen, weil eine andere Sitzung auf derselben Maschine kompilierte (Systemlast bis 3,8); sie wird auf ruhiger Maschine wiederholt. Veröffentlicht wird keine Zahl aus diesem Lauf.
 
-**Lastrampe auf dem neuen Treiber.** _Neumessung läuft (11.09.), Ergebnis folgt._
+**Lastrampe auf dem neuen Treiber.** Aus demselben Grund noch nicht wiederholt; es gilt die Rampe vom 01.09. ([load-ramp.md](benchmark/load-ramp.md)).
 
-**Variantenwahl (Spec 19.7).** _Neumessung läuft (11.09.), Ergebnis folgt._ Die echten RF-DETR-Varianten
+**Variantenwahl (Spec 19.7).** Werkzeug fertig (`frontier`: automatische Wahl gegen feste Varianten, mit und ohne Hysterese); die Messung steht auf ruhiger Maschine aus. Die echten RF-DETR-Varianten
 geben dafür keinen Betriebspunkt her: die Auflösung bestimmt die Laufzeit,
 das Modell fast nicht ([Messung](benchmark/rfdetr-variants.md)).
 
-**Datenpfad (NV-20).** _Neumessung läuft (11.09.), Ergebnis folgt._
+**Datenpfad (NV-20).** Budgets definiert und prüfbar ([datapath-budgets.md](datapath-budgets.md)): eine Tabelle, ein Mock-Check und ein Urteil in `shm-latency`. Das Urteil auf dieser Maschine steht auf ruhiger Maschine aus.
 
 **Planbarkeit im begrenzten Modell (NV-23).** Unter neun benannten Annahmen —
 ein Slot, ein geschützter Strom, Laufzeiten innerhalb des Plans, Jitter J,
@@ -119,7 +119,7 @@ Vier Zustände, nicht zwei: **gebaut**, **erreichbar**, **angeschlossen**,
 |---|---|---|
 | NV-04 Hardwarebeobachtung | fertig, nur lesend, kein Root; gestartet von `vig serve`, nicht vom Scheduler | [0021](adr/0021-hardware-is-read-never-set.md) |
 | NV-05 Messpfad | fertig: absolutes Freigaberaster, vier Zähler, Uhrprüfung | [0022](adr/0022-measurement-is-a-method-not-a-loop.md) |
-| NV-06 Prognose v2 | **erreichbar** über `backend.prediction: active`, Voreinstellung Schatten. Scharf ohne Marge brach die Zusage — korrigiert. _Neumessung läuft (11.09.), Ergebnis folgt._ | [0023](adr/0023-state-aware-prediction-runs-in-the-shadow-first.md), [Messung](benchmark/nv06-ab.md) |
+| NV-06 Prognose v2 | **erreichbar** über `backend.prediction: active`, Voreinstellung Schatten. Scharf ohne Marge brach die Zusage (Detektor bis 90 %) — korrigiert; mit Marge in sechs Läufen gleichauf mit dem Schatten (99 %), aber ohne Gewinn auf Gate M3. Voreinstellung bleibt Schatten | [0023](adr/0023-state-aware-prediction-runs-in-the-shadow-first.md), [Messung](benchmark/nv06-ab.md) |
 | NV-07 Backendnaht | Naht und Fake-Executor fertig; Crate-Verschiebung und OIP-freie Nutzlast bewusst aufgeschoben | [0024](adr/0024-the-backend-is-a-seam-not-a-type.md) |
 | NV-08 TensorRT über Triton | fertig, gemessen — kein Codepfad nötig | [benchmark/tensorrt.md](benchmark/tensorrt.md) |
 | NV-09 TensorRT Direct | **nicht gebaut**: Durchstich gemessen, 500–730 µs je Inferenz; das trägt keinen nativen Executor | [0033](adr/0033-native-code-lives-in-the-backend-process.md), [Durchstich](spikes/nv09-tensorrt-direct.md) |
@@ -165,7 +165,7 @@ genau der Weg, den ADR-0033 beschreibt.
 ## Was ausdrücklich noch nicht angeschlossen ist
 
 **Die zustandsabhängige Prognose (NV-06)** ist erreichbar, entscheidet aber
-per Voreinstellung nichts. _Neumessung läuft (11.09.), Ergebnis folgt._
+per Voreinstellung nichts. Mit Marge ist `active` sicher, auf Gate M3 aber ohne Gewinn ([Messung](benchmark/nv06-ab.md)); ob es auf einer Last mit Varianten nützt, zeigt die Frontier-Messung.
 
 ## Die offenen Arbeitspakete
 
@@ -195,7 +195,7 @@ per Voreinstellung nichts. _Neumessung läuft (11.09.), Ergebnis folgt._
   | Installationspfad mit Bereitschaftsprüfung | `deploy/docker-compose/` |
   | SBOM, signierbare Artefakte, `cargo auditable` | `.github/workflows/release.yml` |
   | Dauerlauf auf dem freizugebenden Stand | bestanden, 8 Stunden ([soak.md](benchmark/soak.md)) |
-  | Datenpfadbudgets | [datapath-budgets.md](datapath-budgets.md) — _Neumessung läuft (11.09.), Ergebnis folgt._ |
+  | Datenpfadbudgets | [datapath-budgets.md](datapath-budgets.md) — definiert; Urteil auf ruhiger Maschine ausstehend |
   | Freigabe durch Pilotverantwortliche | offen, braucht NV-19 |
 - **Zweite Hardware.** Die Logik ist portabel, die Zahlen sind es nicht. Auf
   `aarch64` ist der Kern unter Emulation gebaut und getestet; über Laufzeit,

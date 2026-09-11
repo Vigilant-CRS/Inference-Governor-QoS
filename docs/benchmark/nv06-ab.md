@@ -77,6 +77,40 @@ Marge wie der bisherige Weg. Der Test
 gegen 200 % Marge und eine Deadline von 15 ms: mit Marge läuft die kleine
 Variante, ohne liefe die große.
 
-## Teil 2: scharf mit Marge
+## Teil 2: scharf mit Marge — sicher, und auf dieser Last ohne Gewinn
 
-_Wird nach der Nachmessung auf dem korrigierten Stand eingetragen._
+Binaries vom Stand `68f8181` (Margenkorrektur `cebb582` und der Margenregler
+mit Ziel aus ADR-0034), gemessen am 11.09. zwischen 13:19 und 13:31. Beim
+Start liefen neben Triton nur Browser und Editoren; die Simulation einer
+anderen Sitzung war beendet, deren spätere Builds begannen erst nach diesem
+Block.
+
+| Lauf | Detektor | Pose | Tiefe | längste Lücke D / P | VLM | verspätet |
+|---|---:|---:|---:|---|---:|---:|
+| Schatten 1 | 99 % | 99 % | 99 % | 15 / 18 ms | 0 % | 0 |
+| Schatten 2 | 99 % | 99 % | 99 % | 21 / 25 ms | 0 % | 0 |
+| Schatten 3 | 99 % | 99 % | 97 % | 24 / 8 ms | 3 % | 6 |
+| scharf 1 | 99 % | 99 % | 99 % | 15 / 19 ms | 0 % | 0 |
+| scharf 2 | 99 % | 99 % | 100 % | 22 / 25 ms | 1 % | 1 |
+| scharf 3 | 99 % | 99 % | 100 % | 18 / 5 ms | 1 % | 1 |
+
+**Die Korrektur wirkt.** Mit derselben Marge wie der bisherige Weg bricht der
+scharfe Modus keine Zusage mehr: Detektor und Pose bei 99 % in allen sechs
+Läufen, die längsten Lücken in derselben Spannweite wie im Schatten,
+höchstens ein verspäteter Auftrag. Ohne Marge waren es am Vormittag 90 %
+und 99 ms.
+
+**Einen Gewinn bringt er auf dieser Last nicht.** Gate M3 hat je Modell nur
+eine Variante; es gibt keine Qualität, die ein zu pessimistisches Profil
+verschenken könnte, und das VLM bleibt bei einem 90-ms-Block unter Last
+blockiert (ADR-0012). Der Schattenvergleich zeigt weiter fast nur
+„mutiger" (rund 3000 gegen 0): die Karte läuft schneller, als das Profil
+annimmt, und die Zelle weiß das — hier nützt es nur niemandem.
+
+**Was daraus folgt.** Die Voreinstellung bleibt `shadow`. `active` ist seit
+`cebb582` sicher einschaltbar; ob es nützt, muss eine Last mit Varianten
+zeigen, auf der ein veraltetes Profil tatsächlich Qualität kostet — das ist
+die Frontier-Messung (Spec 19.7), nicht Gate M3. Die Abnahmefrage von NV-06
+— „schlägt Legacy nicht nur durch mehr Ablehnung" — ist damit auf dieser
+Last so beantwortet: es schlägt Legacy nicht, und es lehnt auch nicht mehr
+ab.
