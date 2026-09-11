@@ -142,3 +142,66 @@ Restblocking und der Nachweis, dass die API ihre Lücken **nicht** meldet.
 Was daraus folgt — eine Portierung, ein Shim unter Triton, die
 `unsafe`-Frage — ist ein eigener Auftrag und eine eigene Schätzung. Dieser
 Spike verspricht sie nicht.
+
+## Nachtrag 11.09.2026: unter Triton 26.06 blockiert
+
+Die `unsafe`-Frage ist mit [ADR-0033](../adr/0033-native-code-lives-in-the-backend-process.md)
+entschieden: nativer Code gehört in den Backendprozess. Für XSched heißt das,
+den Shim in Triton zu laden, nicht in den Governor. Der naheliegende Aufbau
+ohne eine Zeile Backendcode sind zwei Tritonprozesse auf einer GPU — die
+geschützten Modelle mit Priorität 1, das VLM mit Priorität 0 — und `xserver`
+mit HPF dazwischen. Das Startskript liegt unter
+`InferenceQoS-runtime/xsched-triton.sh`.
+
+**Der Build geht.** Im Triton-Image 26.06 (CUDA 13.3, GCC 13.3) baut XSched
+ohne den `-ccbin`-Umweg, den der Spike auf dem Host brauchte. `libshimcuda.so`,
+`xserver` und `xcli` entstehen.
+
+**Der Betrieb nicht.** Jeder Tritonprozess unter dem Shim stürzt beim Laden
+seines ersten Modells ab (SIGSEGV), mit drei Modellen wie mit einem. Triton
+ist dabei nicht die Ursache: XSched's eigenes Beispiel
+(`examples/Linux/1_transparent_sched`) stürzt im selben Image genauso ab.
+
+| Aufbau | Laufzeit | `libcuda` | Ergebnis |
+|---|---|---|---|
+| Host, wie im Spike | CUDA 12.4 | 580.178.04 | XQueue angelegt, läuft — Level 1 und 2 |
+| Triton-Image 26.06 | CUDA 13.3 | 610.43 (Forward Compatibility) | SIGSEGV beim Anlegen der ersten Queue |
+| Triton-Image 26.06 | CUDA 13.3 | 580.178.04 (Host) | SIGSEGV beim Anlegen der ersten Queue |
+| dasselbe ohne `XSCHED_AUTO_XQUEUE` | CUDA 13.3 | 610.43 | SIGSEGV |
+| dasselbe mit `XSCHED_CUDA_LV3_IMPL=TSG` | CUDA 13.3 | 610.43 | SIGSEGV, Level 1 und 2 |
+| zwei Tritonprozesse **ohne** Shim | CUDA 13.3 | 610.43 | laufen |
+
+Der Backtrace aus `cuda-gdb` zeigt die Stelle:
+
+```text
+cudaStreamCreate
+  → xsched::cuda::XStreamCreate
+  → CudaQueueCreate → CudaQueueLv3Trap → CudaQueueLv2
+  → InstrumentManager → InstrMemAllocator
+  → cuXtraInstrMemBlockAlloc
+  → libcuda.so: SIGSEGV
+```
+
+**Die Ursache.** Für sm86 wählt XSched immer `CudaQueueLv3Trap`. Ihr
+Konstruktor legt Befehlsspeicher über `cuxtra` an — nicht dokumentierte
+Interna des Treibers. Mit der 12.4-Laufzeit funktionieren sie, mit 13.3
+brechen sie, unabhängig davon, welche `libcuda` darunter liegt. Der Upstream
+hat nach dem gepinnten Stand `f49289f` keinen einzigen Commit (Stand
+11.09.2026).
+
+**Was daraus folgt.** Präemption auf dem qualifizierten Stack (Triton 2.70,
+CUDA 13.3) ist heute nicht erreichbar. Es gibt zwei Wege, und keiner ist eine
+Codezeile im Governor:
+
+1. Triton auf einem Release mit CUDA-12-Laufzeit — ein anderer, nicht
+   qualifizierter Stack mit eigener Messung.
+2. Unterstützung für CUDA 13 im Upstream.
+
+Das ist genau die Wartungslast, die der Spike angekündigt hat: Forschungscode
+auf nicht dokumentierten Treiberinterna bricht mit der nächsten
+CUDA-Version. Hätte der Governor eine FFI auf XSched, bräche er mit.
+
+**Nebenbefund.** Zwei Tritonprozesse ohne Shim laufen mit explizitem Laden
+nebeneinander, und `gate-m3` fährt Modelle mit eigenem Endpunkt jetzt
+gleichzeitig. Der Aufbau steht, sobald eine der beiden Voraussetzungen
+erfüllt ist.

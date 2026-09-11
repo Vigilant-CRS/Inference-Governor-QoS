@@ -31,6 +31,13 @@ längste Versorgungslücke aus Verbrauchersicht und der Taktmedian im Lauf:
 Triton direkt lag in denselben Läufen bei 82–85 % (Detektor) und 90–92 %
 (Pose).
 
+**Zur Sauberkeit.** Um 11:17:54 startete auf derselben Maschine eine
+Simulation, die einen Kern ohne Kernbindung belegte. Schatten 3 lief zur
+Hälfte, scharf 3 ganz in dieser Zeit. Der Befund stützt sich auf die Läufe
+1 und 2 beider Seiten, die vollständig davor lagen — und genau die beiden
+scharfen Läufe dort zeigen den Bruch. Alle späteren Blöcke des ersten
+Anlaufs wurden verworfen und neu gemessen.
+
 **In zwei von drei Läufen startet der scharfe Modus das VLM, und die
 geschützten Ströme bezahlen dafür.** Der Detektor fällt bis auf 90 % und ist
 damit kaum noch besser als ein getunter Triton; die Pose liegt darunter. Die

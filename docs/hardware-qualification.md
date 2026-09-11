@@ -1,7 +1,8 @@
 # Hardware qualification
 
 Every performance number in this repository comes from **one machine**: an
-RTX 3070 Laptop (8 GB), driver 580.173.02, Triton 2.70, Ubuntu 26.04. That is
+RTX 3070 Laptop (8 GB), driver 580.173.02 — Gate M3 repeated on 580.178.04
+([R04](benchmark/gate-m3-r04.md)) — Triton 2.70, Ubuntu 26.04. That is
 enough to show the mechanism works. It is not enough to promise anything about
 your hardware.
 

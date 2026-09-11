@@ -30,6 +30,28 @@ bedeutet, steht in [docs/releases.md](docs/releases.md).
   Sockel steht daneben, weil er auf der Messmaschine der groesste Einzelterm
   ist.
 
+- **`backend.prediction: shadow | active`** (NV-06, ADR-0023). Die
+  zustandsabhaengige Prognose ist jetzt ein Konfigurationsschritt des
+  Betreibers statt einer Methode am Kern. Voreinstellung `shadow`; ein
+  vertippter Wert wird abgelehnt. Ein Test belegt, dass `active` eine
+  Entscheidung aendert: bei einem Profil, das die Karte ueberschaetzt, laeuft
+  die grosse statt der kleinen Variante.
+- **Variantenwechsel als Kennzahlen** (Spec 19.7):
+  `vig_variant_upgrades_total` und `vig_variant_downgrades_total` je Modell.
+  Die erste Wahl eines Modells zaehlt nicht als Wechsel.
+- **Datenpfadbudgets** (NV-20). Eine Tabelle in
+  `vig-gateway/src/datapath_budget.rs`, zwei Pruefungen dagegen: gegen ein
+  Mock-Backend (`datapath_budgets_hold`, `--ignored`, fuer die
+  Releasequalifikation) und gegen echten Triton (`shm-latency` mit Urteil
+  und Exitcode). Siehe [docs/datapath-budgets.md](docs/datapath-budgets.md).
+- **Benchmarks:** `load-ramp bursts` faehrt Lastspitzen ueber einer Grundlast
+  (Spec 19.4); `frontier` vergleicht automatische Variantenwahl mit festen
+  Varianten (Spec 19.7); `gate-m3` faehrt Modelle mit eigenem Backendprozess
+  gleichzeitig und gibt den Schattenvergleich der Prognose aus.
+- **Alle Clientparameter dokumentiert** in docs/getting-started.md, mit
+  Abschnitten zu Aufnahmen (NV-17) und Anwendungshinweisen (NV-18). Vorher
+  standen dort sechs von vierzehn.
+
 ### Behoben — Zusagen, die zwischen den Komponenten zerfielen (Review 10.09., ADR-0032)
 
 - **Der Abschlussabgleich konnte den falschen Slot freigeben.** Tritons
@@ -94,6 +116,37 @@ bedeutet, steht in [docs/releases.md](docs/releases.md).
 - **`vig doctor` und das Gateway urteilten verschieden** ueber denselben
   Vertrag: `doctor` schwieg bei `prefill_per_token_us == 0`, das Gateway lehnte
   ab. Jetzt dieselbe Schwelle in beiden.
+
+- **`vig_predictor_active` meldete den Modus erst nach der ersten
+  Fertigstellung.** Wer die Prognose scharf schaltete, sah bis dahin eine
+  Null. Der Metrikabzug wird jetzt beim Umschalten nachgezogen.
+- **Der Testmock zaehlte keine Nutzlastbytes.** `MockBackend::raw_bytes_seen`
+  wurde nie erhoeht; die Zusicherung „der Shared-Memory-Pfad traegt keine
+  Nutzlast" war dadurch bei jedem Verhalten des Governors gruen. Der Mock
+  zaehlt jetzt, und ein Test prueft beide Richtungen.
+- **Die Benchmarks massen seit `dd83086` ohne Geraetezustand.** `gate-m3`,
+  `load-ramp` und `frontier` rufen den Hardwarewaechter jetzt auf, wie
+  `vig serve` es tut.
+- **Die scharf geschaltete Prognose plante ohne Sicherheitsmarge** (NV-06).
+  Sie nahm das p95 der Zelle, der bisherige Weg `max(p99, p95) × Marge`. Auf
+  der Gate-M3-Last liess sie in zwei von drei Laeufen das VLM an und brach
+  dafuer die Zusagen an die geschuetzten Stroeme: Detektor bis auf 90 %,
+  laengste Luecke 99 statt 15 ms ([Messung](docs/benchmark/nv06-ab.md)). Die
+  Zelle ersetzt jetzt das Profil und nicht die Marge; der Schattenvergleich
+  rechnet ebenfalls mit Marge.
+
+### Geaendert
+
+- **Kein FFI-Crate im Workspace** ([ADR-0033](docs/adr/0033-native-code-lives-in-the-backend-process.md)).
+  Nativer Code gehoert in den Backendprozess; `unsafe_code = "forbid"` bleibt
+  ohne Ausnahme. NV-09 wird nicht gebaut, NV-12 und NV-14 sind auf dieser
+  Plattform abgeschlossen. NV-15 ist unter Triton 26.06 blockiert: XSched
+  stuerzt mit der CUDA-13.3-Laufzeit beim Anlegen der ersten Queue ab
+  ([Nachtrag](docs/spikes/nv15-xsched.md)).
+- **Support-Matrix nachgezogen:** Prognose (NV-06) und
+  Abhaengigkeitsgraph (NV-17) erreichbar, TensorRT in Triton und der
+  Prefill-Term qualifiziert, Treiber 580.178.04 fuer Gate M3 qualifiziert
+  ([R04](docs/benchmark/gate-m3-r04.md)).
 
 ## [0.2.0] — 2026-09-10
 

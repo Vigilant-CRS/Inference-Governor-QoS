@@ -6,7 +6,7 @@ what runs now, what waits, what is thrown away because newer data arrived, and
 which model variant still fits the time budget.
 
 [![Status](https://img.shields.io/badge/status-pre--production-orange)](#status-what-works-and-what-does-not)
-[![Tests](https://img.shields.io/badge/tests-209%20passing-brightgreen)](#build-and-verify)
+[![Tests](https://img.shields.io/badge/tests-628%20passing-brightgreen)](#build-and-verify)
 [![License](https://img.shields.io/badge/license-BUSL--1.1-blue)](LICENSE)
 
 ---
@@ -82,15 +82,22 @@ was below the configured limit. Higher is better.*
 
 | Stream | Triton (tuned) | Vigilant | Uncovered cycles |
 |---|---:|---:|---:|
-| detector (RF-DETR) | 84 % | **99 %** | **22.6× fewer** |
-| pose | 91 % | **99 %** | **12.0× fewer** |
-| depth | 97 % | **99–100 %** | **5.4× fewer** |
+| detector (RF-DETR) | 84–85 % | **99 %** | **20–22× fewer** |
+| pose | 91 % | **99 %** | **10–12× fewer** |
+| depth | 97–98 % | 90–100 % | no gain — scatters around zero |
+
+Six runs on two driver versions (580.173.02 and 580.178.04), three each
+([R03](docs/benchmark/gate-m3-r03.md), [R04](docs/benchmark/gate-m3-r04.md)).
+The depth stream has the longest period of the three and suffers least under
+load; there is nothing to win there, and we do not count it as a win.
 
 Against Triton's *strongest* setting — a globally limited shared resource
 instead of priorities alone — the detector figure is **12.9–15.1×**, because
 that configuration lifts Triton's own detector coverage to 89–91 %. We quote
 the range rather than the best number: which one applies depends on how Triton
-is configured, and you will find both in the raw logs anyway.
+is configured, and you will find both in the raw logs anyway. That comparison
+was measured before the gap-accounting correction of 10 September and has not
+been repeated since.
 
 That configuration moves the problem rather than solving it: the detector
 rises, but pose drops to 78 %. Triton's rate limiter can reorder who waits; it
@@ -262,21 +269,30 @@ docs/adr/                   architecture decisions and why we deviated
 **Working and measured on real hardware:** the scheduling core, the gateway,
 the Triton adapter, shared-memory passthrough, the online estimator,
 calibration, cooperative decomposition for generative models, Prometheus
-metrics, graceful shutdown, and an eight-hour soak run with no drift and no
-leak.
+metrics, graceful shutdown, and an eight-hour soak run (9–10 September) with
+no metric drift and no unbounded memory growth in the observed window — which
+is not the same as proving there is no leak ([soak.md](docs/benchmark/soak.md)).
+
+Every feature carries one of four states — built, reachable, connected,
+qualified — in the [support matrix](docs/support-matrix.md). "Reachable"
+means a documented step switches it on and a test proves it changes a
+decision; it does **not** mean it is better on your workload.
 
 **Not done yet — this is not production-ready:**
 
 | Open | Why it matters |
 |---|---|
 | Hardware beyond one machine | Every performance number here comes from one RTX 3070 Laptop. The scheduling core is built and tested for `aarch64` in CI, but **no Jetson measurement exists** — and emulation says nothing about runtime. [What you have to run first.](docs/hardware-qualification.md) |
+| A pilot | Release qualification is complete except for what needs a named workload and a named person: the sign-off of a pilot owner. Without one, every further extension is a guess. |
 | Output semantics across variants | You can declare a canonical `io_signature` per model, and any variant that does not meet it prevents startup. But identical shapes can still carry different meanings, and no tool can check that — only your declaration can. |
-| Field operation | Signed releases and an update path now exist. A hardware qualification programme and long-term support commitments do not. |
-
-| A soak run after these repairs | The eight-hour run predates them. It has to be repeated before anyone leaves this unattended. |
+| Preemption | A running inference is never pulled back. XSched can do that on this card with CUDA 12.4 — and crashes with the CUDA 13.3 runtime of the qualified Triton ([finding](docs/spikes/nv15-xsched.md)). Native preemption belongs in the backend process, not in the governor ([ADR-0033](docs/adr/0033-native-code-lives-in-the-backend-process.md)). |
 | Scope of the licence grant | The provider and contact are now stated in [IMPRINT.md](IMPRINT.md). The exact boundary of "Production Purpose" in the Additional Use Grant still deserves a lawyer's eye before the first paid deployment. |
 
-Since the last review round these moved from open to done: an inference
+The external review of 10 September came with eight runnable
+counter-examples. All eight failed, all eight are fixed and part of the
+regression suite ([ADR-0032](docs/adr/0032-four-promises-that-fell-apart-between-components.md)).
+
+Since the review round before that these moved from open to done: an inference
 timeout that releases the client but **not** the slot credit, a drain that
 waits for outstanding backend calls rather than just for clients, readiness
 that also reacts to transport failures, immediate refusal instead of silent
@@ -292,7 +308,7 @@ We would rather you read that list before the benchmark table.
 ```bash
 cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace          # 209 tests
+cargo test --workspace          # 628 tests, one timing check ignored by design
 cargo deny check licenses bans advisories sources
 ```
 
@@ -302,7 +318,9 @@ All four must be green. That is the definition of done for every change.
 
 - Not a hard-real-time runtime and not a safety-certified system.
 - Not a GPU preemptor. A running inference is never pulled back — which is
-  precisely why superseded work is removed *before* dispatch.
+  precisely why superseded work is removed *before* dispatch. Preemption, if
+  it comes, comes from the backend process; the governor stays free of
+  `unsafe` ([ADR-0033](docs/adr/0033-native-code-lives-in-the-backend-process.md)).
 - Not a replacement for Triton, Holoscan or TensorRT. It sits in front of one.
 - Latest-frame semantics alone are not novel; Holoscan async buffers have
   them. The combination — freshness, deadline-aware admission, variant

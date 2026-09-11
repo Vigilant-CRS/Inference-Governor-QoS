@@ -1,7 +1,9 @@
 # Arbeitsstand
 
-Stand: 2026-09-09 · **Gate M3 bestanden** · Ausbaustufe R0 fertig, R1 zum
-groessten Teil · 8-Stunden-Dauerlauf laeuft
+Stand: 2026-09-11 · **Gate M3 bestanden, auf Treiber 580.178.04 bestätigt** ·
+Ausbaustufe R0 fertig, R1 fertig bis auf die Pakete, die einen Pilotfall
+oder eine andere CUDA-Version brauchen · Releasequalifikation fertig bis auf
+die Freigabe durch Pilotverantwortliche
 
 Dieses Dokument beschreibt, **was jetzt gilt**. Was einmal galt, steht in den
 ADRs (`docs/adr/`) und in der Git-Historie; hier wird es nicht
@@ -11,213 +13,185 @@ fortgeschrieben.
 
 | | |
 |---|---|
-| Rust, ohne Kommentare gezaehlt | ~38 500 Zeilen in 9 Crates |
-| Tests | 478, alle gruen |
-| Architekturentscheidungen | 29 ADRs |
+| Rust, ohne Kommentare und Leerzeilen gezählt | ~34 500 Zeilen in 9 Crates |
+| Tests | 628 grün, einer bewusst ignoriert (die Zeitprüfung der Datenpfadbudgets — sie gehört auf die Releasemaschine, nicht auf geteilte CI-Runner) |
+| Architekturentscheidungen | 33 ADRs |
 | Gate | fmt, clippy `-D warnings`, test, `cargo deny`, `reuse lint`, aarch64 unter Emulation |
 
-Die Crates und ihre Zustaendigkeit:
+Die Crates und ihre Zuständigkeit:
 
 | Crate | Zeilen | Was darin liegt |
 |---|---:|---|
-| `vig-core` | 14 500 | Der deterministische Scheduling-Kern. Keine Uhr, kein I/O, keine Dependencies. |
-| `vig-gateway` | 6 600 | Der OIP-Server, der Single-Owner-Actor, die Backendnaht, der Prometheus-Endpunkt. |
-| `vig-config` | 3 500 | Schema, Parser, Validator. Lehnt ab, statt zu reparieren. |
-| `vig-bench` | 3 500 | Messlaeufe gegen echtes Triton: `gate-m3`, `soak`, `load-ramp`, `wp26`. |
-| `vig-cli` | 3 400 | `vig doctor` / `profile` / `calibrate` / `serve` / `verify`. |
-| `vig-sim` | 3 000 | Discrete-Event-Simulator mit bitgleich reproduzierbaren Traces. |
-| `vig-platform` | 2 400 | Lesende Hardwarebeobachtung und der Messpfad. Stellt nichts. |
-| `vig-backend-triton` | 1 100 | Der Triton-Adapter samt Fehler- und Nachweislogik. |
-| `vig-protocol-oip` | 600 | Die generierten OIP-Typen. |
+| `vig-core` | 12 400 | Der deterministische Scheduling-Kern. Keine Uhr, kein I/O, keine Dependencies. |
+| `vig-gateway` | 6 700 | Der OIP-Server, der Single-Owner-Actor, die Backendnaht, der Prometheus-Endpunkt, die Datenpfadbudgets. |
+| `vig-bench` | 3 700 | Messläufe gegen echtes Triton: `gate-m3`, `load-ramp` (auch mit Lastspitzen), `frontier`, `soak`, `shm-latency`, `wp26`. |
+| `vig-cli` | 2 900 | `vig doctor` / `profile` / `calibrate` / `serve` / `verify`. |
+| `vig-config` | 2 800 | Schema, Parser, Validator. Lehnt ab, statt zu reparieren. |
+| `vig-platform` | 2 600 | Lesende Hardwarebeobachtung und der Messpfad. Stellt nichts. |
+| `vig-sim` | 2 200 | Discrete-Event-Simulator mit bitgleich reproduzierbaren Traces. |
+| `vig-backend-triton` | 700 | Der Triton-Adapter samt Fehler- und Nachweislogik. |
+| `vig-protocol-oip` | 500 | Die generierten OIP-Typen und die `vig_`-Parameter. |
 
 ## Was gemessen belegt ist
 
 **Gate M3, RTX 3070 Laptop (8 GB), Triton 2.70, echte Modelle.** Gegen eine
 getunte Baseline — gleiche Modelle, gleiche Instance Groups, gleicher
-Shared-Memory-Datenpfad, Rate Limiter mit Prioritaeten:
+Shared-Memory-Datenpfad, Rate Limiter mit Prioritäten. Sechs Läufe auf zwei
+Treibern ([R03](benchmark/gate-m3-r03.md), 580.173.02;
+[R04](benchmark/gate-m3-r04.md), 580.178.04):
 
-| Strom | Triton (getunt) | Vigilant | Unabgedeckte Zyklen |
+| Strom | Triton (getunt) | Vigilant | Unabgedeckte Lieferfenster |
 |---|---:|---:|---:|
-| detector (RF-DETR) | 84 % | 99 % | 22,4x weniger |
-| pose | 91 % | 99 % | 12,0x weniger |
-| depth | 97 % | 99–100 % | 5,4x weniger |
+| detector (RF-DETR) | 84–85 % | 99 % | 20–22x weniger |
+| pose | 91 % | 99 % | 10–12x weniger |
+| depth | 97–98 % | 90–100 % | kein Gewinn — streut um null |
 
-Gegen Tritons **staerkste** Einstellung — global begrenzte gemeinsame
-Ressource statt Prioritaeten allein — sind es beim Detektor 12,9–15,1x, weil
-diese Konfiguration Tritons eigene Detektorabdeckung auf 89–91 % hebt. Sie
-verschiebt das Problem dabei: die Pose faellt auf 78 %.
+Der Treiberwechsel ändert an der Aussage nichts. Die Karte läuft auf beiden
+Treibern am Software-Leistungslimit, unter 580.178.04 nur etwas höher
+getaktet (1830 gegen ~1900 MHz); `vig doctor` sagt das vor jeder Messung
+(ADR-0021).
 
-Der VLM-Strom steht in derselben Tabelle bei 1 % Abdeckung. Das ist kein
-Messfehler, sondern ADR-0012: ein nicht unterbrechbarer Block, der laenger
-dauert als die kuerzeste geschuetzte Periode, startet unter Last nie. Genau
-dafuer gibt es die kooperative Zerlegung (ADR-0014).
+Gegen Tritons **stärkste** Einstellung — global begrenzte gemeinsame
+Ressource statt Prioritäten allein — sind es beim Detektor 12,9–15,1x; die
+Pose fällt dabei auf 78 %. Diese Messung stammt von vor der Korrektur der
+Lückenrechnung und ist seitdem nicht wiederholt.
 
-Was sie kostet, sagt seit NV-16 `vig doctor`: mit den Zahlen aus WP26 kosten
-allein die Round-Trips 95 % mehr Arbeit als der ungeteilte Lauf, und das ist
-eine Untergrenze. Die Zerlegung tauscht Gesamtarbeit gegen Blockadezeit — eine
-Wahl, die jetzt als Wahl dasteht statt als Selbstverstaendlichkeit
-(ADR-0031).
+Der VLM-Strom steht in derselben Tabelle bei 0 % Abdeckung. Das ist kein
+Messfehler, sondern ADR-0012: ein nicht unterbrechbarer Block, der länger
+dauert als die kürzeste geschützte Periode, startet unter Last nie. Dafür
+gibt es die kooperative Zerlegung (ADR-0014); was sie kostet, sagt seit NV-16
+`vig doctor`, und der Kontextterm ist gegen ein echtes vLLM-Backend gemessen
+(0–5 µs je Kontexttoken mit Prefix-Cache, 35–39 ohne,
+[Messung](benchmark/nv16-prefill.md)).
 
-**Was die Messung ueber sich selbst sagt:** die Karte lief dabei unter einem
-Leistungslimit, 1830 von 2100 MHz. Beide Vergleichsseiten liefen darunter, der
-Vergleich gilt also — aber die absoluten Zahlen gelten fuer diesen Zustand und
-nicht fuer die Karte. `vig doctor` sagt das jetzt vor jeder Messung (ADR-0021).
+**Eine Lückenzahl aus einem einzelnen Lauf ist keine Aussage.** Sie ist ein
+Maximum über ein 30-Sekunden-Fenster, und Maxima streuen — bei der Pose auf
+Tritonseite 53 bis 91 ms zwischen zwei Läufen derselben Konfiguration. Die
+Abdeckung, die über hunderte Perioden mittelt, tut es nicht.
+
+**Mit TensorRT statt ONNX Runtime** wird die Baseline schneller: serialisierte
+Auslastung 103 → 76 %, der Vorsprung des Governors halbiert sich (24,7x →
+13,3x). Der Engpass bleibt: bei 76 % verfehlt ein getunter Triton weiter
+jeden zehnten Detektorzyklus ([Messung](benchmark/tensorrt.md)).
+
+**Lastspitzen (Spec 19.4).** _Neumessung läuft (11.09.), Ergebnis folgt._
+
+**Lastrampe auf dem neuen Treiber.** _Neumessung läuft (11.09.), Ergebnis folgt._
+
+**Variantenwahl (Spec 19.7).** _Neumessung läuft (11.09.), Ergebnis folgt._ Die echten RF-DETR-Varianten
+geben dafür keinen Betriebspunkt her: die Auflösung bestimmt die Laufzeit,
+das Modell fast nicht ([Messung](benchmark/rfdetr-variants.md)).
+
+**Datenpfad (NV-20).** _Neumessung läuft (11.09.), Ergebnis folgt._
 
 ## Fertige Ausbaustufe R0
 
-| Paket | Was es aendert | ADR |
+| Paket | Was es ändert | ADR |
 |---|---|---|
 | NV-00 | Slotkredite enden durch Nachweis, nicht durch Frist | — |
-| NV-01 | Verbraucherabdeckung, zeitgewichtetes AoI, laengste Luecke — getrennt von den Legacy-Lieferfenstern | — |
-| NV-02 | Versionierte Vertragszusaetze, Weakly-hard-Monitor, Freigabeliste | [0020](adr/0020-contract-extensions-are-additive-and-versioned.md) |
-| NV-03 | Profilmanifest: Artefakt-Digest, Runtime, Geraet, Aufteilung, Gueltigkeitsdomaene | [0019](adr/0019-profile-identity-beyond-a-metadata-hash.md) |
+| NV-01 | Verbraucherabdeckung, zeitgewichtetes AoI, längste Lücke — getrennt von den Legacy-Lieferfenstern | — |
+| NV-02 | Versionierte Vertragszusätze, Weakly-hard-Monitor, Freigabeliste | [0020](adr/0020-contract-extensions-are-additive-and-versioned.md) |
+| NV-03 | Profilmanifest: Artefakt-Digest, Runtime, Gerät, Aufteilung, Gültigkeitsdomäne | [0019](adr/0019-profile-identity-beyond-a-metadata-hash.md) |
 
 ## Ausbaustufe R1
 
+Vier Zustände, nicht zwei: **gebaut**, **erreichbar**, **angeschlossen**,
+**qualifiziert** ([Support-Matrix](support-matrix.md)).
+
 | Paket | Stand | ADR |
 |---|---|---|
-| NV-04 Hardwarebeobachtung | fertig, nur lesend, kein Root | [0021](adr/0021-hardware-is-read-never-set.md) |
-| NV-05 Messpfad | fertig: absolutes Freigaberaster, vier Zaehler, Uhrpruefung | [0022](adr/0022-measurement-is-a-method-not-a-loop.md) |
-| NV-06 Prognose v2 | fertig, laeuft im **Schatten**; Scharfschalten ist eine Betreiberhandlung | [0023](adr/0023-state-aware-prediction-runs-in-the-shadow-first.md) |
+| NV-04 Hardwarebeobachtung | fertig, nur lesend, kein Root; gestartet von `vig serve`, nicht vom Scheduler | [0021](adr/0021-hardware-is-read-never-set.md) |
+| NV-05 Messpfad | fertig: absolutes Freigaberaster, vier Zähler, Uhrprüfung | [0022](adr/0022-measurement-is-a-method-not-a-loop.md) |
+| NV-06 Prognose v2 | **erreichbar** über `backend.prediction: active`, Voreinstellung Schatten. Scharf ohne Marge brach die Zusage — korrigiert. _Neumessung läuft (11.09.), Ergebnis folgt._ | [0023](adr/0023-state-aware-prediction-runs-in-the-shadow-first.md), [Messung](benchmark/nv06-ab.md) |
 | NV-07 Backendnaht | Naht und Fake-Executor fertig; Crate-Verschiebung und OIP-freie Nutzlast bewusst aufgeschoben | [0024](adr/0024-the-backend-is-a-seam-not-a-type.md) |
-| NV-08 TensorRT ueber Triton | fertig, gemessen — kein Codepfad noetig | [benchmark/tensorrt.md](benchmark/tensorrt.md) |
-| NV-09 TensorRT Direct | **offen**, braucht CUDA SDK | — |
+| NV-08 TensorRT über Triton | fertig, gemessen — kein Codepfad nötig | [benchmark/tensorrt.md](benchmark/tensorrt.md) |
+| NV-09 TensorRT Direct | **nicht gebaut**: Durchstich gemessen, 500–730 µs je Inferenz; das trägt keinen nativen Executor | [0033](adr/0033-native-code-lives-in-the-backend-process.md), [Durchstich](spikes/nv09-tensorrt-direct.md) |
 | NV-10 Semantik der Varianten | fertig | [0025](adr/0025-the-same-shape-is-not-the-same-meaning.md) |
-| NV-11 Gerichtete Interferenz | angeschlossen: `backend.interference` geht in die Planung ein. **Auf dieser Maschine nicht messbar** — der Takt wandert waehrend jeder Reihe, alle vier Messreihen verworfen | [0026](adr/0026-interference-is-directed-and-not-additive.md), [Messung](benchmark/interference.md) |
-| NV-13 Energieregler | fertig, opt-in, beobachtet statt angenommen; auf dieser Maschine fehlen die Rechte | [0030](adr/0030-actuation-is-an-exception-and-must-be-observed.md) |
-| NV-16 Fortschrittskosten | fertig **und gemessen**: Prefix-Cache 0–5 us, ohne ihn 35–39 us je Kontexttoken (Qwen ueber vLLM) | [0031](adr/0031-a-re-prefill-is-not-free-progress.md), [Messung](benchmark/nv16-prefill.md) |
-| NV-17 Gueltigkeitsbewusster DAG | Kern fertig; **nicht** an das Gateway angeschlossen | [0028](adr/0028-a-fusion-needs-a-common-capture.md) |
-| NV-18 Anwendungssemantik | fertig: ein Hinweis darf verschaerfen, nie lockern | [0029](adr/0029-a-hint-may-tighten-never-loosen.md) |
-| NV-24 Missbudget in Entscheidungen | fertig, Voreinstellung **aus** | [0027](adr/0027-a-miss-budget-that-decides-not-only-observes.md) |
+| NV-11 Gerichtete Interferenz | erreichbar über `backend.interference`; auf dieser Maschine nicht messbar — der Takt wandert während jeder Reihe | [0026](adr/0026-interference-is-directed-and-not-additive.md), [Messung](benchmark/interference.md) |
+| NV-12 CUDA-Graphs | **abgeschlossen, negativ**: 3,7 % weniger p50, mehrere Modelle mit Graphs laden nicht mehr | [0033](adr/0033-native-code-lives-in-the-backend-process.md), [Messung](benchmark/cuda-graphs.md) |
+| NV-13 Energieregler | erreichbar, opt-in, beobachtet statt angenommen; auf dieser Maschine fehlen die Rechte | [0030](adr/0030-actuation-is-an-exception-and-must-be-observed.md) |
+| NV-14 Green Contexts | **abgeschlossen, negativ für den Engpass**: begrenzt SMs, schützt nicht gegen Bandbreite, löst kein Zeitproblem | [0033](adr/0033-native-code-lives-in-the-backend-process.md), [Qualifikation](spikes/nv14-green-contexts.md) |
+| NV-15 XSched | **blockiert**: Level 2 wirkt auf dieser Karte mit CUDA 12.4; unter Triton 26.06 (CUDA 13.3) stürzt jeder Prozess beim Anlegen der ersten Queue ab | [0033](adr/0033-native-code-lives-in-the-backend-process.md), [Spike und Nachtrag](spikes/nv15-xsched.md) |
+| NV-16 Fortschrittskosten | fertig und gemessen | [0031](adr/0031-a-re-prefill-is-not-free-progress.md), [Messung](benchmark/nv16-prefill.md) |
+| NV-17 Gültigkeitsbewusster DAG | **erreichbar**: der Client nennt `vig_capture_id` und `vig_depends_on`; eine Zusammenführung über Aufnahmegrenzen wird abgelehnt, bevor sie rechnet | [0028](adr/0028-a-fusion-needs-a-common-capture.md), [Clientparameter](getting-started.md#results-from-the-same-capture) |
+| NV-18 Anwendungssemantik | erreichbar: ein Hinweis darf verschärfen, nie lockern | [0029](adr/0029-a-hint-may-tighten-never-loosen.md) |
+| NV-24 Missbudget in Entscheidungen | erreichbar, Voreinstellung **aus** | [0027](adr/0027-a-miss-budget-that-decides-not-only-observes.md) |
 
-## Der Review vom 10.09. und was er kostete
+**Erreichbar ist nicht qualifiziert.** Ein erreichbares Paket hat einen
+dokumentierten Schalter und einen Test, der zeigt, dass der Schalter eine
+Entscheidung ändert. Ob das Einschalten auf einer bestimmten Last besser ist,
+sagt erst eine Messung — und NV-06 zeigt, warum diese Unterscheidung keine
+Förmelei ist: der Schalter war erreichbar, getestet, und hat auf der ersten
+echten Last die Kernzusage gebrochen.
 
-Ein externes Codereview mit acht lauffaehigen Gegenproben. Alle acht liefen
-rot; alle acht sind behoben und stehen jetzt in der Regression (ADR-0032).
+## Die `unsafe`-Frage ist entschieden
 
-Zwei davon aendern **gemessene Zahlen**: die laengste Versorgungsluecke laeuft
-ab dem Ablauf des letzten brauchbaren Ergebnisses statt ab dessen
-Fertigstellung, und eine veraltete Lieferung schliesst keine Luecke mehr.
+[ADR-0033](adr/0033-native-code-lives-in-the-backend-process.md): der
+Governorprozess bleibt frei von `unsafe`, ohne Ausnahme und ohne Feature-Flag.
+Nativer Code, der die GPU berühren muss, gehört in den Backendprozess — dem
+die GPU ohnehin gehört. Für XSched ist das keine Theorie: sein Shim sitzt in
+Triton, nicht im Governor, und eine FFI im Governor säße im falschen Prozess.
 
-**Neu gemessen, drei Laeufe** ([Bericht](benchmark/gate-m3-r03.md)): die
-Kernzahlen halten. Detektor 20,1–22,4x weniger unabgedeckte Lieferfenster,
-Pose 10,5–12,0x. Beim Detektor waechst die gemeldete Luecke von 90 auf 119 ms
-— das ist die Korrektur, denn bei 84 % Abdeckung kommen dort veraltete
-Lieferungen vor. Bei den uebrigen Stroemen bewegt sie sich in beide
-Richtungen, und das ist Streuung.
+Die Folge für die vier Pakete: NV-09 wird nicht gebaut, NV-12 und NV-14 sind
+auf dieser Plattform mit negativem Ergebnis abgeschlossen, NV-15 ist die
+einzige Präemption, die den Engpass angreift — und sie ist heute blockiert.
 
-Daraus folgt eine Regel: **eine Lueckenzahl aus einem einzelnen Lauf ist keine
-Aussage.** Sie ist ein Maximum ueber ein 30-Sekunden-Fenster, und Maxima
-streuen — bei der Pose auf Tritonseite 54 bis 86 ms zwischen zwei Laeufen
-derselben Konfiguration. Die Abdeckung, die ueber hunderte Perioden mittelt,
-tut es nicht.
+**Warum blockiert.** XSched wählt für sm86 immer eine Queue, deren
+Konstruktor Befehlsspeicher über nicht dokumentierte Treiberinterna
+(`cuxtra`) anlegt. Mit der CUDA-12.4-Laufzeit geht das; mit der 13.3-Laufzeit
+des qualifizierten Triton stürzt es ab, mit jeder `libcuda` und mit beiden
+Präemptionsimplementierungen. Der Upstream hat seit dem gepinnten Stand
+keinen Commit. Die zwei Wege — ein Triton-Release mit CUDA 12 oder
+CUDA-13-Unterstützung im Upstream — sind beide keine Codezeile im Governor.
 
-Ein dritter aendert das Verhalten generativer Auftraege: die Tokenobergrenze
-ist jetzt garantiert statt geschaetzt und wird bis zu viermal so schnell
-verbraucht. Wer dieselbe Ausgabelaenge will, hebt `max_total_tokens` an — und
-weiss dann, was er zulaesst.
+## Was ausdrücklich noch nicht angeschlossen ist
 
-## Was ausdruecklich noch nicht angeschlossen ist
-
-Vier Zustaende, nicht zwei: **gebaut**, **erreichbar**, **angeschlossen**,
-**qualifiziert**. Der Review vom 10.09. hat den Unterschied als Befund
-notiert — mehrere Funktionen galten als „Voreinstellung aus", waren aber durch
-keinen dokumentierten Konfigurationsschritt zu erreichen. Das ist eine andere
-Aussage, und sie steht jetzt getrennt in der
-[Support-Matrix](support-matrix.md).
-
-Seit dem Review **erreichbar** (Konfigurationsschritt vorhanden, ein Test
-belegt, dass er eine Entscheidung aendert): die Missbudget-Policy
-(`backend.miss_aware_policy`), die Anwendungshinweise (`backend.hints`), der
-Mindestfortschritt fuer Hintergrundlast, der Taktregler (`backend.actuation`)
-und die gerichtete Interferenztabelle (`backend.interference`, geschrieben von
-`vig calibrate`). Erreichbar heisst **nicht** qualifiziert: ob das
-Einschalten auf einer bestimmten Last besser ist, sagt keine Messung.
-
-Diese Bausteine sind weiterhin nur **gebaut** und tun im Betrieb nichts:
-
-- **Die zustandsabhaengige Prognose (NV-06)** laeuft im Schattenbetrieb. Sie
-  wird gefuettert und verglichen; entschieden wird weiter mit
-  `max(offline_p99, online_p95)`. Die Umstellung entscheidet der Betreiber
-  anhand von `vig_predictor_more_conservative_total` und
-  `vig_predictor_more_optimistic_total` — eine Policy, die nur mehr ablehnt,
-  haelt jede Zusage ein und ist trotzdem wertlos.
-- **Der Abhaengigkeitsgraph (NV-17)** braucht eine Zusage vom Client, welche
-  Anfrage zu welcher Aufnahme gehoert. Das ist eine Protokollerweiterung, die
-  ohne benannten Pilotfall nicht sinnvoll zu entwerfen ist.
-- ~~Der Kontextanteil der Zerlegung (NV-16) ist nicht gemessen.~~
-  **Gemessen am 10.09.** gegen ein echtes vLLM-Backend: mit Prefix-Cache 0–5,
-  ohne ihn 35–39 us je Kontexttoken, drei Laeufe je Seite. Sockel und
-  Erzeugungsrate bleiben gleich; nur der Kontextterm aendert sich, um den
-  Faktor zehn. [Messung](benchmark/nv16-prefill.md)
+**Die zustandsabhängige Prognose (NV-06)** ist erreichbar, entscheidet aber
+per Voreinstellung nichts. _Neumessung läuft (11.09.), Ergebnis folgt._
 
 ## Die offenen Arbeitspakete
 
 | Paket | Stand | Was fehlt |
 |---|---|---|
-| NV-09 TensorRT Direct | **Durchstich gefahren, Gewinn beziffert** | Header und Bibliotheken sind im Triton-Image vorhanden (`/usr/include/x86_64-linux-gnu/NvInfer.h`); eine frueher hier stehende gegenteilige Aussage war falsch. Der direkte Pfad gewinnt gegenueber Triton **ueber Shared Memory** 500–730 us je Inferenz (8–23 %), fast vollstaendig aus Tritons Ein-/Ausgabekopien. Fuer den Engpass dieses Projekts — ein 90-ms-Block — aendert das nichts. Bleibt die `unsafe`-Entscheidung. [Durchstich](spikes/nv09-tensorrt-direct.md) |
-| NV-12 CUDA-Graphs | **gemessen, negativ** | Ueber Tritons Modellkonfiguration erreichbar, ohne eigenen Codepfad — wie NV-08 bei TensorRT. 3,7 % weniger p50, und **mehrere** Modelle mit Graphs laden nicht mehr: die Aufnahme des einen vergiftet den Stream des anderen. Fuer einen Governor, der mehrere Modelle ordnet, unbrauchbar. [Messung](benchmark/cuda-graphs.md) |
-| NV-14 Green Contexts | **qualifiziert, Ergebnis negativ fuer den Engpass** | Die Partitionierung funktioniert und begrenzt nachweisbar (10 von 40 SMs = 4,20x langsamer). Sie schuetzt aber **nicht** gegen einen Bandbreitengegner: 1,62x. Und sie loest den Engpass dieses Projekts nicht — der ist ein Zeitproblem, keine SM-Konkurrenz. [Qualifikation](spikes/nv14-green-contexts.md) |
-| NV-15 XSched-Spike | **gefahren, positiv** | Level 2 (abgeschickte Queue stilllegen) funktioniert auf sm86 — entgegen der Upstream-Tabelle — und senkt das Restblocking von ~50 auf ~14 ms. Die API meldet ihre Luecken **nicht**: alle drei Ebenen antworten „Erfolg", auch die unfertige. [Spike](spikes/nv15-xsched.md) |
-| NV-17 DAG | Kern fertig, nicht angeschlossen | Eine Zusage vom Client, welche Anfrage zu welcher Aufnahme gehoert. Protokollerweiterung, ohne benannten Pilotfall nicht sinnvoll zu entwerfen. |
-| NV-21/22/23 | optional / Forschung | Ein weiterer Backendadapter, mehrere Ressourcendomaenen, formale Analyse. |
+| NV-15 XSched | blockiert | CUDA-13-Unterstützung im Upstream oder ein qualifizierter Stack mit CUDA 12. Das Startskript für zwei Tritonprozesse unter XSched liegt bereit (`InferenceQoS-runtime/xsched-triton.sh`), `gate-m3` fährt mehrere Backendprozesse gleichzeitig. |
+| Zweiter Betriebspunkt | offen | Zwei Ausführungseinheiten (`slots: 2`, Instance Groups mit zwei Instanzen) samt gemessener Parallelprofile. Die Lastrampe sagt selbst, dass sich ihre Kante damit verschiebt. |
+| NV-21/22/23 | optional / Forschung | Ein weiterer Backendadapter, mehrere Ressourcendomänen, formale Analyse. |
 
-**Zur `unsafe`-Frage bei NV-09/12/14.** Die Header sind da: CUDA 12.4 ist
-installiert, `cuda.h` und `cuda_runtime.h` liegen in `/usr/include`,
-`libcuda.so.580` ist geladen, und `cuGreenCtxCreate` steht im Header. Was
-fehlt, ist keine Datei, sondern eine Entscheidung: `Cargo.toml` setzt
-`unsafe_code = "forbid"` fuer den ganzen Workspace, und das ist die staerkste
-Zusage, die dieses Projekt macht. Ein eigenes Crate mit enger, gepruefter
-FFI-Oberflaeche waere der uebliche Weg — er kostet die Zusage in ihrer heutigen
-Form.
-
-## Offen fuer eine Produktionsfreigabe
+## Offen für eine Produktionsfreigabe
 
 - **NV-19 — ein Entwicklungspartner.** Das einzige Paket, das nicht durch Code
-  zu erledigen ist, und die Voraussetzung fuer NV-08, NV-18 und NV-20. Ohne
-  einen benannten Lastfall und eine benannte Hardware ist jeder weitere Ausbau
-  eine Vermutung.
-- **NV-20 — Releasequalifikation.** Fertig bis auf das, was eine Person oder
-  eine Messung braucht:
+  zu erledigen ist, und die Voraussetzung für einen qualifizierten Einsatz
+  von NV-17 und NV-18. Ohne einen benannten Lastfall und eine benannte
+  Hardware ist jeder weitere Ausbau eine Vermutung.
+- **NV-20 — Releasequalifikation.** Fertig bis auf das, was eine Person
+  braucht:
 
   | | |
   |---|---|
   | Feature- und Hardwarematrix | [support-matrix.md](support-matrix.md) |
   | Runbook, Recovery- und Supportgrenzen | [runbook.md](runbook.md) |
   | Fehlerinjektion, 11 Fehlerbilder ohne GPU | `crates/vig-gateway/tests/fault_injection.rs` |
-  | Update und Rollback | geprueft; brachte einen echten Fehler zutage (`b6f0777`) |
+  | Update und Rollback | geprüft; brachte einen echten Fehler zutage (`b6f0777`) |
   | Rechteliste, Modellverwaltung, Offlinebetrieb | [support-matrix.md](support-matrix.md) |
-  | Installationspfad mit Bereitschaftspruefung | `deploy/docker-compose/` |
+  | Installationspfad mit Bereitschaftsprüfung | `deploy/docker-compose/` |
   | SBOM, signierbare Artefakte, `cargo auditable` | `.github/workflows/release.yml` |
-  | Dauerlauf auf dem freizugebenden Stand | laeuft |
-  | Datenpfadbudgets | offen, braucht eine Messung |
+  | Dauerlauf auf dem freizugebenden Stand | bestanden, 8 Stunden ([soak.md](benchmark/soak.md)) |
+  | Datenpfadbudgets | [datapath-budgets.md](datapath-budgets.md) — _Neumessung läuft (11.09.), Ergebnis folgt._ |
   | Freigabe durch Pilotverantwortliche | offen, braucht NV-19 |
 - **Zweite Hardware.** Die Logik ist portabel, die Zahlen sind es nicht. Auf
-  `aarch64` ist der Kern unter Emulation gebaut und getestet; ueber Laufzeit,
+  `aarch64` ist der Kern unter Emulation gebaut und getestet; über Laufzeit,
   Durchsatz und Interferenz auf Jetson sagt das nichts
   ([Hardwarequalifikation](hardware-qualification.md)).
-- **Die Luecken im Messbild.** Bursts und Lastrampe aus Spec 19.4, ein zweiter
-  Betriebspunkt, die Qualitaets-Deadline-Frontier aus Spec 19.7.
 
 ## Zuletzt gemessen
 
+**11.09.2026, Treiber 580.178.04.** Gate M3 dreimal ([R04](benchmark/gate-m3-r04.md)),
+NV-06 scharf gegen Schatten ([nv06-ab.md](benchmark/nv06-ab.md)),
+weitere Messungen des Tages laufen auf ruhiger Maschine.
+
 **8-Stunden-Dauerlauf (2026-09-09/10), bestanden.** Keine Kennzahlendrift:
-erste gegen letzte Stunde alle Werte innerhalb von 1 %, die einzige groessere
-Abweichung ist `depth` mittlere AoI mit −11 % — also besser. Kein Fehler, keine
+erste gegen letzte Stunde alle Werte innerhalb von 1 %. Kein Fehler, keine
 Panic. Speicher 12 640 → 15 912 kB, davon 2,5 MB im Anlauf der ersten Stunde;
-danach +748 kB ueber sieben Stunden ohne erkennbaren Trend. Kein unbegrenztes
-Wachstum im beobachteten Fenster; „kein Leck" leiten wir daraus nicht ab.
-Details in [benchmark/soak.md](benchmark/soak.md).
-
-**TensorRT (2026-09-10), NV-08 beantwortet.** Dieselben Gewichte als
-TensorRT-Engine: serialisierte Auslastung 103 % → 76 %, Detektorlaufzeit
-15 639 → 11 488 us. Der Vorsprung des Governors halbiert sich (24,7x → 13,3x),
-weil die Baseline besser wird — der Engpass bleibt: bei 76 % verfehlt ein
-getunter Triton weiter jeden zehnten Detektorzyklus.
-[benchmark/tensorrt.md](benchmark/tensorrt.md)
-
-**RF-DETR-Varianten (2026-09-10), negatives Ergebnis.** Fuenf echte Modelle
-gemessen: die Auflaesung bestimmt die Laufzeit, das Modell fast nicht — bei
-gleicher Auflaesung liegen 7 bis 28 Klassen innerhalb von 1,1 %. Variantenwahl
-hat auf dieser Modellfamilie keinen Betriebspunkt.
-[benchmark/rfdetr-variants.md](benchmark/rfdetr-variants.md)
+danach +748 kB über sieben Stunden ohne erkennbaren Trend. Kein unbegrenztes
+Wachstum im beobachteten Fenster; „kein Leck" leiten wir daraus nicht ab
+([soak.md](benchmark/soak.md)).

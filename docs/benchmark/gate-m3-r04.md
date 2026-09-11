@@ -22,11 +22,14 @@ betreffen:
   Actor; seit `dd83086` startet ihn nur `vig serve`. Dieser Lauf hatte also
   keinen `nvidia-smi`-Unterprozess nebenher. Ab dem nächsten Lauf ruft
   `gate-m3` den Wächter wieder auf, wie `vig serve` es tut.
-- **Anderer Taktzustand.** Unter 580.173.02 lief die Karte leistungsbegrenzt
-  bei 1830 von 2100 MHz. Eine Stichprobe während Lauf 1 unter 580.178.04
-  zeigte 1905 MHz ohne aktiven Drosselgrund. Eine Stichprobe ist keine
-  Charakterisierung; sie erklärt aber, warum die Absolutwerte etwas anders
-  liegen dürfen.
+- **Etwas höherer Takt, dieselbe Grenze.** Unter 580.173.02 lief die Karte
+  leistungsbegrenzt bei 1830 von 2100 MHz. Unter 580.178.04 zeigt der
+  Taktmitschnitt der Messphase vom selben Tag (alle 5 s) unter Last
+  1920 MHz bei rund 104 W, mit aktivem Software-Leistungslimit
+  (`SwPowerCap`, `0x4`). Eine Stichprobe während Lauf 1 hatte 1905 MHz ohne
+  Drosselgrund gezeigt — ein einzelner Moment, keine Charakterisierung. Die
+  Karte läuft weiter am Leistungslimit, nur etwas höher getaktet; das
+  erklärt, warum die Absolutwerte leicht anders liegen dürfen.
 
 ## Ergebnis: die Kernzahlen halten
 
