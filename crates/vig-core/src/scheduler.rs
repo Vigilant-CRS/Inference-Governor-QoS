@@ -1325,6 +1325,7 @@ impl Scheduler {
                 queue.take(id);
             }
             if let Some(vs) = self.variant_states.get_mut(model.get()) {
+                self.metrics.count_switch(model, vs.current(), variant);
                 vs.record(variant, now);
             }
             let _ = self.inflight.push(Dispatched {
