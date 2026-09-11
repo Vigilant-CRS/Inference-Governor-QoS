@@ -953,6 +953,114 @@ fn an_active_predictor_keeps_the_quality_a_stale_profile_gives_away() {
 }
 
 // ---------------------------------------------------------------------------
+// Spec 19.7 — Variantenwechsel zaehlen
+// ---------------------------------------------------------------------------
+
+/// Ein Vertrag mit zwei Varianten und einstellbarer Verweildauer.
+///
+/// Gross 30 ms, klein 10 ms. Mit 60 ms Deadline passt die grosse, mit 20 ms
+/// nur die kleine. Der Druck kommt ueber die Deadline des einzelnen Frames:
+/// so laesst sich genau ein Wechsel an genau einer Stelle erzwingen, statt
+/// ihn aus einer Lastkurve herauszulesen.
+fn two_variants(dwell_ms: u64) -> (ModelContract, ModelContract) {
+    let mut generous = contract(
+        Criticality::Protected,
+        QueuePolicy::Latest,
+        Some(33),
+        60,
+        200,
+        &[30, 10],
+    );
+    generous.variant_dwell = ms(dwell_ms);
+    let mut tight = generous.clone();
+    tight.deadline = ms(20);
+    (generous, tight)
+}
+
+/// Eine erzwungene Abwertung zaehlt einmal, die Aufwertung erst nach der
+/// Verweildauer — und dazwischen zaehlt nichts, weil nichts wechselt.
+///
+/// Ein einziger knapper Frame bei t = 330 zwingt auf die kleine Variante.
+/// Die Frames bei 363, 396 und 429 haetten wieder Platz fuer die grosse,
+/// liegen aber innerhalb der 100 ms Verweildauer: die Hysterese haelt die
+/// kleine, und es gibt keinen Wechsel, der zu zaehlen waere. Erst bei 462
+/// wird aufgewertet.
+#[test]
+fn a_forced_downgrade_and_the_later_upgrade_are_counted_once_each() {
+    let (generous, tight) = two_variants(100);
+    let mut scheduler = build(vec![generous.clone()], 1);
+    let mut backend = Backend::default();
+    let mut next_id = 0_u64;
+    run(&mut scheduler, &mut backend, 1_000, |t| {
+        if t % 33 != 0 {
+            return Vec::new();
+        }
+        next_id = next_id.saturating_add(1);
+        let c = if t == 330 { &tight } else { &generous };
+        vec![frame(next_id, 0, t, c)]
+    });
+
+    let (large, small) = (VariantIdx(0), VariantIdx(1));
+    let used = backend.variants_used();
+    assert_eq!(used.first(), Some(&large), "die erste Wahl ist die grosse");
+    assert_eq!(used.get(10), Some(&small), "t = 330: sofort abgewertet");
+    assert_eq!(
+        used.get(11..14),
+        Some(&[small, small, small][..]),
+        "innerhalb der Verweildauer bleibt es bei der kleinen"
+    );
+    assert_eq!(used.get(14), Some(&large), "t = 462: aufgewertet");
+
+    let m = scheduler.metrics();
+    assert_eq!(m.variant_downgrades[0], 1, "genau eine Abwertung");
+    assert_eq!(
+        m.variant_upgrades[0], 1,
+        "genau eine Aufwertung — die erste Wahl ist kein Wechsel"
+    );
+}
+
+/// Die Verweildauer daempft das Pendeln (Spec 12.4, Spec 19.7).
+///
+/// Abwechselnd knappe und grosszuegige Frames. Ohne Verweildauer folgt die
+/// Wahl jedem Frame, und fast jeder Dispatch ist ein Wechsel. Mit 100 ms
+/// wirkt die Abwertung weiter sofort, die Aufwertung aber erst, wenn die
+/// kleine lange genug gehalten wurde — die Zahl der Wechsel faellt deutlich.
+#[test]
+fn the_dwell_time_damps_switching_under_alternating_pressure() {
+    let switches = |dwell_ms: u64| -> u32 {
+        let (generous, tight) = two_variants(dwell_ms);
+        let mut scheduler = build(vec![generous.clone()], 1);
+        let mut backend = Backend::default();
+        let mut next_id = 0_u64;
+        run(&mut scheduler, &mut backend, 2_000, |t| {
+            if t % 33 != 0 {
+                return Vec::new();
+            }
+            next_id = next_id.saturating_add(1);
+            let c = if next_id.is_multiple_of(2) {
+                &tight
+            } else {
+                &generous
+            };
+            vec![frame(next_id, 0, t, c)]
+        });
+        let m = scheduler.metrics();
+        m.variant_upgrades[0].saturating_add(m.variant_downgrades[0])
+    };
+
+    let without = switches(0);
+    let with = switches(100);
+    assert!(
+        without >= 50,
+        "ohne Verweildauer wechselt fast jeder der rund 60 Frames: {without}"
+    );
+    assert!(
+        with.saturating_mul(2) < without,
+        "mit Verweildauer weniger als halb so oft: {with} gegen {without}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // NV-24 — das Missbudget in Entscheidungen einbeziehen
 // ---------------------------------------------------------------------------
 

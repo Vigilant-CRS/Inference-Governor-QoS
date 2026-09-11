@@ -162,7 +162,28 @@ pub struct Metrics {
     /// Gesamte verbrauchte Backendzeit.
     pub total_compute_nanos: u64,
     /// Wie oft welche Variante gewaehlt wurde.
+    ///
+    /// Ueber **alle** Modelle summiert: Index 0 ist die beste Variante jedes
+    /// Modells, gleichgueltig welches. Sobald mehr als ein Modell laeuft, ist
+    /// der Qualitaetsmix eines einzelnen daraus nicht mehr ablesbar. Eine
+    /// Aufschluesselung je Modell und Variante kostete `MAX_MODELS` mal
+    /// `MAX_VARIANTS` Zaehler in jedem Metrikabzug — 2 KB, kopiert bei jeder
+    /// Abfrage, fuer eine Frage, die nur ein Benchmark stellt. Die
+    /// Frontier-Messung (Spec 19.7) faehrt deshalb den Detektor allein.
     pub variant_selected: [u64; MAX_VARIANTS],
+    /// Wie oft ein Modell auf eine hoeherwertige Variante gewechselt hat.
+    ///
+    /// Je Modell, anders als [`Self::variant_selected`]: ein Wechsel ist eine
+    /// Eigenschaft der Folge **eines** Stroms, und eine Summe ueber Stroeme
+    /// macht aus zwei ruhigen Modellen ein pendelndes. Die erste Wahl eines
+    /// Modells ist kein Wechsel — vorher gab es keine.
+    pub variant_upgrades: [u32; MAX_MODELS],
+    /// Wie oft ein Modell auf eine geringerwertige Variante gewechselt hat.
+    ///
+    /// Getrennt von den Aufwertungen, weil die Hysterese nach Spec 12.4
+    /// asymmetrisch ist: Abwertungen wirken sofort, Aufwertungen erst nach
+    /// der Verweildauer. Eine Gesamtzahl verdeckte genau das.
+    pub variant_downgrades: [u32; MAX_MODELS],
     /// Wie viele der Modellslots tatsaechlich belegt sind.
     ///
     /// Ohne diese Zahl exportiert der Endpunkt alle `MAX_MODELS` Slots, also
@@ -299,6 +320,35 @@ impl Metrics {
     /// Zaehlt eine Variantenwahl.
     pub fn count_variant(&mut self, variant: crate::ids::VariantIdx) {
         if let Some(slot) = self.variant_selected.get_mut(variant.get()) {
+            *slot = slot.saturating_add(1);
+        }
+    }
+
+    /// Zaehlt einen Variantenwechsel eines Modells (Spec 19.7).
+    ///
+    /// `previous` ist die bis hierher gehaltene Variante. Ohne sie gab es
+    /// keine Wahl, und eine erste Wahl ist kein Wechsel. Ein kleinerer Index
+    /// bedeutet hoehere Qualitaet — dieselbe Ordnung, nach der die
+    /// Hysterese Auf- und Abwertung unterscheidet.
+    ///
+    /// Aufgerufen beim Dispatch und nicht in der Auswahl: gezaehlt wird, was
+    /// lief, nicht was erwogen wurde. Ein Kandidat kann mehrfach geplant und
+    /// wieder zurueckgestellt werden.
+    pub fn count_switch(
+        &mut self,
+        model: crate::ids::ModelIdx,
+        previous: Option<crate::ids::VariantIdx>,
+        chosen: crate::ids::VariantIdx,
+    ) {
+        let Some(previous) = previous else {
+            return;
+        };
+        let counters = match chosen.cmp(&previous) {
+            core::cmp::Ordering::Less => &mut self.variant_upgrades,
+            core::cmp::Ordering::Greater => &mut self.variant_downgrades,
+            core::cmp::Ordering::Equal => return,
+        };
+        if let Some(slot) = counters.get_mut(model.get()) {
             *slot = slot.saturating_add(1);
         }
     }

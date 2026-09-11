@@ -253,6 +253,8 @@ The numbers worth watching:
 | `vig_generative_decode_us_total` | work that actually produced tokens; only the ratio of the two says whether splitting still pays |
 | `vig_generative_context_tokens` | longest context a continuation carried; if it grows far past what you calibrated, the sizing is no longer backed by a measurement |
 | `vig_decomposition_refused_total` | jobs that ran undivided because splitting them would have cost more work than it saved |
+| `vig_variant_selected_total` | how often each variant index ran, **summed over all models** — index 0 is every model's best variant |
+| `vig_variant_upgrades_total` / `vig_variant_downgrades_total` | variant switches per model, by direction. Downgrades act at once, upgrades only after `variant_dwell_ms`; a stream whose upgrades climb as fast as its downgrades is oscillating — raise the dwell time |
 
 `/healthz` answers "is the process alive". `/readyz` answers "can it currently
 do anything" — they are different questions with different consequences.

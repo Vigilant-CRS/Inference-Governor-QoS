@@ -176,6 +176,21 @@ fn render_generative(out: &mut String, metrics: &Metrics) {
 /// Nur die belegten Slots: eine Zeitreihe je unbenutztem Modellslot kostet in
 /// Prometheus dauerhaft Speicher und macht jede Abfrage unleserlich.
 fn render_per_model(out: &mut String, name: &str, help: &str, values: &[u32], count: usize) {
+    render_per_model_as(out, name, help, "gauge", values, count);
+}
+
+/// Wie [`render_per_model`], mit ausdruecklichem Metriktyp.
+///
+/// Ein Zaehler, der als Gauge exportiert wird, verliert in Prometheus
+/// `rate()` und `increase()` — die Abfragen, fuer die man ihn braucht.
+fn render_per_model_as(
+    out: &mut String,
+    name: &str,
+    help: &str,
+    kind: &str,
+    values: &[u32],
+    count: usize,
+) {
     // Ohne Modelle gibt es keine Reihe. Eine Metrikfamilie mit HELP und TYPE
     // und ohne einen einzigen Messwert ist zwar formal zulaessig, sagt aber
     // nichts — und je mehr Reihen dazukommen, desto mehr Rauschen steht in
@@ -184,7 +199,7 @@ fn render_per_model(out: &mut String, name: &str, help: &str, values: &[u32], co
         return;
     }
     let _ = writeln!(out, "# HELP {name} {help}");
-    let _ = writeln!(out, "# TYPE {name} gauge");
+    let _ = writeln!(out, "# TYPE {name} {kind}");
     for (index, value) in values.iter().take(count).enumerate() {
         let _ = writeln!(out, "{name}{{model=\"{index}\"}} {value}");
     }
@@ -301,6 +316,31 @@ fn render_derived(out: &mut String, metrics: &Metrics) {
             "vig_variant_selected_total{{variant=\"{index}\"}} {count}"
         );
     }
+
+    render_variant_switches(out, metrics);
+}
+
+/// Auf- und Abwertungen je Modell, getrennt (Spec 19.7).
+///
+/// Die Hysterese ist asymmetrisch; eine Summe verdeckte, welche Richtung
+/// pendelt.
+fn render_variant_switches(out: &mut String, metrics: &Metrics) {
+    render_per_model_as(
+        out,
+        "vig_variant_upgrades_total",
+        "Wechsel auf eine hoeherwertige Variante, je Modell.",
+        "counter",
+        &metrics.variant_upgrades,
+        metrics.models,
+    );
+    render_per_model_as(
+        out,
+        "vig_variant_downgrades_total",
+        "Wechsel auf eine geringerwertige Variante, je Modell.",
+        "counter",
+        &metrics.variant_downgrades,
+        metrics.models,
+    );
 }
 
 /// Eine einzelne Messgroesse mit HELP und TYPE.
