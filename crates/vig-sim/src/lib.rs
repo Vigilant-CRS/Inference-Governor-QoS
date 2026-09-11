@@ -32,6 +32,7 @@
 )]
 
 pub mod baseline;
+pub mod bounded;
 pub mod coverage;
 pub mod event;
 pub mod harness;
