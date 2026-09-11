@@ -933,8 +933,10 @@ fn an_active_predictor_keeps_the_quality_a_stale_profile_gives_away() {
         });
         actions.iter().find_map(|a| match *a {
             Action::Dispatch {
-                request, variant, ..
-            } if request == RequestId(10_000) => Some(variant),
+                request: RequestId(10_000),
+                variant,
+                ..
+            } => Some(variant),
             _ => None,
         })
     };

@@ -121,9 +121,10 @@ async fn run() {
         // Die Region muss bei **dem** Prozess registriert sein, der das Modell
         // rechnet — sonst faellt der Vergleich still auf den Copy-Pfad zurueck.
         let endpoint = resolved.endpoint_of(model).to_owned();
-        let client = Arc::clone(clients.entry(endpoint.clone()).or_insert_with(|| {
-            Arc::new(vig_backend_triton::TritonClient::new(endpoint.as_str()))
-        }));
+        let client =
+            Arc::clone(clients.entry(endpoint.clone()).or_insert_with(|| {
+                Arc::new(vig_backend_triton::TritonClient::new(endpoint.as_str()))
+            }));
 
         let metadata = client
             .raw()

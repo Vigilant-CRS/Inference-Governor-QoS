@@ -286,6 +286,7 @@ fn stream(period: u64, input: &InputSpec) -> StreamDef {
         in_flight_cap: CAP,
         input: Some(input.clone()),
         pump: false,
+        burst: None,
     }
 }
 
