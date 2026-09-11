@@ -14,8 +14,8 @@ fortgeschrieben.
 | | |
 |---|---|
 | Rust, ohne Kommentare und Leerzeilen gezählt | ~34 500 Zeilen in 9 Crates |
-| Tests | 628 grün, einer bewusst ignoriert (die Zeitprüfung der Datenpfadbudgets — sie gehört auf die Releasemaschine, nicht auf geteilte CI-Runner) |
-| Architekturentscheidungen | 33 ADRs |
+| Tests | 751 grün, zwei bewusst ignoriert (die Zeitprüfung der Datenpfadbudgets und das große NV-23-Gitter — beide gehören auf die Releasemaschine, nicht auf geteilte CI-Runner) |
+| Architekturentscheidungen | 37 ADRs |
 | Gate | fmt, clippy `-D warnings`, test, `cargo deny`, `reuse lint`, aarch64 unter Emulation |
 
 Die Crates und ihre Zuständigkeit:
