@@ -48,6 +48,12 @@ bedeutet, steht in [docs/releases.md](docs/releases.md).
   (Spec 19.4); `frontier` vergleicht automatische Variantenwahl mit festen
   Varianten (Spec 19.7); `gate-m3` faehrt Modelle mit eigenem Backendprozess
   gleichzeitig und gibt den Schattenvergleich der Prognose aus.
+- **ROS-2-Bruecke** (NV-21, `integrations/ros2/`). Ein rclpy-Knoten, der
+  Kamera-Topics mit Altersangabe, Aufnahmekennung und Supersession-Schluessel
+  an den Governor gibt — ueber Shared Memory auf demselben Host, sonst per
+  Kopie, ohne nativen Code (ADR-0033). Ablehnungen des Governors erscheinen
+  als Ereignisse, nicht als Fehler. 54 Tests, live geprueft gegen `vig serve`
+  vor echtem Triton. Siehe [docs/integrations/ros2.md](docs/integrations/ros2.md).
 - **Alle Clientparameter dokumentiert** in docs/getting-started.md, mit
   Abschnitten zu Aufnahmen (NV-17) und Anwendungshinweisen (NV-18). Vorher
   standen dort sechs von vierzehn.
