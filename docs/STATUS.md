@@ -81,7 +81,9 @@ Werkzeugen:
 - **Stationäre Rampe:** Über 100 % Last verfehlt Triton 342–500 ‰ der
   Detektorperioden, der Governor 4–22 ‰ (21–125x); die nachrangigen Ströme
   zahlen dafür. **Genau bei 100 %** verfehlt Triton nichts, der Governor
-  verwirft 165 ‰ eines nachrangigen Stroms — er plant mit 110 % Marge.
+  verwirft 165 ‰ eines nachrangigen Stroms. Die Marge ist es nicht: in der
+  Simulation derselben Last entscheidet sie an der Kante nichts. Nächster
+  Kandidat ist die Lücke zwischen zwei Aufträgen ohne Pipelining.
 - **Lastspitzen (Spec 19.4):** kein Gewinn (−1,1x, 1,2x) und bei langen
   Spitzen über niedriger Grundlast ein Verlust (41 gegen 11 ‰). Die längste
   Lücke hält er kürzer (12–14 gegen 21–22 ms). Ursache in Analyse; das
@@ -187,7 +189,7 @@ per Voreinstellung nichts. Mit Marge ist `active` sicher, auf Gate M3 aber ohne 
 | Paket | Stand | Was fehlt |
 |---|---|---|
 | NV-15 XSched | gemessen, Gleichstand mit Triton + XSched | R messen statt schätzen: mit festem Takt (braucht Rechte) oder online aus dem Betrieb (ADR-0038). Die Antwort auf die Frage vom 11.09.: Die Lane schützt den Detektor (100 %), und das VLM bekommt unter dem Governor erstmals vollen Fortschritt (100 %). |
-| Kante bei 100 % | Ursache vermutet, Korrektur in Arbeit | Der Governor plant mit 110 % Marge und verwirft bei echten 100 % einen nachrangigen Strom (165 ‰). Die Marge darf lernen, auch nach unten (ADR-0038); Messung als Szenario S10. |
+| Kante bei 100 % | Ursache offen; die Marge ist es nicht (Simulation) | Bei 100 % verliert Triton nichts, der Governor 165 ‰ eines nachrangigen Stroms. In der Simulation derselben Last liefern feste 110 %, feste 100 % und eine gelernte Marge bis 105 % dieselbe Abdeckung. Nächster Kandidat: die Lücke zwischen zwei Aufträgen bei `pipelining_depth: 0`; Messung nach dem Dauerlauf. Die gelernte Marge (ADR-0038) wird nach dem Look-ahead-Fix nachgeprüft. |
 | Lastspitzen und Variantenwahl | Schwäche gemessen, Analyse läuft | Lange Spitzen über niedriger Grundlast: 41 gegen 11 ‰. Variantenwahl bei 90 % ohne Herunterschalten, bei 110–125 % zu spät ([Messung](benchmark/messkette-2026-09-11.md)). |
 | Externer Review vom 11.09. | Skriptbefunde behoben, Produktbefunde in Arbeit | R01–R05: Abschlussabgleich nach Backend-Neustart, Identität von Endpunkt und Version, Pufferlebensdauer in Pilot und ROS-Brücke, Sampling-JSON ([Review](reviews/2026-09-11-runtime/REVIEW.md)). R06–R08 behoben. |
 | Zweiter Betriebspunkt | offen | Zwei Ausführungseinheiten (`slots: 2`, Instance Groups mit zwei Instanzen) samt gemessener Parallelprofile. Die Lastrampe sagt selbst, dass sich ihre Kante damit verschiebt. |

@@ -50,10 +50,14 @@ Detektors (Median über drei Läufe) und des schlechtesten Stroms.
 Über 100 % hält der Governor den geschützten Strom und gibt die übrigen
 auf — das ist gewollt, und es kostet: bei 150 % verfehlen sie fast jede
 Periode. Genau bei 100 % verfehlt Triton nichts, der Governor verwirft
-165 ‰ eines nachrangigen Stroms. Die vermutete Ursache: Er plant mit 110 %
-Marge und sieht echte 100 % als 110 %. Die Korrektur, eine Marge, die auch
-nach unten lernen darf, ist in Arbeit (ADR-0038); gemessen wird sie als
-Szenario S10 ([scenarios](scenarios.md)).
+165 ‰ eines nachrangigen Stroms. Die erste Vermutung — er plane mit 110 %
+Marge und sehe echte 100 % als 110 % — hat die Simulation derselben Last
+widerlegt: Bis 105 % liefern feste 110 %, feste 100 % und eine gelernte Marge
+exakt dieselbe Abdeckung, weil der Plan nur auf Look-ahead und Variantenwahl
+wirkt und der Look-ahead an der Kante nicht vetoiert. Nächster Kandidat ist
+die Lücke zwischen zwei Aufträgen bei `pipelining_depth: 0`: Der Governor
+startet den nächsten erst nach der Antwort auf den vorigen, Triton direkt hat
+bis zu acht offen. Die Messung dazu steht aus.
 
 ## Lastspitzen: kein Gewinn, im dritten Profil ein Verlust
 
@@ -138,7 +142,7 @@ Zeile oben stammt aus dem Nachlauf mit Level 3.
 |---|---|---|
 | Stationäre Überlast: 21–125x beim Detektor | hält | — |
 | Datenpfad: +159–236 µs, alle Budgets | bestanden | Budgets je Plattform (ARM, [arm-serve](arm-serve.md)) |
-| Kante bei 100 %: 165 ‰ Verlust eines nachrangigen Stroms | Schwäche | ADR-0038, Szenario S10 |
+| Kante bei 100 %: 165 ‰ Verlust eines nachrangigen Stroms | Schwäche, Ursache offen (nicht die Marge) | Messung mit Pipelining |
 | Lastspitzen: kein Gewinn, einmal −3,7x | Schwäche | Analyse; Szenario S7 statt schnellerer Kamera |
 | Variantenwahl: stark bei 150 %, falsch bei 90 %, spät bei 110–125 % | Schwäche | Analyse |
 | Präemption: Triton + XSched ≈ Vigilant + Lane | Gleichstand, VLM erstmals 100 % unter dem Governor | R messen (ADR-0038 oder fester Takt) |
