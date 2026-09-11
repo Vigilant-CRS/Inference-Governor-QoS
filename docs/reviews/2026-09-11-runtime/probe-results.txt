@@ -1,0 +1,17 @@
+SOURCE actor.rs sha256=10ffb18228e81dc27c18bcaa0c275f5e828fe64db790b31b6294b5156d3e6b2e
+SOURCE cooperative.rs sha256=eafc52cf76cb4d5c74eb352d902bedaa791a995d082704afb546735c15cf51d3
+EXTRACTED RUST METHODS (stand-in Actor/Scheduler):
+JSON {"max_tokens": 8, "temperature":0.7}
+JSON {"max_tokens": 8, "temperature":0.7,}
+COUNTER count=100 highest=100 restarted=false released=[]
+COUNTER count=0 highest=100 restarted=true released=[1]
+COUNTER count=0 highest=100 restarted=true released=[1, 2]
+VALID: {"max_tokens": 8, "temperature":0.7}
+INVALID: {"max_tokens": 8, "temperature":0.7,}
+SHELL xsched-triton-alt.sh: health_ok=True, exit=0, level2=True, stdout='bereit: xsched TSG'
+SHELL xsched-triton-alt.sh: health_ok=False, exit=0, level2=True, stdout='bereit: xsched TSG'
+SHELL triton-two-process.sh: health_ok=True, exit=0, level2=True, stdout='bereit: xsched TSG'
+SHELL triton-two-process.sh: health_ok=False, exit=0, level2=True, stdout='bereit: xsched TSG'
+SHM MODEL: request seq=5 overwrites region=0 still owned by A
+ROS EXTRACTED CALLBACK: BACKEND_TIMEOUT released slot=0, original slot=0
+PILOT MATRIX: minimum=4320s, runner timeout=1800s, reference/setup excluded

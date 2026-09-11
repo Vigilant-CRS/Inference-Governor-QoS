@@ -1,0 +1,64 @@
+Source: /tmp/claude-1000/measure-chain-2026-09-11d/ablauf.txt
+15:25:03 Messung angemeldet, warte auf laufende Builds
+15:25:12 Sperre exklusiv, Stand b0b36b5
+15:27:11 Build fertig; Mocktest: /run/media/dd/USB_4028/Projekte/InferenceQoS/target/release/deps/end_to_end-6f5dfdb872748e50
+15:27:11 warte auf Last < 1,5 (hoechstens 10 min)
+15:29:41 Last 0.99 3.93 3.60
+15:29:41 p2-bursts
+15:41:42 p2-ramp
+16:02:46 p2-frontier
+16:24:02 p2-datapath-triton
+16:24:05 p2-datapath-mock
+16:24:44 up plain
+16:24:52 xs-plain-gate-r1
+16:26:52 xs-plain-gate-r2
+16:28:53 xs-plain-gate-r3
+16:30:54 up xsched LV2
+16:31:01 xs-xsched-LV2-gate-r1
+16:33:02 xs-xsched-LV2-gate-r2
+16:35:02 xs-xsched-LV2-gate-r3
+16:37:03 up xsched TSG
+16:37:08 xs-xsched-TSG-gate-r1
+
+Source: /tmp/claude-1000/measure-chain-2026-09-11d/fremdlast.txt
+15:31:42 p2-bursts last=1.16 FREMD chrome(35.8%)
+15:37:45 p2-bursts last=1.25 FREMD chrome(46.3%)
+15:38:15 p2-bursts last=1.42 FREMD chrome(117.4%)
+15:38:45 p2-bursts last=1.99 FREMD chrome(89.1%)
+15:43:17 p2-ramp last=1.00 FREMD chrome(36.3%)
+15:57:54 p2-ramp last=1.25 FREMD chrome(43.8%)
+16:09:29 p2-frontier last=2.29 FREMD java(397.0%)
+16:15:02 p2-frontier last=2.24 FREMD java(496.0%)
+16:32:40 xs-xsched-LV2-gate-r1 last=1.85 FREMD java(257.7%) java(198.5%) java(85.1%)
+16:34:10 xs-xsched-LV2-gate-r2 last=1.32 FREMD java(38.3%)
+16:37:42 xs-xsched-TSG-gate-r1 last=1.23 FREMD java(345.3%) java(148.3%) java(85.6%)
+
+Source: /tmp/claude-1000/measure-chain-2026-09-11d/p2-datapath-triton.txt
+pose_main ueber System Shared Memory, 300 Laeufe je Seite, abwechselnd:
+  Nutzlast 2352 KB, als Referenz uebertragen
+  direkt          p50 2902 us | p99 3435 us
+  ueber Vigilant  p50 3061 us | p99 3534 us
+  Zusatz          p50 +159 us | p99 +99 us | Anteil nicht bewertet, direkter Aufruf unter 6 ms
+
+Datenpfadbudget Shm-Referenz: PASS
+exit=0
+
+Source: /tmp/claude-1000/measure-chain-2026-09-11d/p2-datapath-mock.txt
+
+running 1 test
+
+  Pfad         | Nutzlast | direkt p50/p99  | Vigilant p50/p99 | Zusatz p50/p99  | Anteil | Urteil
+  -------------|----------|-----------------|------------------|-----------------|--------|-------
+  Shm-Referenz |   150 KB |   6472 /   6830 |    6695 /   7010 | +  223 / +  180 |  3,4 % | PASS
+  Shm-Referenz |   1,2 MB |   6455 /   6771 |    6691 /   6974 | +  236 / +  203 |  3,6 % | PASS
+  Shm-Referenz |   6,2 MB |   6472 /   6814 |    6682 /   6957 | +  210 / +  143 |  3,2 % | PASS
+  gRPC-Kopie   |   150 KB |   6515 /   6830 |    6831 /   7367 | +  316 / +  537 |  4,8 % | PASS
+  gRPC-Kopie   |   1,2 MB |   7020 /   8572 |    8141 /   9490 | + 1121 / +  918 | 15,9 % | NICHT BUDGETIERT — Kameraframes gehoeren auf den Shm-Pfad (ADR-0003, Spec 19.8)
+  gRPC-Kopie   |   6,2 MB |  10277 /  13304 |   15048 /  19650 | + 4771 / + 6346 | 46,4 % | NICHT BUDGETIERT — Kameraframes gehoeren auf den Shm-Pfad (ADR-0003, Spec 19.8)
+
+  Anteil: Median-Zusatz am direkten Aufruf, bewertet ab 6 ms.
+test datapath_budgets_hold ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 31.69s
+
+exit=0
