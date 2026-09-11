@@ -205,6 +205,30 @@ class Outcome(enum.Enum):
         }
 
     @property
+    def ends_reading(self) -> bool:
+        """Ist sicher, dass niemand den Eingabepuffer dieses Requests mehr liest?
+
+        Ja, wenn das Backend geantwortet hat (auch mit einem Fehler) oder
+        der Governor den Request abgewiesen hat, bevor er ihn weitergab.
+        Nein bei einem Timeout, einem unbekannten Ausgang, einem Abbruch oder
+        einem Transportfehler: das Backend kann dann noch rechnen und aus dem
+        Fach lesen, und der Governor haelt aus genau diesem Grund seinen
+        Ausfuehrungskredit fest.
+        """
+        return self in {
+            Outcome.DELIVERED,
+            Outcome.DELIVERED_OBSOLETE,
+            Outcome.SUPERSEDED,
+            Outcome.STALE,
+            Outcome.INFEASIBLE,
+            Outcome.CAPACITY,
+            Outcome.FUSION_REFUSED,
+            Outcome.INVALID,
+            Outcome.NOT_FOUND,
+            Outcome.BACKEND_FAILED,
+        }
+
+    @property
     def retry_same_frame(self) -> bool:
         """Lohnt es, **denselben** Frame noch einmal zu schicken?
 
@@ -378,12 +402,22 @@ class SlotRing:
     Fach wird deshalb erst wieder vergeben, wenn der Request, der es
     benutzt, beantwortet ist. Sind alle belegt, ist das Backpressure: der
     neue Frame wird nicht geschickt und gezaehlt.
+
+    "Beantwortet" allein reicht nicht (Review R04): nach einem Timeout oder
+    einem unbekannten Ausgang kann das Backend das Fach noch lesen. Ein
+    solches Fach kommt in **Quarantaene** und wird nie wieder vergeben. Ein
+    Timer waere kein Nachweis, dass der Leser fertig ist. Sind alle Faecher
+    in Quarantaene, braucht die Kamera eine neue Region
+    (`exhausted_by_quarantine`); die alte bleibt unberuehrt, bis der Knoten
+    endet.
     """
 
     def __init__(self, slots: int) -> None:
         if slots < 1:
             raise ValueError("mindestens ein Fach")
+        self._slots = slots
         self._free: List[int] = list(range(slots))
+        self._quarantined: set = set()
         self._lock = threading.Lock()
 
     def acquire(self) -> Optional[int]:
@@ -392,13 +426,42 @@ class SlotRing:
 
     def release(self, slot: int) -> None:
         with self._lock:
-            if slot not in self._free:
+            if slot not in self._free and slot not in self._quarantined:
                 self._free.append(slot)
+
+    def quarantine(self, slot: int) -> None:
+        """Das Fach wird nie wieder vergeben: sein Leser ist nicht sicher fertig."""
+        with self._lock:
+            if slot in self._free:
+                self._free.remove(slot)
+            self._quarantined.add(slot)
+
+    def settle(self, slot: int, outcome: "Outcome") -> bool:
+        """Gibt das Fach frei, wenn der Ausgang sein Ende belegt.
+
+        Gibt zurueck, ob es freigegeben wurde; sonst ist es in Quarantaene.
+        """
+        if outcome.ends_reading:
+            self.release(slot)
+            return True
+        self.quarantine(slot)
+        return False
 
     @property
     def free(self) -> int:
         with self._lock:
             return len(self._free)
+
+    @property
+    def quarantined(self) -> int:
+        with self._lock:
+            return len(self._quarantined)
+
+    @property
+    def exhausted_by_quarantine(self) -> bool:
+        """Jedes Fach ist in Quarantaene; diese Region nimmt nichts mehr an."""
+        with self._lock:
+            return len(self._quarantined) == self._slots
 
 
 def is_local_endpoint(endpoint: str) -> bool:

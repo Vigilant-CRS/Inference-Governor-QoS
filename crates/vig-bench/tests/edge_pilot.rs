@@ -179,6 +179,12 @@ fn check(label: &str, report: &ArmReport) {
         "{label}: {:?}",
         cam.coverage
     );
+    // Kopierpfad: kein Puffer, also nichts erschoepft und nichts gesperrt.
+    assert_eq!(
+        (cam.buffers_exhausted, cam.buffers_quarantined),
+        (0, 0),
+        "{label}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -193,12 +199,14 @@ async fn the_pilot_pipeline_runs_end_to_end_without_a_gpu() {
         llm: None,
     };
 
-    let direct = pilot::run_arm(run(backend.clone(), "rfdetr", false))
+    let direct = Box::pin(pilot::run_arm(run(backend.clone(), "rfdetr", false)))
         .await
         .unwrap();
     check("direkt", &direct);
 
     let gateway = start_gateway(&backend).await;
-    let governed = pilot::run_arm(run(gateway, "cam0", true)).await.unwrap();
+    let governed = Box::pin(pilot::run_arm(run(gateway, "cam0", true)))
+        .await
+        .unwrap();
     check("ueber den Governor", &governed);
 }

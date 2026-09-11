@@ -238,6 +238,29 @@ Verbindungsgrenze am Metrikport.
   Modells (100 ms bis 5 s), unter Druck gehen die aeltesten zuerst.
   Ablehnungen tragen `vig-reason` (`graph_full`, `capture_mismatch`, ...).
   Gefunden live von der ROS-2-Bruecke.
+- **Gueltige Samplingparameter wurden zu ungueltigem JSON** (Review R05).
+  Beim Zuschneiden eines generativen Auftrags ersetzte eine Textsuche
+  `max_tokens`; stand es nicht vorne, entstand
+  `{"max_tokens": 8, "temperature":0.7,}`. Die Parameter werden jetzt als
+  JSON gelesen und geschrieben (`serde_json`, ohnehin im Baum); nur das
+  oberste `max_tokens` zaehlt, ein verschachteltes oder eines in einem String
+  nicht mehr. Samplingparameter, die kein JSON-Objekt sind, werden nicht
+  repariert: der Auftrag laeuft ungeteilt.
+- **Der Pilot konnte einen Bildpuffer ueberschreiben, den noch jemand las**
+  (Review R03). Der Puffer war `Folgenummer % Anzahl`; die Semaphore
+  begrenzte nur die Zahl offener Auftraege. Jetzt ein Pool konkreter freier
+  Puffer (`pilot::RegionPool`): die Puffer-ID reist mit dem Auftrag, frei wird
+  er erst bei belegtem Ende, nach Timeout oder unbekanntem Ausgang nie
+  wieder. Neue Zaehler je Kamera: `buffers_exhausted`, `buffers_quarantined`.
+- **Die ROS-Bruecke gab ein Shared-Memory-Fach nach einem Timeout frei**
+  (Review R04), obwohl das Backend weiter lesen konnte. Nur ein belegtes Ende
+  gibt es jetzt frei; sonst Quarantaene, und wenn alle Faecher gesperrt sind,
+  eine neue Region (`shm_max_epochs`).
+- **Der volle Pilotlauf passte nicht in seine Frist** (Review R07, R08). Die
+  Standardmatrix braucht rund 80 min; das Werkzeug druckt die Schaetzung jetzt
+  vorab, schreibt jede Zelle sofort nach `cells.jsonl`, setzt nach einem
+  Abbruch fort und endet mit Exitcode 0 (bestanden), 1 (sauber gelaufen,
+  Kriterium verfehlt) oder 2 (Aufbau oder Lauf kaputt), dazu `summary.json`.
 - **Die Messwerkzeuge liefen ohne `TCP_NODELAY`.** Jedes Werkzeug, das einen
   Governor oder ein Mock-Backend im Prozess startet, band ueber
   `serve_with_incoming`, und dort uebergeht tonic die Einstellung. Nagle und

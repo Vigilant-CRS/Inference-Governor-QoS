@@ -177,12 +177,66 @@ docker run -d --name onetimer-vllm --device nvidia.com/gpu=all \
 
 cargo build --release -p vig-bench
 VIG_PILOT_DIR=… taskset -c 8-15 target/release/edge-pilot --smoke   # Funktionsprobe, ~2 min
-VIG_PILOT_DIR=… taskset -c 8-15 target/release/edge-pilot           # alles, ~75 min
+VIG_PILOT_DIR=… taskset -c 8-15 target/release/edge-pilot           # alles, ~80 min
 ```
 
 Optionen: `--scenario A,C`, `--seconds`, `--repeats`, `--caps 1,4`,
 `--no-llm`, `--triton HOST:PORT`, `--model NAME`, `--llm HOST:PORT`,
-`--dataset mot`.
+`--dataset mot`, `--out DIR`, `--fresh`.
+
+### Matrix und Dauer
+
+Ein Lauf ist **eine** Matrix: Lastpunkte × Wiederholungen × Arme ×
+Puffertiefen, jede Zelle `--seconds` lang. Voreinstellung: 4 × 3 × 3 × 2 = 72
+Zellen à 60 s, dazu rund 3 s je Zelle für Gatewaystart und Nachlauf und der
+Referenzdurchlauf (1–2 min): **rund 80 Minuten**. Das Werkzeug druckt die
+Schätzung vor dem Start und nach dem Referenzdurchlauf. Die Wiederholungen
+stecken schon in der Matrix; ein äußerer Runner fährt den Lauf **einmal**
+und gibt ihm mindestens 100 Minuten Frist. Bis zum 11.09. brach die
+Messkette ihn nach 30 Minuten ab und wiederholte ihn dreimal (Review R07).
+
+Kleiner geht es mit `--scenario`, `--repeats`, `--seconds` und `--caps`;
+eine verkleinerte Matrix beurteilt nur die Kriterien, deren Lastpunkte sie
+enthält.
+
+### Ablage und Wiederaufnahme
+
+`--out` (Voreinstellung `$VIG_PILOT_DIR/results/edge-pilot`) enthält:
+
+| Datei | Inhalt |
+|---|---|
+| `manifest.json` | der Aufbau (Datensatz, Detektor, Sprachmodell, Sekunden je Zelle) und die Referenzwerte des ersten Starts |
+| `cells.jsonl` | je Zelle eine Zeile, sofort geschrieben: Schlüssel, Gültigkeit, Kennzahlen, gesendet/geliefert/abgewiesen, erschöpfte und gesperrte Puffer |
+| `summary.json` | Status, Exitcode, jedes Kriterium mit Ergebnis |
+
+Ein erneuter Start mit derselben Ablage überspringt gültige Zellen und rechnet
+Raten und Profile mit den Referenzwerten des ersten Starts, damit spätere
+Zellen mit früheren vergleichbar bleiben. Ein anderer Aufbau in derselben
+Ablage wird abgelehnt; `--fresh` verwirft sie. Eine Zelle ohne eine einzige
+Lieferung gilt als Aufbaufehler: sie wird als ungültig abgelegt, der Lauf
+endet, und ein Neustart misst sie neu.
+
+### Exitcode
+
+| Code | Bedeutung |
+|---|---|
+| 0 | jedes ausgewertete Kriterium erfüllt, oder keines auswertbar (Teilmatrix) |
+| 1 | sauber gelaufen, mindestens ein Kriterium verfehlt — ein negatives Ergebnis, kein Fehler |
+| 2 | Aufbau oder Lauf kaputt: Backend nicht erreichbar, Zelle ohne Lieferung, Ablage nicht beschreibbar, Panik |
+
+Die Funktionsprobe (`--smoke`) kennt nur 0 und 2: zwölf Sekunden sind keine
+Abnahme.
+
+### Die Bildpuffer
+
+Jede Kamera hat so viele Shared-Memory-Puffer wie die größte Puffertiefe plus
+eins. Ein Puffer wird verliehen, reist mit dem Auftrag und kommt erst zurück,
+wenn sein Leser sicher fertig ist: bei einer Antwort, einer Ablehnung vor der
+Weitergabe oder einem Fehler, den das Backend selbst meldet. Nach einem
+Timeout oder einem unbekannten Ausgang bleibt er gesperrt. Ist kein Puffer
+frei, wird das Frame nicht gesendet (`buffers_exhausted`), statt eines zu
+überschreiben, das noch gelesen wird. Bis zum 11.09. wurde der Puffer reihum
+gewählt, und ein langsamer Leser konnte sein Bild verlieren (Review R03).
 
 Auf ruhiger Maschine, nicht neben einem Build. Ein weiterer Triton daneben
 belegt GPU-Speicher; für die Messung besser beenden. Die Ergebnisse gehören

@@ -30,12 +30,16 @@
     reason = "Metriken rechnen Zeiten und Anteile in Gleitkomma; die Werte sind klein und begrenzt"
 )]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Semaphore;
+use tonic::Code;
 use vig_gateway::cooperative::{SAMPLING_PARAMETERS, TEXT_INPUT};
+use vig_gateway::outcome::REASON_HEADER;
 use vig_protocol_oip::inference::infer_parameter::ParameterChoice;
 use vig_protocol_oip::inference::model_infer_request::InferInputTensor;
 use vig_protocol_oip::inference::{InferParameter, ModelInferRequest, ModelInferResponse};
@@ -754,6 +758,186 @@ pub struct CameraDef {
     pub ideal: Option<Arc<IdealTable>>,
 }
 
+/// Die Shared-Memory-Puffer einer Kamera, als Pool konkreter freier Puffer.
+///
+/// Bis zum Review vom 11.09. (R03) waehlte der Pilot den Puffer als
+/// `Folgenummer % Anzahl`. Die Semaphore begrenzt nur, **wie viele**
+/// Auftraege offen sind, nicht **welche** Puffer sie belegen: haelt ein
+/// langsamer Leser Puffer 0, laufen juengere Auftraege durch, und der sechste
+/// bekommt Puffer 0 wieder, waehrend der erste noch liest. Bildinhalt,
+/// Capture-ID und Annotation fallen dann auseinander. Jetzt reist die
+/// Puffer-ID mit dem Auftrag, und frei wird ein Puffer erst, wenn sein Leser
+/// sicher fertig ist.
+#[derive(Debug)]
+pub struct RegionPool {
+    regions: Vec<(String, PathBuf)>,
+    free: Mutex<VecDeque<usize>>,
+    quarantined: AtomicU64,
+}
+
+impl RegionPool {
+    /// Ein Pool ueber diese Regionen, alle frei.
+    #[must_use]
+    pub fn new(regions: Vec<(String, PathBuf)>) -> Arc<Self> {
+        let free = (0..regions.len()).collect();
+        Arc::new(Self {
+            regions,
+            free: Mutex::new(free),
+            quarantined: AtomicU64::new(0),
+        })
+    }
+
+    /// Ohne Regionen faehrt die Kamera den Kopierpfad.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.regions.is_empty()
+    }
+
+    /// Leiht den am laengsten freien Puffer aus; `None`, wenn keiner frei ist.
+    #[must_use]
+    pub fn lease(self: &Arc<Self>) -> Option<RegionLease> {
+        let index = self.free.lock().ok()?.pop_front()?;
+        Some(RegionLease {
+            pool: Arc::clone(self),
+            index,
+            settled: false,
+        })
+    }
+
+    /// Wie viele Puffer gerade frei sind.
+    #[must_use]
+    pub fn free(&self) -> usize {
+        self.free.lock().map_or(0, |free| free.len())
+    }
+
+    /// Wie viele Puffer gesperrt sind, weil ihr Leser nicht sicher fertig war.
+    #[must_use]
+    pub fn quarantined(&self) -> u64 {
+        self.quarantined.load(Ordering::Relaxed)
+    }
+}
+
+/// Ein ausgeliehener Puffer.
+///
+/// Er wird ausdruecklich beendet: [`Self::release`], wenn sein Leser sicher
+/// fertig ist, sonst [`Self::quarantine`]. Wer ihn fallen laesst, ohne das
+/// zu entscheiden — eine abgebrochene Aufgabe etwa —, sperrt ihn: unbekannt
+/// heisst nicht frei.
+#[derive(Debug)]
+pub struct RegionLease {
+    pool: Arc<RegionPool>,
+    index: usize,
+    settled: bool,
+}
+
+impl RegionLease {
+    /// Welcher Puffer des Pools.
+    #[must_use]
+    pub const fn index(&self) -> usize {
+        self.index
+    }
+
+    /// Der registrierte Name der Region.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        self.pool
+            .regions
+            .get(self.index)
+            .map_or("", |(name, _)| name.as_str())
+    }
+
+    /// Wohin der Tensor geschrieben wird.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        self.pool
+            .regions
+            .get(self.index)
+            .map_or_else(|| Path::new(""), |(_, path)| path.as_path())
+    }
+
+    /// Der Leser ist sicher fertig: zurueck in den Pool.
+    pub fn release(mut self) {
+        self.settled = true;
+        if let Ok(mut free) = self.pool.free.lock() {
+            free.push_back(self.index);
+        }
+    }
+
+    /// Ob noch jemand liest, ist unbekannt: der Puffer wird nie wieder
+    /// vergeben. Ein Timer waere kein Nachweis, dass der Leser fertig ist.
+    pub fn quarantine(mut self) {
+        self.settled = true;
+        self.pool.quarantined.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Gibt frei oder sperrt, je nach Ausgang des Auftrags.
+    ///
+    /// Gibt zurueck, ob der Puffer freigegeben wurde.
+    pub fn settle<T>(self, result: &Result<T, tonic::Status>) -> bool {
+        if reading_ended(result) {
+            self.release();
+            true
+        } else {
+            self.quarantine();
+            false
+        }
+    }
+}
+
+impl Drop for RegionLease {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.pool.quarantined.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Ob der Leser eines Eingabepuffers sicher fertig ist.
+///
+/// Ja bei einer Antwort, bei einer Ablehnung des Governors vor der
+/// Weitergabe und bei einem Fehler, den das Backend selbst gemeldet hat.
+/// Nein bei einem Timeout, einem unbekannten Ausgang, einem Abbruch, einem
+/// Transportfehler oder einem Grund, den dieser Client nicht kennt: dann kann
+/// das Backend noch rechnen und aus dem Puffer lesen.
+#[must_use]
+pub fn reading_ended<T>(result: &Result<T, tonic::Status>) -> bool {
+    let Err(status) = result else {
+        return true;
+    };
+    if let Some(reason) = status
+        .metadata()
+        .get(REASON_HEADER)
+        .and_then(|value| value.to_str().ok())
+    {
+        return matches!(
+            reason,
+            "superseded"
+                | "stale"
+                | "infeasible"
+                | "backend_failed"
+                | "capture_mismatch"
+                | "graph_full"
+                | "graph_quota"
+                | "unknown_parent"
+                | "duplicate_id"
+        );
+    }
+    // Ohne Grund: abgewiesen, bevor ein Backend den Puffer oeffnete, oder
+    // vom Backend beantwortet. Alles andere ist offen.
+    matches!(
+        status.code(),
+        Code::InvalidArgument
+            | Code::NotFound
+            | Code::ResourceExhausted
+            | Code::FailedPrecondition
+            | Code::PermissionDenied
+            | Code::Unauthenticated
+            | Code::AlreadyExists
+            | Code::OutOfRange
+            | Code::Unimplemented
+    )
+}
+
 /// Der Sprachmodellpfad — der langsame, semantische Lagebericht.
 #[derive(Debug, Clone)]
 pub struct LlmDef {
@@ -805,6 +989,11 @@ pub struct CameraReport {
     pub negative_deliveries: u64,
     /// Davon mit mindestens einem Zielobjekt — Fehlalarme.
     pub false_alarms: u64,
+    /// Frames, die nicht gesendet wurden, weil jeder Puffer belegt oder
+    /// gesperrt war.
+    pub buffers_exhausted: u64,
+    /// Puffer, die gesperrt wurden, weil ihr Leser nicht sicher fertig war.
+    pub buffers_quarantined: u64,
 }
 
 /// Das Ergebnis des Berichtspfads.
@@ -844,6 +1033,7 @@ struct CameraState {
     rejected: u64,
     negative_deliveries: u64,
     false_alarms: u64,
+    buffers_exhausted: u64,
 }
 
 fn to_core(d: Duration) -> vig_core::Duration {
@@ -995,8 +1185,19 @@ pub async fn run_arm(config: ArmConfig) -> Result<ArmReport, String> {
         .map(|_| Arc::new(Mutex::new(TickRecall::default())))
         .collect();
 
+    let pools: Vec<Arc<RegionPool>> = config
+        .cameras
+        .iter()
+        .map(|camera| RegionPool::new(camera.regions.clone()))
+        .collect();
     let mut tasks = Vec::new();
-    for (camera, state) in config.cameras.iter().cloned().zip(states.iter().cloned()) {
+    for ((camera, state), pool) in config
+        .cameras
+        .iter()
+        .cloned()
+        .zip(states.iter().cloned())
+        .zip(pools.iter().cloned())
+    {
         let client = try_connect(&config.endpoint)
             .await
             .map_err(|e| format!("{}: {e}", config.endpoint))?;
@@ -1007,7 +1208,6 @@ pub async fn run_arm(config: ArmConfig) -> Result<ArmReport, String> {
             let period = Duration::from_secs_f64(1.0 / camera.rate_hz.max(0.1));
             let mut ticker = tokio::time::interval(period);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let mut sequence_number = 0_u64;
             let frame_bytes = camera.size.saturating_mul(camera.size).saturating_mul(3);
             loop {
                 ticker.tick().await;
@@ -1026,19 +1226,24 @@ pub async fn run_arm(config: ArmConfig) -> Result<ArmReport, String> {
                     continue;
                 };
                 let tensor = frame_tensor(rgb, camera.size, camera.size);
-                let slot_index = usize::try_from(sequence_number)
-                    .unwrap_or(0)
-                    .checked_rem(camera.regions.len().max(1))
-                    .unwrap_or(0);
-                sequence_number = sequence_number.saturating_add(1);
-                let (slot, payload) = match camera.regions.get(slot_index) {
-                    Some((name, path)) => {
-                        if std::fs::write(path, &tensor).is_err() {
-                            continue;
+                let (lease, payload) = if pool.is_empty() {
+                    (None, Some(tensor))
+                } else {
+                    let Some(lease) = pool.lease() else {
+                        // Jeder Puffer ist belegt oder gesperrt: dann kein
+                        // Frame, statt einen zu ueberschreiben, den noch
+                        // jemand liest.
+                        if let Ok(mut s) = state.lock() {
+                            s.buffers_exhausted = s.buffers_exhausted.saturating_add(1);
                         }
-                        (Some(name.clone()), None)
+                        continue;
+                    };
+                    if std::fs::write(lease.path(), &tensor).is_err() {
+                        // Nichts gesendet, also liest ihn niemand.
+                        lease.release();
+                        continue;
                     }
-                    None => (None, Some(tensor)),
+                    (Some(lease), None)
                 };
                 if let Ok(mut s) = state.lock() {
                     s.sent = s.sent.saturating_add(1);
@@ -1052,12 +1257,15 @@ pub async fn run_arm(config: ArmConfig) -> Result<ArmReport, String> {
                     let request = detector_request(
                         &camera,
                         &id,
-                        slot.as_deref(),
+                        lease.as_ref().map(RegionLease::name),
                         payload,
                         capture.elapsed(),
                         via_governor,
                     );
                     let result = client.model_infer(request).await;
+                    if let Some(lease) = lease {
+                        let _ = lease.settle(&result);
+                    }
                     let delivered = Instant::now().duration_since(origin);
                     let Ok(mut s) = state.lock() else { return };
                     let Ok(response) = result.map(tonic::Response::into_inner) else {
@@ -1215,7 +1423,9 @@ pub async fn run_arm(config: ArmConfig) -> Result<ArmReport, String> {
         cameras: Vec::new(),
         llm,
     };
-    for ((camera, state), recall) in config.cameras.iter().zip(&states).zip(&recalls) {
+    for (((camera, state), recall), pool) in
+        config.cameras.iter().zip(&states).zip(&recalls).zip(&pools)
+    {
         let Ok(s) = state.lock() else { continue };
         report.cameras.push(CameraReport {
             name: camera.name.clone(),
@@ -1234,6 +1444,8 @@ pub async fn run_arm(config: ArmConfig) -> Result<ArmReport, String> {
             rejected: s.rejected,
             negative_deliveries: s.negative_deliveries,
             false_alarms: s.false_alarms,
+            buffers_exhausted: s.buffers_exhausted,
+            buffers_quarantined: pool.quarantined(),
         });
     }
     Ok(report)
@@ -1477,5 +1689,109 @@ mod tests {
         assert_eq!(seq.global_frame_at(Duration::from_millis(2_550)), 25);
         assert_eq!(seq.split(73), (1, 23));
         assert_eq!(seq.capture_offset(25), Duration::from_millis(2_500));
+    }
+
+    fn pool(n: usize) -> Arc<RegionPool> {
+        RegionPool::new(
+            (0..n)
+                .map(|k| (format!("r{k}"), PathBuf::from(format!("/dev/shm/r{k}"))))
+                .collect(),
+        )
+    }
+
+    fn with_reason(code: Code, reason: &str) -> Result<(), tonic::Status> {
+        let mut status = tonic::Status::new(code, "x");
+        status
+            .metadata_mut()
+            .insert(REASON_HEADER, reason.parse().unwrap());
+        Err(status)
+    }
+
+    /// Das Gegenbeispiel aus dem Review (R03), gegen den Pool.
+    ///
+    /// Vier offene Auftraege erlaubt, fuenf Puffer. A haelt Puffer 0; B bis E
+    /// benutzen die uebrigen und werden schnell fertig oder verdraengt. Mit
+    /// `Folgenummer % 5` bekam der sechste Auftrag Puffer 0, waehrend A noch
+    /// las, obwohl nie mehr als vier Auftraege offen waren. Der Pool gibt
+    /// einen gehaltenen Puffer nie heraus, gleich wie viele juengere
+    /// Auftraege durchlaufen.
+    #[test]
+    fn a_buffer_is_never_handed_out_while_its_old_reader_holds_it() {
+        let pool = pool(5);
+        let a = pool.lease().unwrap();
+        let held = a.index();
+        for round in 0..200 {
+            let younger: Vec<RegionLease> = (0..3).map(|_| pool.lease().unwrap()).collect();
+            assert!(younger.iter().all(|l| l.index() != held), "Runde {round}");
+            for (k, lease) in younger.into_iter().enumerate() {
+                // Fertig, verdraengt oder abgewiesen: alles belegte Enden.
+                let outcome = match k {
+                    0 => Ok(()),
+                    1 => with_reason(Code::Aborted, "superseded"),
+                    _ => with_reason(Code::Aborted, "stale"),
+                };
+                assert!(lease.settle(&outcome));
+            }
+        }
+        assert_eq!(pool.free(), 4);
+        a.release();
+        assert_eq!(pool.free(), 5);
+    }
+
+    /// Ein Puffer, dessen Leser nicht sicher fertig ist, kommt nie zurueck.
+    #[test]
+    fn a_buffer_with_an_unknown_end_is_never_reused() {
+        let pool = pool(2);
+        let a = pool.lease().unwrap();
+        let first = a.index();
+        assert!(!a.settle(&with_reason(Code::DeadlineExceeded, "backend_timeout")));
+        assert_eq!(pool.quarantined(), 1);
+        for _ in 0..10 {
+            let b = pool.lease().unwrap();
+            assert_ne!(b.index(), first);
+            b.release();
+        }
+        // Eine Aufgabe, die abbricht, ohne zu entscheiden: ebenfalls gesperrt.
+        drop(pool.lease().unwrap());
+        assert_eq!(pool.quarantined(), 2);
+        assert!(
+            pool.lease().is_none(),
+            "kein Puffer mehr: kein Frame statt eines zerrissenen"
+        );
+    }
+
+    #[test]
+    fn only_a_proven_end_frees_the_buffer() {
+        assert!(reading_ended::<()>(&Ok(())));
+        for reason in [
+            "superseded",
+            "stale",
+            "infeasible",
+            "backend_failed",
+            "graph_full",
+        ] {
+            assert!(
+                reading_ended(&with_reason(Code::Aborted, reason)),
+                "{reason}"
+            );
+        }
+        for reason in [
+            "execution_unknown",
+            "backend_timeout",
+            "cancelled",
+            "neu_und_unbekannt",
+        ] {
+            assert!(
+                !reading_ended(&with_reason(Code::Unavailable, reason)),
+                "{reason}"
+            );
+        }
+        let bare = |code| reading_ended::<()>(&Err(tonic::Status::new(code, "x")));
+        assert!(bare(Code::InvalidArgument) && bare(Code::ResourceExhausted));
+        assert!(
+            !bare(Code::Unavailable),
+            "Transportfehler: das Backend kann noch lesen"
+        );
+        assert!(!bare(Code::DeadlineExceeded) && !bare(Code::Cancelled) && !bare(Code::Unknown));
     }
 }

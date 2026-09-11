@@ -96,10 +96,22 @@ impl GenerativeJob {
     /// Legt einen Auftrag aus dem urspruenglichen Request an.
     ///
     /// Gibt `None` zurueck, wenn der Request keinen Texteingang hat — dann ist
-    /// er nicht zerlegbar, gleichgueltig was die Konfiguration sagt.
+    /// er nicht zerlegbar, gleichgueltig was die Konfiguration sagt. Ebenso,
+    /// wenn seine Samplingparameter kein JSON-Objekt sind: ein Quantum
+    /// daraus zu bauen hiesse, sie zu reparieren oder zu verwerfen, und
+    /// beides waere eine Entscheidung ueber das Ergebnis, die dem Client
+    /// gehoert. Ungeteilt entscheidet das Backend, was es damit tut.
     #[must_use]
     pub fn from_request(request: &ModelInferRequest, max_total_tokens: u32) -> Option<Self> {
         let prompt = read_text_input(request)?;
+        let declared_sampling =
+            read_sampling_parameters(request).filter(|text| !text.trim().is_empty());
+        if declared_sampling
+            .as_deref()
+            .is_some_and(|text| !is_json_object(text))
+        {
+            return None;
+        }
         let prompt_tokens = u32::try_from(prompt.len().div_ceil(4)).unwrap_or(u32::MAX);
         // Die Obergrenze des Clients gilt, wenn er eine nennt. Die
         // Konfiguration begrenzt, was der Betreiber zulaesst — sie darf
@@ -114,7 +126,7 @@ impl GenerativeJob {
             tokens: 0,
             prompt_tokens,
             max_total_tokens: effective,
-            declared_sampling: read_sampling_parameters(request),
+            declared_sampling,
             extra_inputs: extra_inputs(request),
             quanta: 0,
             last_requested_tokens: None,
@@ -186,24 +198,22 @@ impl GenerativeJob {
     /// und ausdruecklich kein erfundenes `temperature`, denn das waere eine
     /// Entscheidung ueber das Ergebnis, die dem Client gehoert.
     fn sampling_for(&self, tokens: u32) -> String {
-        let Some(declared) = &self.declared_sampling else {
+        // Strukturiert, nicht textuell. Die Textsuche davor machte aus
+        // `{"temperature":0.7,"max_tokens":64}` ein
+        // `{"max_tokens": 8, "temperature":0.7,}` — ungueltiges JSON, sobald
+        // `max_tokens` nicht vorne stand (Review R05). Ueber den Parser
+        // bleibt jeder Wert erhalten; es aendern sich nur Leerraum und die
+        // Reihenfolge der Schluessel, und beides hat in einem JSON-Objekt
+        // keine Bedeutung. `from_request` laesst nur Objekte herein.
+        let declared = self
+            .declared_sampling
+            .as_deref()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok());
+        let Some(serde_json::Value::Object(mut fields)) = declared else {
             return format!("{{\"max_tokens\": {tokens}}}");
         };
-        // Bewusst textuell und ohne JSON-Abhaengigkeit: der Wert wird
-        // unveraendert weitergereicht, nur das eine Feld ersetzt. Ein
-        // Umschreiben ueber einen Parser wuerde unbekannte Felder nach
-        // seinen eigenen Regeln neu formatieren.
-        let without = strip_max_tokens(declared);
-        let inner = without
-            .trim()
-            .trim_start_matches('{')
-            .trim_end_matches('}')
-            .trim();
-        if inner.is_empty() {
-            format!("{{\"max_tokens\": {tokens}}}")
-        } else {
-            format!("{{\"max_tokens\": {tokens}, {inner}}}")
-        }
+        fields.insert("max_tokens".to_owned(), serde_json::Value::from(tokens));
+        serde_json::Value::Object(fields).to_string()
     }
 
     /// Nimmt das Ergebnis eines Quantums auf.
@@ -316,35 +326,24 @@ pub fn read_sampling_parameters(request: &ModelInferRequest) -> Option<String> {
 
 /// Liest die vom Client angeforderte Tokenobergrenze.
 ///
-/// Bewusst ohne JSON-Parser: der einzige Wert, der hier gebraucht wird, ist
-/// eine Zahl hinter einem festen Schluessel. Eine Abhaengigkeit dafuer waere
-/// mehr Angriffsflaeche als Nutzen.
+/// Nur das Feld `max_tokens` auf oberster Ebene zaehlt. Die Textsuche davor
+/// fand auch ein `max_tokens` in einem verschachtelten Objekt oder in einem
+/// String (Review R05). Keine ganze Zahl, kein Objekt oder kein JSON heisst:
+/// keine Vorgabe des Clients, und es gilt die Obergrenze der Konfiguration.
 #[must_use]
 pub fn read_max_tokens(request: &ModelInferRequest) -> Option<u32> {
     let sampling = read_sampling_parameters(request)?;
-    let after = sampling.split("\"max_tokens\"").nth(1)?;
-    let digits: String = after
-        .trim_start()
-        .trim_start_matches(':')
-        .trim_start()
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect();
-    digits.parse().ok()
+    let value: serde_json::Value = serde_json::from_str(&sampling).ok()?;
+    let tokens = value.as_object()?.get("max_tokens")?.as_u64()?;
+    Some(u32::try_from(tokens).unwrap_or(u32::MAX))
 }
 
-/// Entfernt ein vorhandenes `max_tokens` aus den Samplingparametern.
-fn strip_max_tokens(sampling: &str) -> String {
-    let Some(start) = sampling.find("\"max_tokens\"") else {
-        return sampling.to_owned();
-    };
-    let rest = &sampling[start..];
-    let end = rest.find(',').map_or(rest.len(), |c| c.saturating_add(1));
-    let mut out = String::with_capacity(sampling.len());
-    out.push_str(&sampling[..start]);
-    out.push_str(&rest[end..]);
-    // Ein hinterbliebenes Komma vor der schliessenden Klammer.
-    out.replace(", }", " }").replace(",}", "}")
+/// Ob die Samplingparameter ein JSON-Objekt sind.
+fn is_json_object(sampling: &str) -> bool {
+    matches!(
+        serde_json::from_str::<serde_json::Value>(sampling),
+        Ok(serde_json::Value::Object(_))
+    )
 }
 
 /// Alle Eingaben ausser Text und Samplingparametern, mit ihren Rohdaten.
@@ -433,11 +432,105 @@ mod tests {
         assert_eq!(job.max_total_tokens, 4);
 
         let quantum = job.build_quantum(&request, 32);
-        let sampling = read_sampling_parameters(&quantum).unwrap();
         assert_eq!(read_max_tokens(&quantum), Some(4));
+        assert_eq!(
+            sampling_of(&quantum).get("temperature"),
+            Some(&serde_json::json!(0.7)),
+            "und seine uebrigen Vorgaben reisen unveraendert mit"
+        );
+    }
+
+    fn with_sampling(sampling: &str) -> ModelInferRequest {
+        let mut request = request_with("Beschreibe: ");
+        request.inputs.push(text_tensor(SAMPLING_PARAMETERS, ""));
+        request.raw_input_contents.push(length_prefixed(sampling));
+        request
+    }
+
+    fn sampling_of(request: &ModelInferRequest) -> serde_json::Map<String, serde_json::Value> {
+        let text = read_sampling_parameters(request).unwrap();
+        match serde_json::from_str(&text) {
+            Ok(serde_json::Value::Object(fields)) => fields,
+            other => panic!("kein JSON-Objekt: {text} ({other:?})"),
+        }
+    }
+
+    /// Die Samplingparameter bleiben gueltiges JSON, gleich wo `max_tokens`
+    /// steht (Review R05).
+    ///
+    /// Stand es nicht vorne, entfernte die Textsuche mit dem letzten Feld auch
+    /// die schliessende Klammer, und die Kommabereinigung sah das
+    /// hinterbliebene Komma nicht: `{"max_tokens": 8, "temperature":0.7,}`.
+    /// Ein verschachteltes `max_tokens` oder eines in einem String ist nicht
+    /// die Vorgabe des Clients und bleibt, wie es war.
+    #[test]
+    fn the_sampling_stays_valid_json_whatever_the_field_order() {
+        let cases = [
+            r#"{"temperature":0.7,"max_tokens":64}"#,
+            r#"{"max_tokens":64,"temperature":0.7}"#,
+            r#"{ "top_p": 0.9, "max_tokens": 64 , "seed": 7 }"#,
+            r#"{"extra":{"max_tokens":999},"max_tokens":64,"n":1}"#,
+            r#"{"stop":["\"max_tokens\": 3", "}"],"max_tokens":64}"#,
+            r#"{"temperature":0.2}"#,
+            "{}",
+        ];
+        for declared in cases {
+            let request = with_sampling(declared);
+            let mut job = GenerativeJob::from_request(&request, 64)
+                .unwrap_or_else(|| panic!("zerlegbar: {declared}"));
+            let quantum = job.build_quantum(&request, 8);
+            let mut sent = sampling_of(&quantum);
+            assert_eq!(
+                sent.remove("max_tokens"),
+                Some(serde_json::json!(8)),
+                "{declared}"
+            );
+            let mut original: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_str(declared).unwrap();
+            original.remove("max_tokens");
+            assert_eq!(
+                sent, original,
+                "alle uebrigen Felder unveraendert: {declared}"
+            );
+        }
+    }
+
+    /// Nur das oberste `max_tokens` ist die Vorgabe des Clients.
+    #[test]
+    fn only_the_top_level_max_tokens_is_the_clients_limit() {
+        let read = |sampling: &str| read_max_tokens(&with_sampling(sampling));
+        assert_eq!(read(r#"{"temperature":0.7,"max_tokens":12}"#), Some(12));
+        assert_eq!(
+            read(r#"{"extra":{"max_tokens":999},"max_tokens":12}"#),
+            Some(12)
+        );
+        assert_eq!(read(r#"{"extra":{"max_tokens":999}}"#), None);
+        assert_eq!(read(r#"{"stop":"\"max_tokens\": 3"}"#), None);
+        assert_eq!(
+            read(r#"{"max_tokens":"12"}"#),
+            None,
+            "ein String ist keine Zahl"
+        );
+        assert_eq!(read("kein json"), None);
+    }
+
+    /// Samplingparameter, die kein JSON-Objekt sind, werden nicht repariert.
+    ///
+    /// Ein Quantum daraus zu bauen hiesse, sie zu korrigieren oder
+    /// wegzuwerfen. Der Auftrag laeuft ungeteilt; was das Backend mit
+    /// kaputten Parametern tut, entscheidet das Backend.
+    #[test]
+    fn sampling_that_is_not_a_json_object_is_not_split() {
+        for broken in [r#"{"max_tokens": 4,"#, "[1, 2]", "\"text\"", "max_tokens=4"] {
+            assert!(
+                GenerativeJob::from_request(&with_sampling(broken), 64).is_none(),
+                "{broken}"
+            );
+        }
+        let empty = GenerativeJob::from_request(&with_sampling("  "), 64).unwrap();
         assert!(
-            sampling.contains("\"temperature\": 0.7"),
-            "und seine uebrigen Vorgaben reisen unveraendert mit: {sampling}"
+            empty.declared_sampling.is_none(),
+            "leer heisst: keine Vorgabe"
         );
     }
 

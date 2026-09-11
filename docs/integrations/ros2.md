@@ -43,7 +43,8 @@ bridge asks it for their input shape at start-up.
 | `capture_groups` | — | topics in the same group that fire together share a capture id |
 | `supersession_keys` | — | one key per camera: a newer frame replaces an older one with the same key |
 | `transport` | `auto` | `shm`, `copy`, or `auto` (shared memory when the governor is on loopback) |
-| `shm_slots` | `4` | shared-memory slots per camera; a slot is reused only after its request is answered |
+| `shm_slots` | `4` | shared-memory slots per camera; a slot is reused only after its request has provably ended, see [shared memory](#shared-memory) |
+| `shm_max_epochs` | `4` | how often a camera may start a new region when every slot of the old one is quarantined |
 | `age_source` | `stamp` | `stamp`: age from `header.stamp`; `arrival`: send no age, the governor counts from arrival |
 | `max_clock_skew_us` | `10000` | a stamp further in the future than this is reported as clock skew |
 | `capture_tolerance_us` | `1000` | how close two stamps in one group must be to count as one capture |
@@ -111,9 +112,25 @@ For camera frames this is the path the product is measured on — the copy path
 costs a multiple ([datapath budgets](../datapath-budgets.md)).
 
 Each camera gets one region with `shm_slots` slots. A slot is reused only once
-the request that uses it has been answered; with one slot, a new frame would
-overwrite the one the backend may still be reading. If every slot is busy, the
-new frame is not sent and counted as `client_backpressure`.
+the request that uses it has **provably** ended; with one slot, a new frame
+would overwrite the one the backend may still be reading. If every slot is
+busy, the new frame is not sent and counted as `client_backpressure`.
+
+An answer alone is not proof. After `backend_timeout`, `execution_unknown`, a
+cancellation or a transport error the backend may still be computing and
+reading the slot — the governor keeps its execution credit for exactly that
+reason. Such a slot goes into **quarantine** and is never handed out again
+(`slot_quarantined`); a timer would not prove the reader finished. A slot is
+freed by a delivered result, by a refusal the governor made before
+forwarding (`superseded`, `stale`, `infeasible`, capacity, graph) and by an
+error the backend reported itself. Until 11 September every answer freed the
+slot, timeouts included (review R04).
+
+When every slot of a region is quarantined, the camera starts a new region
+(`shm_new_epoch`, at most `shm_max_epochs` times, default 4). The old region is
+never written again and stays registered and mapped until the bridge shuts
+down. After the last epoch the camera stays in backpressure and
+`shm_epochs_exhausted` counts the frames it drops.
 
 In containers, bridge, governor and backend must share `/dev/shm`
 (`--ipc=host` or a common IPC namespace). An address that only looks local —

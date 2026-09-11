@@ -37,12 +37,20 @@ from .oip import GovernorClient, InferResult, ShmRegion
 
 
 class _CameraState:
-    def __init__(self, camera: Camera, spec, region: Optional[ShmRegion], ring: Optional[SlotRing], publisher) -> None:
+    def __init__(self, index: int, camera: Camera, spec, region: Optional[ShmRegion], ring: Optional[SlotRing], publisher) -> None:
+        self.index = index
         self.camera = camera
         self.spec = spec
         self.region = region
         self.ring = ring
         self.publisher = publisher
+        # Region und Ring wechseln gemeinsam (neue Epoche); wer ein Fach
+        # vergibt und beschreibt, haelt diese Sperre.
+        self.lock = threading.Lock()
+        self.epoch = 0
+        # Regionen frueherer Epochen: nie wieder beschrieben, bis zum Ende
+        # registriert und eingeblendet, weil ihr Leser nicht sicher fertig ist.
+        self.retired: List[ShmRegion] = []
 
 
 class VigBridge(Node):
@@ -60,6 +68,9 @@ class VigBridge(Node):
         p("supersession_keys", [0])
         p("transport", "auto")  # auto | shm | copy
         p("shm_slots", 4)
+        # Wie oft eine Kamera eine neue Region anlegen darf, wenn alle Faecher
+        # der alten in Quarantaene sind (unbekanntes Ende ihres Lesers).
+        p("shm_max_epochs", 4)
         p("age_source", "stamp")  # stamp | arrival
         p("max_clock_skew_us", 10_000)
         p("capture_tolerance_us", 1_000)
@@ -100,6 +111,8 @@ class VigBridge(Node):
         self._scale = float(get("scale"))
         self._fill_batch = bool(get("fill_batch"))
         self._send_capture_id = bool(get("send_capture_id"))
+        self._shm_slots = int(get("shm_slots"))
+        self._max_epochs = int(get("shm_max_epochs"))
 
         self._client = client or GovernorClient(
             self._governor, timeout_s=float(get("timeout_s")), token=get("token") or None
@@ -117,11 +130,11 @@ class VigBridge(Node):
             spec = self._client.input_spec(camera.model, self._layout)
             region = ring = None
             if self._use_shm:
-                region = ShmRegion(f"vig_bridge_{index}_{camera.model}", spec.byte_size, int(get("shm_slots")))
+                region = ShmRegion(f"vig_bridge_{index}_{camera.model}", spec.byte_size, self._shm_slots)
                 self._client.register_region(region)
                 ring = SlotRing(region.slots)
             publisher = self.create_publisher(String, camera.topic.rstrip("/") + "/vig/result", 10)
-            state = _CameraState(camera, spec, region, ring, publisher)
+            state = _CameraState(index, camera, spec, region, ring, publisher)
             self._states.append(state)
             self.create_subscription(
                 Image,
@@ -153,13 +166,22 @@ class VigBridge(Node):
         request_id = self._ids.next()
         slot = None
         offset = 0
-        if state.ring is not None:
-            slot = state.ring.acquire()
+        # Region und Ring dieses Requests: der Callback gibt das Fach an den
+        # Ring zurueck, aus dem es kam, auch wenn die Kamera inzwischen eine
+        # neue Epoche hat.
+        region, ring = state.region, state.ring
+        if ring is not None:
+            with state.lock:
+                if state.ring.exhausted_by_quarantine:
+                    self._new_epoch(state)
+                region, ring = state.region, state.ring
+                slot = ring.acquire()
+                if slot is not None:
+                    offset = region.write(slot, tensor.tobytes())
             if slot is None:
                 self._count("client_backpressure")
                 self._event("backpressure", camera, None, request_id, "alle Faecher belegt")
                 return
-            offset = state.region.write(slot, tensor.tobytes())
 
         # Das Alter im Moment des Absendens, nicht beim Empfang: die Zeit fuer
         # Umwandlung und Kopie gehoert dazu.
@@ -179,18 +201,43 @@ class VigBridge(Node):
 
         request = self._client.build_request(
             camera.model, state.spec, request_id, params,
-            tensor=None if state.region is not None else tensor,
-            region=state.region, offset=offset,
+            tensor=None if region is not None else tensor,
+            region=region, offset=offset,
         )
         self._count("sent")
         self._client.infer_async(
             request,
-            lambda result: self._on_result(state, slot, request_id, capture, stamp_ns, age, result),
+            lambda result: self._on_result(state, ring, slot, request_id, capture, stamp_ns, age, result),
         )
 
-    def _on_result(self, state, slot, request_id, capture, stamp_ns, age, result: InferResult) -> None:
-        if slot is not None:
-            state.ring.release(slot)
+    def _new_epoch(self, state: _CameraState) -> None:
+        """Eine neue Region, weil jedes Fach der alten in Quarantaene ist.
+
+        Die alte wird nicht beschrieben, nicht abgemeldet und nicht
+        geschlossen: ihre Leser sind nicht sicher fertig. Sie endet mit dem
+        Knoten. Die Zahl der Epochen ist begrenzt; danach bleibt es beim
+        Backpressure, und der Betreiber sieht `shm_epochs_exhausted`.
+        Aufgerufen im Bildpfad unter `state.lock`, nie im gRPC-Callback.
+        """
+        if state.epoch >= self._max_epochs:
+            self._count("shm_epochs_exhausted")
+            return
+        state.epoch += 1
+        region = ShmRegion(
+            f"vig_bridge_{state.index}_{state.camera.model}_e{state.epoch}",
+            state.spec.byte_size,
+            self._shm_slots,
+        )
+        self._client.register_region(region)
+        state.retired.append(state.region)
+        state.region, state.ring = region, SlotRing(region.slots)
+        self._count("shm_new_epoch")
+        self._event("shm_new_epoch", state.camera, None, None, f"Epoche {state.epoch}: alle Faecher in Quarantaene")
+
+    def _on_result(self, state, ring, slot, request_id, capture, stamp_ns, age, result: InferResult) -> None:
+        if slot is not None and not ring.settle(slot, result.outcome):
+            # Der Leser ist nicht sicher fertig: das Fach bleibt gesperrt.
+            self._count("slot_quarantined")
         self._count(result.outcome.value)
         if result.outcome in (Outcome.DELIVERED, Outcome.DELIVERED_OBSOLETE):
             payload = {
@@ -244,9 +291,10 @@ class VigBridge(Node):
 
     def shutdown(self) -> None:
         for state in self._states:
-            if state.region is not None:
-                self._client.unregister_region(state.region)
-                state.region.close()
+            for region in [*state.retired, state.region]:
+                if region is not None:
+                    self._client.unregister_region(region)
+                    region.close()
         self._client.close()
 
 

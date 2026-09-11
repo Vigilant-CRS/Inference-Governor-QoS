@@ -230,6 +230,50 @@ def test_releasing_twice_does_not_create_a_phantom_slot():
     assert ring.free == 1
 
 
+_UNKNOWN_END = {
+    Outcome.EXECUTION_UNKNOWN,
+    Outcome.BACKEND_TIMEOUT,
+    Outcome.CANCELLED,
+    Outcome.TRANSPORT,
+    Outcome.UNKNOWN,
+}
+
+
+@pytest.mark.parametrize("outcome", list(Outcome))
+def test_only_a_proven_end_frees_the_input_buffer(outcome):
+    assert outcome.ends_reading is (outcome not in _UNKNOWN_END)
+
+
+def test_a_slot_whose_reader_may_still_run_is_never_handed_out_again():
+    # Das Gegenbeispiel aus dem Review (R04): nach BACKEND_TIMEOUT liess sich
+    # dasselbe Fach sofort wieder ausleihen, waehrend das Backend noch lesen
+    # konnte.
+    ring = SlotRing(1)
+    held = ring.acquire()
+    assert not ring.settle(held, Outcome.BACKEND_TIMEOUT)
+    assert ring.acquire() is None, "gesperrt, nicht frei"
+    ring.release(held)
+    assert ring.acquire() is None, "ein spaeteres release hebt die Quarantaene nicht auf"
+    assert ring.quarantined == 1
+
+
+def test_a_proven_end_returns_the_slot():
+    ring = SlotRing(2)
+    for outcome in (Outcome.DELIVERED, Outcome.STALE, Outcome.BACKEND_FAILED):
+        slot = ring.acquire()
+        assert ring.settle(slot, outcome)
+    assert ring.free == 2 and ring.quarantined == 0
+
+
+def test_a_region_whose_slots_are_all_quarantined_needs_a_new_epoch():
+    ring = SlotRing(2)
+    ring.settle(ring.acquire(), Outcome.EXECUTION_UNKNOWN)
+    assert not ring.exhausted_by_quarantine
+    ring.settle(ring.acquire(), Outcome.TRANSPORT)
+    assert ring.exhausted_by_quarantine
+    assert ring.acquire() is None
+
+
 @pytest.mark.parametrize(
     "endpoint, local",
     [("127.0.0.1:9001", True), ("localhost:9001", True), ("[::1]:9001", True), ("10.0.0.5:9001", False), ("governor:9001", False)],

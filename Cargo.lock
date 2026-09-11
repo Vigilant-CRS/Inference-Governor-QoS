@@ -1450,6 +1450,7 @@ dependencies = [
 name = "vig-bench"
 version = "0.2.0"
 dependencies = [
+ "serde_json",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -1498,6 +1499,7 @@ name = "vig-gateway"
 version = "0.2.0"
 dependencies = [
  "axum",
+ "serde_json",
  "tempfile",
  "tokio",
  "tokio-stream",

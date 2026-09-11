@@ -19,6 +19,20 @@
 //!    Vigilant ohne Bericht (fuer K5). Je Arm die bessere Puffertiefe.
 //! 4. **Urteil** gegen die vor der Messung festgelegten Kriterien K1–K7.
 //!
+//! ## Ablage, Wiederaufnahme, Exitcode
+//!
+//! Jede Zelle — Lastpunkt, Wiederholung, Arm, Puffertiefe — steht als eine
+//! JSON-Zeile in `<out>/cells.jsonl`, sobald sie gemessen ist. Ein erneuter
+//! Start mit demselben `--out` ueberspringt gueltige Zellen; Raten und
+//! Profile kommen dann aus dem ersten Referenzdurchlauf (`manifest.json`),
+//! damit spaetere Zellen mit frueheren vergleichbar bleiben. Vor dem Start
+//! steht die geschaetzte Dauer im Protokoll, am Ende `summary.json`.
+//!
+//! Exitcode: 0 alle Kriterien erfuellt (oder keines auswertbar), 1 sauber
+//! gelaufen und mindestens ein Kriterium verfehlt, 2 Aufbau oder Lauf
+//! kaputt. Die Funktionsprobe (`--smoke`) kennt nur 0 und 2: zwoelf Sekunden
+//! sind keine Abnahme.
+//!
 //! ## Was dieses Werkzeug nicht tut
 //!
 //! Es liest nur vorbereitete Daten: sie kommen aus
@@ -27,6 +41,7 @@
 
 #![allow(
     clippy::print_stdout,
+    clippy::print_stderr,
     clippy::arithmetic_side_effects,
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
@@ -42,7 +57,12 @@
     clippy::too_many_arguments
 )]
 
+use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use vig_backend_triton::TritonClient;
@@ -92,6 +112,44 @@ struct Options {
     llm_model: String,
     /// Hoechstens so viele Kameras laden (die Funktionsprobe braucht zwei).
     max_cameras: usize,
+    /// Die Ablage; ohne Angabe unter `VIG_PILOT_DIR/results`.
+    out: Option<String>,
+    /// Eine vorhandene Ablage verwerfen statt fortzusetzen.
+    fresh: bool,
+    /// Die Funktionsprobe: kurz, und ohne fachliches Urteil im Exitcode.
+    smoke: bool,
+}
+
+impl Options {
+    fn out_dir(&self) -> PathBuf {
+        self.out.as_ref().map_or_else(
+            || {
+                let leaf = if self.smoke {
+                    "edge-pilot-smoke"
+                } else {
+                    "edge-pilot"
+                };
+                PathBuf::from(format!("{}/results/{leaf}", pilot_dir()))
+            },
+            PathBuf::from,
+        )
+    }
+
+    /// Was eine Zelle bestimmt: ein Lauf darf nur mit demselben Aufbau
+    /// fortgesetzt werden. Lastpunkte, Wiederholungen und Puffertiefen
+    /// duerfen sich aendern — jede Zelle steht fuer sich.
+    fn setup(&self) -> Value {
+        json!({
+            "dataset": format!("{:?}", self.dataset),
+            "data": self.data,
+            "seconds": self.seconds,
+            "detector": self.detector,
+            "model": self.model,
+            "llm": self.llm,
+            "llm_model": self.llm_model,
+            "max_cameras": self.max_cameras,
+        })
+    }
 }
 
 fn options() -> Options {
@@ -107,6 +165,9 @@ fn options() -> Options {
         llm: Some("127.0.0.1:8011".to_owned()),
         llm_model: "qwen".to_owned(),
         max_cameras: 4,
+        out: None,
+        fresh: false,
+        smoke: false,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -158,7 +219,13 @@ fn options() -> Options {
                 i += 1;
             }
             "--no-llm" => o.llm = None,
+            "--out" => {
+                o.out = Some(value);
+                i += 1;
+            }
+            "--fresh" => o.fresh = true,
             "--smoke" => {
+                o.smoke = true;
                 o.seconds = 12;
                 o.repeats = 1;
                 o.scenarios = vec!["A".to_owned()];
@@ -483,6 +550,15 @@ impl Arm {
             Self::VigilantNoReport => "Vigilant ohne Bericht",
         }
     }
+
+    /// Der Name in der Ablage.
+    const fn id(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Vigilant => "vigilant",
+            Self::VigilantNoReport => "vigilant_no_report",
+        }
+    }
 }
 
 /// Die Kennzahlen eines Laufs, ueber alle Kameras zusammengefasst.
@@ -500,6 +576,43 @@ struct Summary {
     reports_per_min: u64,
     report_ms_p50: u64,
     report_basis_age_ms_p50: u64,
+}
+
+impl Summary {
+    fn to_json(&self) -> Value {
+        json!({
+            "alarm_p50": self.alarm_p50,
+            "alarm_p95": self.alarm_p95,
+            "alarm_max": self.alarm_max,
+            "missed_permille": self.missed_permille,
+            "recall_permille": self.recall_permille,
+            "ideal_permille": self.ideal_permille,
+            "false_alarm_permille": self.false_alarm_permille,
+            "coverage_permille": self.coverage_permille,
+            "longest_gap_ms": self.longest_gap_ms,
+            "reports_per_min": self.reports_per_min,
+            "report_ms_p50": self.report_ms_p50,
+            "report_basis_age_ms_p50": self.report_basis_age_ms_p50,
+        })
+    }
+
+    fn from_json(value: &Value) -> Option<Self> {
+        let get = |key: &str| value.get(key).and_then(Value::as_u64);
+        Some(Self {
+            alarm_p50: get("alarm_p50")?,
+            alarm_p95: get("alarm_p95")?,
+            alarm_max: get("alarm_max")?,
+            missed_permille: get("missed_permille")?,
+            recall_permille: get("recall_permille")?,
+            ideal_permille: get("ideal_permille")?,
+            false_alarm_permille: get("false_alarm_permille")?,
+            coverage_permille: get("coverage_permille")?,
+            longest_gap_ms: get("longest_gap_ms")?,
+            reports_per_min: get("reports_per_min")?,
+            report_ms_p50: get("report_ms_p50")?,
+            report_basis_age_ms_p50: get("report_basis_age_ms_p50")?,
+        })
+    }
 }
 
 /// Die Laeufe je Arm eines Lastpunkts.
@@ -559,17 +672,286 @@ fn median_of(values: &[Summary], f: impl Fn(&Summary) -> u64) -> (u64, u64, u64)
     )
 }
 
-fn main() {
+/// Geschaetzter Aufwand je Zelle neben der Messdauer: Gateway starten,
+/// Nachlauf offener Auftraege, Drain.
+const CELL_OVERHEAD_S: u64 = 3;
+
+fn cell_key(scenario: &str, repeat: usize, arm: Arm, cap: usize) -> String {
+    format!("{scenario}/{}/{}/{cap}", repeat + 1, arm.id())
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+fn arms_for(options: &Options) -> Vec<Arm> {
+    if options.llm.is_some() {
+        vec![Arm::Direct, Arm::Vigilant, Arm::VigilantNoReport]
+    } else {
+        vec![Arm::Direct, Arm::Vigilant]
+    }
+}
+
+fn write_json(path: &Path, value: &Value) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
+    std::fs::write(path, text + "\n").map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Die Ablage eines Laufs (siehe Moduldoku).
+struct Store {
+    dir: PathBuf,
+    manifest: Value,
+    /// Gueltige, schon gemessene Zellen.
+    done: HashMap<String, Summary>,
+}
+
+impl Store {
+    fn open(options: &Options) -> Result<Self, String> {
+        let dir = options.out_dir();
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        if options.fresh {
+            for name in ["manifest.json", "cells.jsonl", "summary.json"] {
+                match std::fs::remove_file(dir.join(name)) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(format!("{name}: {e}")),
+                }
+            }
+        }
+        let setup = options.setup();
+        let manifest = match std::fs::read_to_string(dir.join("manifest.json")) {
+            Ok(text) => {
+                let manifest: Value =
+                    serde_json::from_str(&text).map_err(|e| format!("manifest.json: {e}"))?;
+                if manifest.get("setup") != Some(&setup) {
+                    return Err(format!(
+                        "{}: angefangener Lauf mit anderem Aufbau ({} gegen {setup}); \
+                         --fresh verwirft ihn, --out waehlt eine andere Ablage",
+                        dir.display(),
+                        manifest.get("setup").unwrap_or(&Value::Null)
+                    ));
+                }
+                manifest
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let manifest = json!({ "setup": setup, "created_unix": unix_now() });
+                write_json(&dir.join("manifest.json"), &manifest)?;
+                manifest
+            }
+            Err(e) => return Err(format!("manifest.json: {e}")),
+        };
+        let mut done = HashMap::new();
+        let mut unreadable = 0_usize;
+        if let Ok(text) = std::fs::read_to_string(dir.join("cells.jsonl")) {
+            for line in text.lines().filter(|l| !l.trim().is_empty()) {
+                // Eine halbe letzte Zeile nach einem Abbruch ist kein Ergebnis.
+                let Ok(cell) = serde_json::from_str::<Value>(line) else {
+                    unreadable += 1;
+                    continue;
+                };
+                if cell.get("valid") != Some(&Value::Bool(true)) {
+                    continue;
+                }
+                if let (Some(key), Some(summary)) = (
+                    cell.get("key").and_then(Value::as_str),
+                    cell.get("summary").and_then(Summary::from_json),
+                ) {
+                    done.insert(key.to_owned(), summary);
+                }
+            }
+        }
+        if unreadable > 0 {
+            println!("  {unreadable} unlesbare Zeile(n) in cells.jsonl uebersprungen");
+        }
+        Ok(Self {
+            dir,
+            manifest,
+            done,
+        })
+    }
+
+    /// Die Referenzwerte, mit denen Raten und Profile dieser Ablage rechnen:
+    /// die des ersten Starts, sonst die gerade gemessenen. Eine Zelle aus
+    /// einem spaeteren Start faehrt so dieselbe Rate wie ihre Nachbarn.
+    fn reference(&mut self, measured: [u64; 4]) -> Result<[u64; 4], String> {
+        let stored = self.manifest.get("reference").and_then(|r| {
+            let get = |key: &str| r.get(key).and_then(Value::as_u64);
+            Some([
+                get("p50_us")?,
+                get("p95_us")?,
+                get("p99_us")?,
+                get("samples")?,
+            ])
+        });
+        if let Some(stored) = stored {
+            return Ok(stored);
+        }
+        let [p50, p95, p99, samples] = measured;
+        if let Some(object) = self.manifest.as_object_mut() {
+            object.insert(
+                "reference".to_owned(),
+                json!({ "p50_us": p50, "p95_us": p95, "p99_us": p99, "samples": samples }),
+            );
+        }
+        write_json(&self.dir.join("manifest.json"), &self.manifest)?;
+        Ok(measured)
+    }
+
+    /// Haengt eine Zelle an, sofort und bis auf die Platte.
+    fn record(&self, cell: &Value) -> Result<(), String> {
+        let path = self.dir.join("cells.jsonl");
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        writeln!(file, "{cell}")
+            .and_then(|()| file.sync_data())
+            .map_err(|e| format!("{}: {e}", path.display()))
+    }
+}
+
+/// Eine Zelle fuer die Ablage.
+fn cell_json(
+    key: &str,
+    scenario: &str,
+    repeat: usize,
+    arm: Arm,
+    cap: usize,
+    seconds: u64,
+    measured: Option<(&ArmReport, &Summary)>,
+    problem: Option<&str>,
+) -> Value {
+    let total = |f: fn(&pilot::CameraReport) -> u64| {
+        measured.map(|(report, _)| report.cameras.iter().map(f).sum::<u64>())
+    };
+    json!({
+        "key": key,
+        "scenario": scenario,
+        "repeat": repeat + 1,
+        "arm": arm.id(),
+        "cap": cap,
+        "seconds": seconds,
+        "valid": problem.is_none(),
+        "problem": problem,
+        "summary": measured.map(|(_, summary)| summary.to_json()),
+        "sent": total(|c| c.sent),
+        "delivered": total(|c| c.delivered),
+        "rejected": total(|c| c.rejected),
+        "buffers_exhausted": total(|c| c.buffers_exhausted),
+        "buffers_quarantined": total(|c| c.buffers_quarantined),
+        "llm_reports": measured.map(|(report, _)| report.llm.reports),
+        "llm_failed": measured.map(|(report, _)| report.llm.failed),
+        "finished_unix": unix_now(),
+    })
+}
+
+/// Ein Abnahmekriterium und sein Ergebnis.
+struct Criterion {
+    k: &'static str,
+    text: String,
+    ok: bool,
+}
+
+/// Wie ein Lauf endete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunStatus {
+    /// Jedes ausgewertete Kriterium erfuellt.
+    Met,
+    /// Sauber gelaufen, mindestens ein Kriterium verfehlt.
+    Missed,
+    /// Sauber gelaufen, aber kein Kriterium auswertbar (Teilmatrix).
+    NoVerdict,
+    /// Aufbau oder Lauf kaputt: das Ergebnis sagt nichts ueber den Governor.
+    Broken,
+}
+
+impl RunStatus {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Met => "bestanden",
+            Self::Missed => "verfehlt",
+            Self::NoVerdict => "ohne_urteil",
+            Self::Broken => "kaputt",
+        }
+    }
+
+    /// 0, 1 oder 2; die Funktionsprobe faellt fachlich nie durch.
+    const fn exit(self, smoke: bool) -> u8 {
+        match self {
+            Self::Met | Self::NoVerdict => 0,
+            Self::Missed => {
+                if smoke {
+                    0
+                } else {
+                    1
+                }
+            }
+            Self::Broken => 2,
+        }
+    }
+}
+
+fn write_summary(
+    dir: &Path,
+    status: RunStatus,
+    smoke: bool,
+    criteria: &[Criterion],
+    problem: Option<&str>,
+    run: &Value,
+) {
+    let summary = json!({
+        "status": status.label(),
+        "exit": status.exit(smoke),
+        "smoke": smoke,
+        "problem": problem,
+        "criteria": criteria
+            .iter()
+            .map(|c| json!({ "k": c.k, "text": c.text, "ok": c.ok }))
+            .collect::<Vec<_>>(),
+        "run": run,
+        "finished_unix": unix_now(),
+    });
+    if let Err(e) = write_json(&dir.join("summary.json"), &summary) {
+        eprintln!("summary.json: {e}");
+    }
+}
+
+fn main() -> ExitCode {
+    // Jede Panik ist ein kaputter Aufbau oder Lauf und nie ein fachliches
+    // Ergebnis: Exitcode 2, und die Ablage sagt es auch.
+    let Ok(options) = std::panic::catch_unwind(options) else {
+        return ExitCode::from(RunStatus::Broken.exit(false));
+    };
+    let dir = options.out_dir();
+    let smoke = options.smoke;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .thread_stack_size(8 * 1024 * 1024)
         .enable_all()
         .build()
         .expect("Tokio-Runtime");
-    runtime.block_on(run());
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runtime.block_on(run(&options))
+    }));
+    outcome.map_or_else(
+        |_| {
+            write_summary(
+                &dir,
+                RunStatus::Broken,
+                smoke,
+                &[],
+                Some("Abbruch durch eine Panik, siehe Protokoll"),
+                &Value::Null,
+            );
+            ExitCode::from(RunStatus::Broken.exit(smoke))
+        },
+        ExitCode::from,
+    )
 }
 
-async fn run() {
-    let options = options();
+async fn run(options: &Options) -> u8 {
     let (targets, iou) = match options.dataset {
         Dataset::Alarm => (ALARM_CLASSES.to_vec(), 0.3_f32),
         Dataset::Mot => (vec![PERSON_CLASS], pilot::IOU_THRESHOLD),
@@ -583,8 +965,48 @@ async fn run() {
         options.dataset,
     );
 
+    let mut store = match Store::open(options) {
+        Ok(store) => store,
+        Err(problem) => {
+            eprintln!("Ablage: {problem}");
+            return RunStatus::Broken.exit(options.smoke);
+        }
+    };
+    let arms = arms_for(options);
+    let selected: Vec<&str> = SCENARIOS
+        .iter()
+        .map(|s| s.0)
+        .filter(|name| options.scenarios.iter().any(|s| s == name))
+        .collect();
+    let (mut total_cells, mut open_cells) = (0_u64, 0_u64);
+    for name in &selected {
+        for repeat in 0..options.repeats {
+            for &arm in &arms {
+                for &cap in &options.caps {
+                    total_cells += 1;
+                    if !store.done.contains_key(&cell_key(name, repeat, arm, cap)) {
+                        open_cells += 1;
+                    }
+                }
+            }
+        }
+    }
+    let per_cell = options.seconds + CELL_OVERHEAD_S;
+    println!(
+        "Ablage {} · Matrix {} Lastpunkt(e) × {} Wdh × {} Arme × {} Tiefe(n) = {total_cells} Zellen à {} s · \
+         {} schon gemessen, {open_cells} offen · geschaetzt {} min zuzueglich Referenzdurchlauf",
+        store.dir.display(),
+        selected.len(),
+        options.repeats,
+        arms.len(),
+        options.caps.len(),
+        options.seconds,
+        total_cells - open_cells,
+        (open_cells * per_cell).div_ceil(60),
+    );
+
     let started = Instant::now();
-    let loaded = load(&options);
+    let loaded = load(options);
     println!(
         "{} Kameras geladen in {:.1} s: {}",
         loaded.len(),
@@ -664,7 +1086,7 @@ async fn run() {
 
     // --- 1. Referenz -------------------------------------------------------
     let started = Instant::now();
-    let reference = Box::pin(reference(
+    let mut reference = Box::pin(reference(
         &loaded,
         &triton,
         &options.model,
@@ -682,6 +1104,42 @@ async fn run() {
         reference.p50_us,
         reference.p95_us,
         reference.p99_us
+    );
+    let measured = [
+        reference.p50_us,
+        reference.p95_us,
+        reference.p99_us,
+        reference.samples as u64,
+    ];
+    match store.reference(measured) {
+        Ok(used) => {
+            if used != measured {
+                println!(
+                    "  Raten und Profile aus dem ersten Start dieser Ablage: p50 {} us, p95 {} us, p99 {} us",
+                    used[0], used[1], used[2]
+                );
+            }
+            reference.p50_us = used[0];
+            reference.p95_us = used[1];
+            reference.p99_us = used[2];
+            reference.samples = used[3] as usize;
+        }
+        Err(problem) => {
+            eprintln!("Ablage: {problem}");
+            write_summary(
+                &store.dir,
+                RunStatus::Broken,
+                options.smoke,
+                &[],
+                Some(&problem),
+                &Value::Null,
+            );
+            return RunStatus::Broken.exit(options.smoke);
+        }
+    }
+    println!(
+        "  Rest geschaetzt {} min fuer {open_cells} offene Zellen",
+        (open_cells * per_cell).div_ceil(60)
     );
     let mut ranking: Vec<(usize, u64)> = reference
         .hits_by_class
@@ -722,9 +1180,9 @@ async fn run() {
 
     // --- 2./3. Lastpunkte und Arme ------------------------------------------
     let duration = Duration::from_secs(options.seconds);
-    let mut verdicts: Vec<String> = Vec::new();
     let mut by_scenario: Vec<(String, ArmResults)> = Vec::new();
-    for &(name, cams, utilisation) in &SCENARIOS {
+    let mut broken: Option<String> = None;
+    'matrix: for &(name, cams, utilisation) in &SCENARIOS {
         if !options.scenarios.iter().any(|s| s == name) {
             continue;
         }
@@ -735,21 +1193,29 @@ async fn run() {
             "\nLastpunkt {name}: {cams} Kameras × {rate:.1} Hz · serialisierte Auslastung {:.0} %",
             effective * 100.0
         );
-        let arms: Vec<Arm> = if options.llm.is_some() {
-            vec![Arm::Direct, Arm::Vigilant, Arm::VigilantNoReport]
-        } else {
-            vec![Arm::Direct, Arm::Vigilant]
-        };
         let mut results: Vec<(Arm, Vec<Summary>)> = arms.iter().map(|a| (*a, Vec::new())).collect();
         for repeat in 0..options.repeats {
             for (arm, collected) in &mut results {
                 let mut best: Option<Summary> = None;
                 for &cap in &options.caps {
+                    let key = cell_key(name, repeat, *arm, cap);
+                    if let Some(summary) = store.done.get(&key) {
+                        println!(
+                            "  [{name} {} Wdh {} Tiefe {cap}] aus cells.jsonl",
+                            arm.label(),
+                            repeat + 1
+                        );
+                        best = Some(match best {
+                            Some(b) => better(b, summary.clone()),
+                            None => summary.clone(),
+                        });
+                        continue;
+                    }
                     let with_report = *arm != Arm::VigilantNoReport && options.llm.is_some();
                     let gateway = if *arm == Arm::Direct {
                         None
                     } else {
-                        let yaml = gateway_yaml(&options, cams, rate, &reference, with_report);
+                        let yaml = gateway_yaml(options, cams, rate, &reference, with_report);
                         Some(Gateway::start(&yaml).await)
                     };
                     let endpoint = gateway
@@ -790,7 +1256,7 @@ async fn run() {
                     } else {
                         None
                     };
-                    let report = Box::pin(pilot::run_arm(ArmConfig {
+                    let outcome = Box::pin(pilot::run_arm(ArmConfig {
                         endpoint,
                         via_governor: gateway.is_some(),
                         cameras,
@@ -798,12 +1264,52 @@ async fn run() {
                         duration,
                         llm,
                     }))
-                    .await
-                    .expect("Arm laeuft");
+                    .await;
                     if let Some(g) = gateway {
                         g.finish().await;
                     }
+                    let report = match outcome {
+                        Ok(report) => report,
+                        Err(problem) => {
+                            let cell = cell_json(
+                                &key,
+                                name,
+                                repeat,
+                                *arm,
+                                cap,
+                                options.seconds,
+                                None,
+                                Some(&problem),
+                            );
+                            let _ = store.record(&cell);
+                            broken = Some(format!("{key}: {problem}"));
+                            break 'matrix;
+                        }
+                    };
                     let summary = summarise(&report, options.seconds);
+                    // Nichts geliefert heisst: der Aufbau ist kaputt, nicht der
+                    // Governor schlecht. Die Zelle zaehlt nicht, der Lauf endet.
+                    let delivered: u64 = report.cameras.iter().map(|c| c.delivered).sum();
+                    let problem = (delivered == 0)
+                        .then(|| "keine einzige Lieferung, Aufbau pruefen".to_owned());
+                    let cell = cell_json(
+                        &key,
+                        name,
+                        repeat,
+                        *arm,
+                        cap,
+                        options.seconds,
+                        Some((&report, &summary)),
+                        problem.as_deref(),
+                    );
+                    if let Err(e) = store.record(&cell) {
+                        broken = Some(format!("Ablage: {e}"));
+                        break 'matrix;
+                    }
+                    if let Some(problem) = problem {
+                        broken = Some(format!("{key}: {problem}"));
+                        break 'matrix;
+                    }
                     println!(
                         "  [{name} {} Wdh {} Tiefe {cap}] Alarm p95 {} ms, nie {} ‰, Treffer {} ‰ (ideal {} ‰), Berichte/min {}",
                         arm.label(),
@@ -825,6 +1331,26 @@ async fn run() {
             }
         }
         by_scenario.push((name.to_owned(), results));
+    }
+
+    let run_facts = json!({
+        "cells_total": total_cells,
+        "cells_measured_before": total_cells - open_cells,
+        "reference": { "p50_us": reference.p50_us, "p95_us": reference.p95_us, "p99_us": reference.p99_us },
+    });
+    if let Some(problem) = broken {
+        eprintln!("\nLauf abgebrochen, kein Urteil: {problem}");
+        eprintln!("Gueltige Zellen stehen in cells.jsonl; ein erneuter Start setzt dort fort.");
+        write_summary(
+            &store.dir,
+            RunStatus::Broken,
+            options.smoke,
+            &[],
+            Some(&problem),
+            &run_facts,
+        );
+        drop(regions);
+        return RunStatus::Broken.exit(options.smoke);
     }
 
     // --- Bericht --------------------------------------------------------------
@@ -869,11 +1395,9 @@ async fn run() {
             .and_then(|(_, r)| r.iter().find(|(a, _)| *a == arm))
             .map(|(_, runs)| median_of(runs, f).0)
     };
-    let mut verdict = |k: &str, text: String, ok: bool| {
-        verdicts.push(format!(
-            "  {k} {} — {text}",
-            if ok { "bestanden" } else { "VERFEHLT" }
-        ));
+    let mut criteria: Vec<Criterion> = Vec::new();
+    let mut verdict = |k: &'static str, text: String, ok: bool| {
+        criteria.push(Criterion { k, text, ok });
     };
     for name in ["C", "D"] {
         if let (Some(p95), Some(missed)) = (
@@ -957,8 +1481,40 @@ async fn run() {
     println!(
         "\nUrteil gegen die Abnahmekriterien (docs/pilot/edge-pilot.md; K8 ist das Datenpfad-Urteil von shm-latency):"
     );
-    for line in &verdicts {
-        println!("{line}");
+    for c in &criteria {
+        println!(
+            "  {} {} — {}",
+            c.k,
+            if c.ok { "bestanden" } else { "VERFEHLT" },
+            c.text
+        );
     }
+    let status = if criteria.is_empty() {
+        RunStatus::NoVerdict
+    } else if criteria.iter().all(|c| c.ok) {
+        RunStatus::Met
+    } else {
+        RunStatus::Missed
+    };
+    println!(
+        "\nErgebnis: {} (Exitcode {}{}), Ablage {}",
+        status.label(),
+        status.exit(options.smoke),
+        if options.smoke {
+            ", Funktionsprobe: nur 2 heisst kaputt"
+        } else {
+            ""
+        },
+        store.dir.display()
+    );
+    write_summary(
+        &store.dir,
+        status,
+        options.smoke,
+        &criteria,
+        None,
+        &run_facts,
+    );
     drop(regions);
+    status.exit(options.smoke)
 }
