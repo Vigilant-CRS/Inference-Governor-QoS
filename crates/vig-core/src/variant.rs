@@ -201,7 +201,8 @@ pub fn resolve(
             continue;
         };
         // NV-06: scharf geschaltet gilt eine belegte Zelle, auch wenn sie
-        // kuerzer ist. Im Schatten bleibt es beim bisherigen Weg.
+        // kuerzer ist. Im Schatten bleibt es beim bisherigen Weg. Die Marge
+        // gilt fuer beide: die Zelle ersetzt das Profil, nicht die Marge.
         let backend_runtime = match ctx.predictor.mode() {
             crate::predictor::Mode::Shadow => legacy,
             crate::predictor::Mode::Active => {
@@ -209,6 +210,7 @@ pub fn resolve(
                 state.occupancy = u8::try_from(occupancy).unwrap_or(u8::MAX);
                 ctx.predictor
                     .predict(model, idx, state, ctx.profile_revision)
+                    .with_margin(margin)
                     .runtime()
                     .unwrap_or(legacy)
             }

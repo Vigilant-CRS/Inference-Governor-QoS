@@ -270,6 +270,38 @@ impl Prediction {
         }
     }
 
+    /// Dieselbe Aussage mit der Sicherheitsmarge des Betreibers.
+    ///
+    /// Die Zelle ersetzt das **Profil**, nicht die Marge. Der bisherige Weg
+    /// plant mit `max(offline_p99, online_p95) * margin`; eine Zelle ohne
+    /// Marge daneben zu stellen hiesse, mit dem p95 zu planen — und damit
+    /// per Definition bei jedem zwanzigsten Lauf zu ueberziehen. Die erste
+    /// scharfe Messung vom 11.09. hat genau das gezeigt: geschuetzte Luecken
+    /// verdoppelt, verspaetete Dispatches, wo im Schatten keine waren.
+    ///
+    /// Laesst sich die Marge nicht darstellen, gibt es keine Aussage, und es
+    /// gilt der bisherige Weg.
+    #[must_use]
+    pub fn with_margin(self, margin: crate::profile::SafetyMargin) -> Self {
+        match self {
+            Self::FromCell {
+                runtime,
+                epoch,
+                observations,
+            } => margin.apply(runtime).map_or(
+                Self::Fallback {
+                    reason: Rejection::NoCell,
+                },
+                |runtime| Self::FromCell {
+                    runtime,
+                    epoch,
+                    observations,
+                },
+            ),
+            fallback @ Self::Fallback { .. } => fallback,
+        }
+    }
+
     /// Ob die Prognose in dieser Epoche noch gilt.
     ///
     /// Zwischen Planung und Dispatch kann die Karte in eine Drosselung

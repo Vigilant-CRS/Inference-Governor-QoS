@@ -867,7 +867,13 @@ impl Scheduler {
         else {
             return;
         };
-        let prediction = self.predictor.predict(model, variant, state, revision);
+        // Verglichen wird, was die Planung tatsaechlich naehme: Zelle mit
+        // Marge gegen Profil mit Marge. Ohne Marge auf der Zellenseite
+        // zaehlte der Vergleich die fehlende Marge als „mutiger".
+        let prediction = self
+            .predictor
+            .predict(model, variant, state, revision)
+            .with_margin(margin);
         self.predictor.ledger_mut().compare(legacy, &prediction);
         self.publish_predictor();
     }

@@ -954,6 +954,90 @@ fn an_active_predictor_keeps_the_quality_a_stale_profile_gives_away() {
     );
 }
 
+/// Die Zelle ersetzt das Profil, nicht die Sicherheitsmarge.
+///
+/// Die erste scharfe Messung vom 11.09. plante mit dem p95 der Zelle ohne
+/// Marge: der Detektor fiel von 99 auf 97 % Abdeckung, die laengste Luecke
+/// verdoppelte sich, und 36 Auftraege liefen verspaetet an. Wer mit einem
+/// p95 plant, ueberzieht per Definition bei jedem zwanzigsten Lauf.
+///
+/// Hier: Marge 200 %, grosse Variante gelernt bei 10 ms, Deadline 15 ms.
+/// Mit Marge sagt die Zelle 20 ms — die grosse passt nicht, es laeuft die
+/// kleine (5 ms Profil, mit Marge 10 ms). Ohne Marge liefe die grosse. Der
+/// Margenregler kann die Marge nur anheben, nie unter den konfigurierten
+/// Wert senken; der Test haengt also nicht an seinem Verlauf.
+#[test]
+fn an_active_predictor_keeps_the_operators_margin() {
+    use vig_core::predictor::{ClockClass, Mode, StateClass, ThrottleClass};
+
+    let learning = contract(
+        Criticality::Protected,
+        QueuePolicy::Latest,
+        Some(33),
+        100,
+        200,
+        &[40, 5],
+    );
+    let mut tight = learning.clone();
+    tight.deadline = ms(15);
+
+    let mut list = ArrayVec::new();
+    list.push(learning.clone()).unwrap();
+    let mut scheduler = Scheduler::new(
+        list,
+        SlotSet::homogeneous(1, 0).unwrap(),
+        OverloadController::new(OverloadConfig::default(), at(0)).unwrap(),
+        SafetyMargin::from_percent(200).unwrap(),
+    )
+    .unwrap();
+    scheduler.set_predictor_mode(Mode::Active);
+    scheduler.observe_hardware(
+        StateClass {
+            occupancy: 0,
+            throttle: ThrottleClass::Nominal,
+            clock: ClockClass::Full,
+        },
+        1,
+    );
+    let mut backend = Backend {
+        actual: Some(ms(10)),
+        ..Backend::default()
+    };
+    let mut next_id = 0_u64;
+    run(&mut scheduler, &mut backend, 3_000, |t| {
+        if t % 33 == 0 {
+            next_id = next_id.saturating_add(1);
+            vec![frame(next_id, 0, t, &learning)]
+        } else {
+            Vec::new()
+        }
+    });
+    assert!(
+        backend.variants_used().contains(&VariantIdx(0)),
+        "in der Lernphase muss die grosse Variante gelaufen sein"
+    );
+
+    let mut actions = Vec::new();
+    scheduler.on_event(
+        at(3_100),
+        Event::Arrival(frame(10_000, 0, 3_100, &tight)),
+        &mut |a| actions.push(a),
+    );
+    let chosen = actions.iter().find_map(|a| match *a {
+        Action::Dispatch {
+            request: RequestId(10_000),
+            variant,
+            ..
+        } => Some(variant),
+        _ => None,
+    });
+    assert_eq!(
+        chosen,
+        Some(VariantIdx(1)),
+        "die Zelle sagt 10 ms, mit 200 % Marge 20 ms — die grosse passt nicht in 15 ms"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Spec 19.7 — Variantenwechsel zaehlen
 // ---------------------------------------------------------------------------
