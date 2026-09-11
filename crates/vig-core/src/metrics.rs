@@ -223,6 +223,21 @@ pub struct Metrics {
     /// Zaehler waere eine nie ausgefuehrte Hintergrundlast nur an ausbleibenden
     /// Antworten zu erkennen — also praktisch gar nicht.
     pub best_effort_starved: u64,
+    /// Auftraege, die auf einer Spur praemptierbarer Arbeit liefen (ADR-0035).
+    pub preemptible_dispatched: u64,
+    /// Geschuetzte Auftraege, die gestartet wurden, waehrend auf einer Spur
+    /// praemptierbare Arbeit lief (ADR-0035).
+    ///
+    /// Diese Laeufe tragen die Restblockierung. Wie viel sie tatsaechlich
+    /// kostete, steht in [`Self::protected_overlap_extra_us`].
+    pub protected_overlapped: u64,
+    /// Beobachtete Mehrlaufzeit der ueberlappten geschuetzten Auftraege
+    /// gegenueber ihrem Alleinprofil (p50), in Mikrosekunden, aufsummiert.
+    ///
+    /// Geteilt durch [`Self::protected_overlapped`] ist das die mittlere
+    /// Restblockierung im Betrieb — die Zahl, an der sich der kalibrierte
+    /// Wert messen lassen muss.
+    pub protected_overlap_extra_us: u64,
     /// Requests, die bewusst trotz verfehlbarer Deadline **gestartet** wurden.
     ///
     /// Nach ADR-0009 ist eine verspaetete, aber frische Inferenz besser als

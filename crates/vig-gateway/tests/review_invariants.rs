@@ -621,6 +621,81 @@ async fn the_prediction_switch_reaches_the_scheduler() {
     }
 }
 
+/// `preemptible:` und `backend.preemptible_lanes` kommen im Scheduler an
+/// (ADR-0035, Review R09).
+///
+/// Dass eine Spur eine Entscheidung aendert, pruefen die Kerntests
+/// (`scheduler_flow`, ADR-0035). Hier geht es um die Naht davor: der Auftrag
+/// laeuft im Prozess niedriger Prioritaet, und der Scheduler zaehlt ihn als
+/// praemptierbar — ohne die Angabe bliebe der Zaehler bei null.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_preemptible_model_runs_on_its_lane() {
+    let high = Arc::new(mock_backend::MockBackend::new(
+        std::time::Duration::from_millis(1),
+    ));
+    let low = Arc::new(mock_backend::MockBackend::new(
+        std::time::Duration::from_millis(1),
+    ));
+    let high_endpoint = mock_backend::start(high.clone()).await.to_string();
+    let low_endpoint = mock_backend::start(low.clone()).await.to_string();
+
+    let yaml = format!(
+        r"
+version: 1
+backend:
+  type: triton
+  grpc_endpoint: {high_endpoint}
+  slots: 1
+  pipelining_depth: 0
+  preemptible_lanes: 1
+models:
+  detector:
+    class: protected
+    queue: {{ policy: latest, capacity: 1 }}
+    contract: {{ period_ms: 33, deadline_ms: 33, max_age_ms: 66 }}
+    variants:
+      - id: main
+        backend_model: detector_large
+        quality: {{ value: 1.0, source: measured }}
+        profile: {{ p50_us: 1000, p95_us: 1000, p99_us: 1000, samples: 1000 }}
+  vlm:
+    class: best_effort
+    backend_endpoint: {low_endpoint}
+    preemptible: {{ residual_blocking_us: 2000, source: measured }}
+    queue: {{ policy: fifo, capacity: 4 }}
+    contract: {{ deadline_ms: 10000 }}
+    variants:
+      - id: main
+        backend_model: vlm_main
+        quality: {{ value: 1.0, source: measured }}
+        profile: {{ p50_us: 1000, p95_us: 1000, p99_us: 1000, samples: 1000 }}
+"
+    );
+    let resolved = Arc::new(Config::from_yaml(&yaml).unwrap().resolve().unwrap());
+    assert_eq!(resolved.slots.lanes(), 1);
+    let clock = MonotonicClock::start();
+    let backend = Arc::new(vig_backend_triton::TritonClient::new(high_endpoint.clone()));
+    let handle = actor::spawn(resolved.clone(), &backend, clock, &[]).unwrap();
+    let service = GatewayService::new(resolved, backend, handle.clone(), clock);
+
+    service
+        .model_infer(tonic::Request::new(ModelInferRequest {
+            model_name: "vlm".into(),
+            id: "hintergrund".into(),
+            ..Default::default()
+        }))
+        .await
+        .expect("der praemptierbare Auftrag laeuft");
+    assert_eq!(
+        low.served.load(Ordering::Relaxed),
+        1,
+        "im Prozess niedriger Prioritaet"
+    );
+    assert_eq!(high.served.load(Ordering::Relaxed), 0);
+    let metrics = handle.metrics().await.unwrap();
+    assert_eq!(metrics.preemptible_dispatched, 1);
+}
+
 /// Im strikten Modus führt der physische Modellname nicht am Governor vorbei.
 ///
 /// Unkonfigurierte Modelle unverändert durchzureichen ist die dokumentierte

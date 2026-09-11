@@ -710,6 +710,7 @@ fn degradation_prefers_the_fastest_feasible_variant() {
                 margin: SafetyMargin::NONE,
                 now: at(0),
                 degrade,
+                residual: vig_core::Duration::ZERO,
             },
         )
     };

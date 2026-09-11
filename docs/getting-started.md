@@ -231,6 +231,47 @@ only with `allow_loosening: true`. A stale, contradictory or unauthorised hint
 leaves the operator's contract in force
 ([ADR-0029](adr/0029-a-hint-may-tighten-never-loosen.md)).
 
+### Preemptible background work
+
+A long background job — a language model, a 90 ms block — never starts under
+load next to a 33 ms camera: it would hold up the next frame. If your backend
+can **interrupt** that job when protected work arrives — two Triton processes
+on one GPU under a preemption layer such as XSched, the background one at low
+priority — tell the governor, and it plans with what the interruption
+actually costs:
+
+```yaml
+backend:
+  grpc_endpoint: "127.0.0.1:9201"      # the high-priority process
+  slots: 1
+  preemptible_lanes: 1                 # a lane for interruptible work
+
+models:
+  summariser:
+    class: best_effort
+    backend_endpoint: "127.0.0.1:9101" # the low-priority process
+    preemptible: { residual_blocking_us: 14000, source: measured }
+```
+
+The background job then runs on its own lane instead of the protected slot.
+While it runs, protected work plans with the **residual blocking** — how much
+later it can finish because the interruption is not instantaneous — and the
+look-ahead only starts the job if that residual fits into the protected
+slack. It no longer needs to fit its whole runtime into a gap.
+
+The residual is a measurement of your setup, not a setting:
+`vig calibrate` measures it (p99 of protected latency with the background job
+running, minus p99 alone) and writes `source: measured`. `vig doctor` warns
+while it says `declared`, and warns when the residual does not fit into a
+protected deadline — then the lane is configured and useless. The
+configuration refuses a preemptible model in the same process as protected
+models (priority is per process), a protected class marked preemptible, and a
+`no_corun` rule between the two
+([ADR-0035](adr/0035-preemption-is-a-measured-backend-property.md)).
+
+The governor never triggers preemption itself; the backend does
+([ADR-0033](adr/0033-native-code-lives-in-the-backend-process.md)).
+
 ## Step 5 — see what it decided
 
 ```bash
@@ -246,6 +287,9 @@ The numbers worth watching:
 | `vig_stale_compute_ratio` | share of GPU time that went into results already obsolete on arrival |
 | `vig_deferred_for_protected_total` | how often the governor deliberately idled |
 | `vig_best_effort_starved_total` | background work that never ran — **watch this one** |
+| `vig_preemptible_dispatched_total` | background jobs that ran on a preemptible lane |
+| `vig_protected_overlapped_total` | protected jobs started while a preemptible job was running |
+| `vig_protected_overlap_extra_us_total` | what those overlaps actually cost against the solo profile; divided by the count above, compare it with the calibrated residual |
 | `vig_protected_deadline_misses_total` | the number that should stay at zero |
 | `vig_quarantined_slots` | slot credits held because the execution end is not yet proven |
 | `vig_execution_reconciled_total` | ends the governor proved via the backend's own statistics rather than a timer |

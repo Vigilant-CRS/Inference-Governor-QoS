@@ -83,6 +83,7 @@ pub(crate) async fn run(
     verdict = verdict.max(check_contracts(&resolved));
     verdict = verdict.max(check_utilization(&resolved));
     verdict = verdict.max(check_best_effort_feasibility(&resolved));
+    verdict = verdict.max(check_preemption(&resolved));
     verdict = verdict.max(check_decomposition_cost(&resolved));
     verdict = verdict.max(check_unenforced_requirements(&resolved));
     verdict = verdict.max(check_backend(&resolved, offline).await);
@@ -186,12 +187,22 @@ fn check_best_effort_feasibility(resolved: &Resolved) -> Verdict {
         .map_or("?", String::as_str);
 
     let mut verdict = Verdict::Ready;
-    let slots = resolved.slots.len();
+    // Die regulaeren Slots: eine Spur fuer praemptierbare Arbeit ist keine
+    // zusaetzliche Kapazitaet fuer einen unteilbaren Block (ADR-0035).
+    let slots = resolved.slots.regular_len();
     for (i, contract) in resolved.contracts.iter().enumerate() {
         if contract.criticality.is_guarded() {
             continue;
         }
         let name = resolved.model_names.get(i).map_or("?", String::as_str);
+        if let Some(Some(preemptible)) = resolved.preemptible.get(i) {
+            ok(&format!(
+                "{name}: laeuft praemptierbar auf einer eigenen Spur; geschuetzte Arbeit \
+                 traegt waehrenddessen {} Restblockierung (ADR-0035)",
+                preemptible.residual_blocking
+            ));
+            continue;
+        }
         let Some(fastest) = contract.variants.iter().last() else {
             continue;
         };
@@ -377,6 +388,61 @@ fn check_unenforced_requirements(resolved: &Resolved) -> Verdict {
     verdict
 }
 
+/// Nennt die Praemption und prueft, ob ihre Restblockierung in den Slack
+/// passt (ADR-0035).
+///
+/// Eine angegebene statt gemessene Restblockierung ist eine Behauptung ueber
+/// den Backendaufbau; der Betreiber soll wissen, dass sie keine Messung ist.
+/// Und passt sie nicht in die Frist einer geschuetzten Arbeit, haelt der
+/// Look-ahead die Hintergrundarbeit weiter zurueck — die Spur ist dann
+/// konfiguriert und wirkungslos.
+fn check_preemption(resolved: &Resolved) -> Verdict {
+    let mut verdict = Verdict::Ready;
+    for (i, entry) in resolved.preemptible.iter().enumerate() {
+        let Some(preemptible) = entry else {
+            continue;
+        };
+        let name = resolved.model_names.get(i).map_or("?", String::as_str);
+        let residual = preemptible.residual_blocking;
+        if preemptible.measured {
+            ok(&format!(
+                "{name}: praemptierbar, Restblockierung {residual} (gemessen)"
+            ));
+        } else {
+            warn(&format!(
+                "{name}: praemptierbar mit angegebener Restblockierung {residual} — nicht \
+                 gemessen. `vig calibrate` misst sie gegen den laufenden Aufbau"
+            ));
+            verdict = verdict.max(Verdict::ReadyWithWarnings);
+        }
+        for (j, contract) in resolved.contracts.iter().enumerate() {
+            if !contract.criticality.is_guarded() {
+                continue;
+            }
+            let Some(best) = contract.variants.get(0) else {
+                continue;
+            };
+            let Ok(runtime) = best.profile.conservative_at(0, resolved.margin) else {
+                continue;
+            };
+            let Some(burdened) = runtime.checked_add(residual) else {
+                continue;
+            };
+            if burdened > contract.deadline {
+                let guarded = resolved.model_names.get(j).map_or("?", String::as_str);
+                warn(&format!(
+                    "{guarded}: mit der Restblockierung von {name} ({runtime} + {residual}) \
+                     passt die Laufzeit nicht mehr in die Frist {}; der Look-ahead haelt \
+                     {name} dann zurueck, und die Spur bleibt wirkungslos",
+                    contract.deadline
+                ));
+                verdict = verdict.max(Verdict::ReadyWithWarnings);
+            }
+        }
+    }
+    verdict
+}
+
 /// Die einfache Demand-Warnung aus Spec 10.9: `U = Summe(C_i / T_i)`.
 ///
 /// Keine vollstaendige Schedulability-Garantie — bei realer GPU-Konkurrenz und
@@ -385,7 +451,7 @@ fn check_unenforced_requirements(resolved: &Resolved) -> Verdict {
 fn check_utilization(resolved: &Resolved) -> Verdict {
     let utilization = resolved.protected_utilization_permille();
     let percent = utilization.checked_div(10).unwrap_or(0);
-    let slots = resolved.slots.len();
+    let slots = resolved.slots.regular_len();
 
     if utilization > 1_000 {
         fail(&format!(
@@ -804,9 +870,66 @@ async fn check_backend(resolved: &Resolved, offline: bool) -> Verdict {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::panic)]
 
-    use super::{Verdict, check_decomposition_cost};
+    use super::{Verdict, check_decomposition_cost, check_preemption};
     use vig_config::Config;
     use vig_config::schema::Resolved;
+
+    /// Ein Detektor (15 ms p99 bei 110 % Marge, 33 ms Frist) und ein
+    /// praemptierbares VLM mit dieser Restblockierung und Herkunft.
+    fn preemptible_with(residual_us: u64, source: &str) -> Resolved {
+        let yaml = format!(
+            r#"
+version: 1
+backend:
+  type: triton
+  grpc_endpoint: "127.0.0.1:9201"
+  slots: 1
+  preemptible_lanes: 1
+models:
+  detector:
+    class: protected
+    queue: {{ policy: latest, capacity: 1 }}
+    contract: {{ period_ms: 33, deadline_ms: 33, max_age_ms: 66 }}
+    variants:
+      - id: main
+        backend_model: rfdetr
+        quality: {{ value: 1.0, source: measured }}
+        profile: {{ p50_us: 13000, p95_us: 14000, p99_us: 15000, samples: 100 }}
+  vlm:
+    class: best_effort
+    backend_endpoint: "127.0.0.1:9101"
+    preemptible: {{ residual_blocking_us: {residual_us}, source: {source} }}
+    queue: {{ policy: fifo, capacity: 4 }}
+    contract: {{ deadline_ms: 800, max_age_ms: 1500 }}
+    variants:
+      - id: main
+        backend_model: vlm_main
+        quality: {{ value: 1.0, source: measured }}
+        profile: {{ p50_us: 90000, p95_us: 95000, p99_us: 99000, samples: 100 }}
+"#
+        );
+        Config::from_yaml(&yaml).unwrap().resolve().unwrap()
+    }
+
+    /// ADR-0035: gemessen und passend ist unauffaellig; angegeben statt
+    /// gemessen ist eine Warnung; eine Restblockierung, die die Frist des
+    /// Detektors reisst (16,5 + 20 ms gegen 33 ms), auch — die Spur waere
+    /// konfiguriert und wirkungslos.
+    #[test]
+    fn preemption_is_reported_and_checked_against_the_deadline() {
+        assert_eq!(
+            check_preemption(&preemptible_with(5_000, "measured")),
+            Verdict::Ready
+        );
+        assert_eq!(
+            check_preemption(&preemptible_with(5_000, "declared")),
+            Verdict::ReadyWithWarnings
+        );
+        assert_eq!(
+            check_preemption(&preemptible_with(20_000, "measured")),
+            Verdict::ReadyWithWarnings
+        );
+    }
 
     /// Ein Vertrag mit dem angegebenen Prefill-Anteil.
     fn resolved_with(prefill_per_token_us: u64, min_tokens: u32) -> Resolved {

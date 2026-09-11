@@ -1,0 +1,66 @@
+# Gate M3 mit praemptierbarem VLM (ADR-0035, NV-15).
+#
+# Zwei Triton-Prozesse auf einer GPU unter XSched, gestartet mit
+# InferenceQoS-runtime/xsched-triton-alt.sh:
+#
+#   A  127.0.0.1:9201  rfdetr, pose_main, depth_main   Prioritaet 1
+#   B  127.0.0.1:9101  vlm_main                        Prioritaet 0 (wird unterbrochen)
+#
+# Unterschied zu vig.yaml: das VLM laeuft auf einer eigenen Spur statt auf
+# dem geschuetzten Slot, und `no_corun [detector, vlm]` faellt weg — die
+# Praemption ist genau das erlaubte Nebeneinander.
+#
+# DIE RESTBLOCKIERUNG UNTEN IST EIN PLATZHALTER. Sie muss mit
+#   vig calibrate -c examples/gate_m3/vig-preemptible.yaml -o measured.yaml
+# gegen den laufenden XSched-Aufbau gemessen werden. `vig doctor` warnt,
+# solange `source: declared` dasteht.
+version: 1
+backend:
+  type: triton
+  grpc_endpoint: "127.0.0.1:9201"
+  slots: 1
+  pipelining_depth: 0
+  safety_margin_percent: 110
+  preemptible_lanes: 1
+models:
+  detector:
+    class: protected
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 33, deadline_ms: 33, max_age_ms: 66, variant_dwell_ms: 200 }
+    variants:
+      - id: rfdetr
+        backend_model: rfdetr
+        quality: { value: 1.00, source: user_declared }
+        profile: { p50_us: 15639, p95_us: 18074, p99_us: 19596, samples: 200 }
+  pose:
+    class: high
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 33, deadline_ms: 33, max_age_ms: 66 }
+    variants:
+      - id: main
+        backend_model: pose_main
+        quality: { value: 1.00, source: user_declared }
+        profile: { p50_us: 4082, p95_us: 5163, p99_us: 5690, samples: 200 }
+  depth:
+    class: high
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 66, deadline_ms: 66, max_age_ms: 132 }
+    variants:
+      - id: main
+        backend_model: depth_main
+        quality: { value: 1.00, source: user_declared }
+        profile: { p50_us: 9286, p95_us: 10612, p99_us: 11453, samples: 200 }
+  vlm:
+    class: best_effort
+    backend_endpoint: "127.0.0.1:9101"
+    # PLATZHALTER — muss von vig calibrate gemessen werden (siehe oben).
+    # 14 ms ist das Restblocking, das der NV-15-Spike fuer Level 2 bei
+    # Fenster 64 beobachtet hat, nicht eine Messung dieses Aufbaus.
+    preemptible: { residual_blocking_us: 14000, source: declared }
+    queue: { policy: fifo, capacity: 4, overflow: backpressure_client }
+    contract: { deadline_ms: 800, max_age_ms: 1500 }
+    variants:
+      - id: main
+        backend_model: vlm_main
+        quality: { value: 1.00, source: user_declared }
+        profile: { p50_us: 97902, p95_us: 105105, p99_us: 109996, samples: 200 }

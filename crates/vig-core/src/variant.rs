@@ -128,6 +128,12 @@ pub struct PlanningContext<'a> {
     /// Abwertung unter das fachlich Brauchbare waere kein Kompromiss, sondern
     /// ein unbrauchbares Ergebnis, das trotzdem GPU-Zeit kostet.
     pub degrade: bool,
+    /// Die Restblockierung, die diese Planung traegt (ADR-0035).
+    ///
+    /// Null, solange keine praemptierbare Arbeit laeuft oder das geplante
+    /// Modell selbst nicht geschuetzt ist — dann aendert sich keine
+    /// Entscheidung.
+    pub residual: crate::time::Duration,
 }
 
 /// Waehlt die hoechstwertige machbare Variante.
@@ -214,6 +220,18 @@ pub fn resolve(
                     .runtime()
                     .unwrap_or(legacy)
             }
+        };
+        // ADR-0035: laeuft praemptierbare Hintergrundarbeit, traegt diese
+        // geschuetzte Arbeit deren gemessene Restblockierung. Als Untergrenze
+        // ueber dem Alleinwert und nicht als Zuschlag: eine Zelle, die die
+        // Ueberlappung schon beobachtet hat, zahlte sie sonst zweimal.
+        let backend_runtime = if ctx.residual > crate::time::Duration::ZERO {
+            estimator
+                .conservative(model, idx, 0, &variant.profile, margin)
+                .and_then(|solo| solo.checked_add(ctx.residual))
+                .map_or(backend_runtime, |floor| backend_runtime.max(floor))
+        } else {
+            backend_runtime
         };
         // NV-10: Vor- und Nachverarbeitung entsteht ausserhalb des Backends
         // und faellt aus jedem Backendprofil heraus. Sie gehoert trotzdem in

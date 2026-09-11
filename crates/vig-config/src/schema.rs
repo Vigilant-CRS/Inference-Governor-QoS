@@ -268,6 +268,13 @@ pub struct BackendConfig {
     /// Modellpaare, die nicht gleichzeitig laufen duerfen (ADR-0006).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub no_corun: Vec<[String; 2]>,
+    /// Spuren fuer praemptierbare Hintergrundarbeit (ADR-0035).
+    ///
+    /// Eine Spur fuehrt nur Modelle mit `preemptible:` aus, und die belegen
+    /// dafuer keinen der `slots`. Voreinstellung null: keine Spur, und keine
+    /// Entscheidung aendert sich.
+    #[serde(default, skip_serializing_if = "is_zero_lanes")]
+    pub preemptible_lanes: usize,
     /// Pfad zum Modellrepository des Backends, sofern es sichtbar ist (NV-03).
     ///
     /// Nur dafuer da, den Artefakt-Digest eines Profils zu pruefen. Ueber das
@@ -645,6 +652,47 @@ pub struct ModelConfig {
     /// Ausfuehrungseinheit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_endpoint: Option<String>,
+    /// Die Arbeit dieses Modells wird von geschuetzter Arbeit unterbrochen
+    /// (ADR-0035).
+    ///
+    /// Eine Eigenschaft des **Backends**, nicht des Modells: ein Prozess
+    /// niedriger Prioritaet unter einem Praemptionsmechanismus wie XSched.
+    /// Der Governor ruft keine Praemption auf; er plant mit ihrer gemessenen
+    /// Restblockierung. Braucht `backend.preemptible_lanes` und einen eigenen
+    /// `backend_endpoint`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preemptible: Option<PreemptibleConfig>,
+}
+
+/// Die Angaben eines praemptierbaren Modells (ADR-0035).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreemptibleConfig {
+    /// Die Restblockierung in Mikrosekunden: um so viel verspaetet laufende
+    /// Arbeit dieses Modells einen geschuetzten Auftrag hoechstens (p99).
+    ///
+    /// Gemessen von `vig calibrate` als p99 der geschuetzten Laufzeit mit
+    /// laufender Hintergrundarbeit minus p99 allein.
+    pub residual_blocking_us: u64,
+    /// `measured` (von `vig calibrate`) oder `declared` (von Hand).
+    ///
+    /// Voreinstellung `declared`: eine Zahl, deren Herkunft niemand
+    /// angegeben hat, gilt nicht als gemessen. `vig doctor` warnt dann.
+    #[serde(default = "default_preemption_source")]
+    pub source: String,
+}
+
+fn default_preemption_source() -> String {
+    "declared".to_owned()
+}
+
+/// Die aufgeloeste Praemptionsangabe eines Modells (ADR-0035).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedPreemptible {
+    /// Die Restblockierung, die geschuetzte Arbeit waehrenddessen traegt.
+    pub residual_blocking: Duration,
+    /// Ob sie gemessen oder nur angegeben ist.
+    pub measured: bool,
 }
 
 /// Die Angaben eines zerlegbaren Modells.
@@ -1250,6 +1298,18 @@ pub struct Resolved {
     ///
     /// `None`, wo keine hinterlegt ist.
     pub io_signatures: Vec<Option<IoSignature>>,
+    /// Je Modell die Praemptionsangabe, in Indexreihenfolge (ADR-0035).
+    ///
+    /// `None` fuer jedes Modell, dessen Arbeit nicht unterbrochen wird.
+    pub preemptible: Vec<Option<ResolvedPreemptible>>,
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde verlangt fuer skip_serializing_if eine Funktion fn(&T) -> bool"
+)]
+fn is_zero_lanes(lanes: &usize) -> bool {
+    *lanes == 0
 }
 
 impl Resolved {
@@ -1298,7 +1358,9 @@ impl Resolved {
                 .unwrap_or(0);
             total = total.saturating_add(share);
         }
-        let slots = u64::try_from(self.slots.len()).unwrap_or(1).max(1);
+        // Ueber die regulaeren Slots: eine Spur rechnet keine geschuetzte
+        // Arbeit (ADR-0035).
+        let slots = u64::try_from(self.slots.regular_len()).unwrap_or(1).max(1);
         total.checked_div(slots).unwrap_or(0)
     }
 
@@ -1646,6 +1708,13 @@ impl Config {
         }
 
         Self::apply_corun_rules(&self.backend.no_corun, &model_names, &mut slots, findings);
+        let preemptible = self.resolve_preemption(
+            &model_names,
+            &model_endpoints,
+            &contracts,
+            &mut slots,
+            findings,
+        );
 
         let inference_timeout = self.backend.limits(findings)?;
 
@@ -1674,8 +1743,160 @@ impl Config {
             model_endpoints,
             model_decoupled,
             io_signatures,
+            preemptible,
             margin,
         })
+    }
+
+    /// Prueft die Praemptionsangaben und legt die Spuren an (ADR-0035).
+    ///
+    /// Jede Pruefung steht fuer eine Konfiguration, die sich widerspricht:
+    /// geschuetzte Arbeit, die unterbrochen werden soll; eine Restblockierung
+    /// von null; ein praemptierbares Modell im selben Prozess wie die
+    /// geschuetzten, obwohl die Prioritaet je Prozess gilt; ein `no_corun`
+    /// genau zwischen den beiden, deren Nebeneinander die Praemption erlaubt;
+    /// Modelle ohne Spur, oder eine Spur ohne Modell.
+    fn resolve_preemption(
+        &self,
+        model_names: &[String],
+        model_endpoints: &[String],
+        contracts: &ArrayVec<ModelContract, MAX_MODELS>,
+        slots: &mut SlotSet,
+        findings: &mut Vec<Located>,
+    ) -> Vec<Option<ResolvedPreemptible>> {
+        let guarded = |i: usize| contracts.get(i).is_some_and(|c| c.criticality.is_guarded());
+        let mut out: Vec<Option<ResolvedPreemptible>> = Vec::with_capacity(model_names.len());
+        let mut mask = vig_core::slots::ModelMask::NONE;
+
+        for (i, (name, model)) in self.models.iter().enumerate() {
+            let Some(config) = model.preemptible.as_ref() else {
+                out.push(None);
+                continue;
+            };
+            let path = format!("models.{name}.preemptible");
+            let measured = match config.source.as_str() {
+                "measured" => true,
+                "declared" => false,
+                other => {
+                    findings.push(
+                        ConfigError::UnknownValue {
+                            found: other.to_owned(),
+                            allowed: "measured, declared",
+                        }
+                        .at(format!("{path}.source")),
+                    );
+                    false
+                }
+            };
+            if config.residual_blocking_us == 0 {
+                findings.push(
+                    ConfigError::OutOfRange {
+                        expected: "residual_blocking_us groesser als null — eine Praemption \
+                                   ohne Restblockierung gibt es nicht; gemessen wird sie mit \
+                                   vig calibrate",
+                    }
+                    .at(format!("{path}.residual_blocking_us")),
+                );
+            }
+            if guarded(i) {
+                findings.push(
+                    ConfigError::Inconsistent {
+                        what: "praemptierbar kann nur Arbeit der Klassen normal oder \
+                               best_effort sein: geschuetzte Arbeit wird nicht unterbrochen, \
+                               sie unterbricht",
+                    }
+                    .at(format!("models.{name}.class")),
+                );
+            }
+            let endpoint = model_endpoints.get(i);
+            let shares_process =
+                (0..contracts.len()).any(|j| guarded(j) && model_endpoints.get(j) == endpoint);
+            if shares_process {
+                findings.push(
+                    ConfigError::Inconsistent {
+                        what: "ein praemptierbares Modell braucht einen eigenen Backendprozess \
+                               (backend_endpoint): die Prioritaet, mit der das Backend \
+                               unterbricht, gilt je Prozess",
+                    }
+                    .at(format!("models.{name}.backend_endpoint")),
+                );
+            }
+            if let Ok(raw) = u16::try_from(i) {
+                mask = mask.with(ModelIdx(raw));
+            }
+            out.push(Some(ResolvedPreemptible {
+                residual_blocking: Duration::from_nanos_unbounded(
+                    config.residual_blocking_us.saturating_mul(1_000),
+                ),
+                measured,
+            }));
+        }
+
+        self.refuse_corun_with_preemptible(model_names, contracts, &out, findings);
+        self.add_preemptible_lanes(mask, slots, findings);
+        out
+    }
+
+    /// `no_corun` zwischen einem praemptierbaren und einem geschuetzten
+    /// Modell widerspricht sich: die Praemption ist genau das erlaubte
+    /// Nebeneinander (ADR-0035).
+    fn refuse_corun_with_preemptible(
+        &self,
+        model_names: &[String],
+        contracts: &ArrayVec<ModelContract, MAX_MODELS>,
+        preemptible: &[Option<ResolvedPreemptible>],
+        findings: &mut Vec<Located>,
+    ) {
+        let guarded = |i: usize| contracts.get(i).is_some_and(|c| c.criticality.is_guarded());
+        let is_preemptible = |i: usize| preemptible.get(i).is_some_and(Option::is_some);
+        let index = |n: &String| model_names.iter().position(|m| m == n);
+        for (k, [a, b]) in self.backend.no_corun.iter().enumerate() {
+            if let (Some(a), Some(b)) = (index(a), index(b))
+                && ((is_preemptible(a) && guarded(b)) || (is_preemptible(b) && guarded(a)))
+            {
+                findings.push(
+                    ConfigError::Inconsistent {
+                        what: "no_corun zwischen einem praemptierbaren und einem geschuetzten \
+                               Modell widerspricht sich: die Praemption ist genau das erlaubte \
+                               Nebeneinander",
+                    }
+                    .at(format!("backend.no_corun[{k}]")),
+                );
+            }
+        }
+    }
+
+    /// Legt die Spuren an — oder meldet, warum es keine geben kann
+    /// (ADR-0035): praemptierbare Modelle ohne Spur liefen wieder als
+    /// unteilbarer Block, eine Spur ohne Modell bliebe leer.
+    fn add_preemptible_lanes(
+        &self,
+        mask: vig_core::slots::ModelMask,
+        slots: &mut SlotSet,
+        findings: &mut Vec<Located>,
+    ) {
+        let lanes = self.backend.preemptible_lanes;
+        if mask.is_empty() {
+            if lanes > 0 {
+                findings.push(
+                    ConfigError::Inconsistent {
+                        what: "backend.preemptible_lanes ohne ein einziges Modell mit \
+                               preemptible: ist eine Spur, auf der nie etwas laeuft",
+                    }
+                    .at("backend.preemptible_lanes"),
+                );
+            }
+        } else if lanes == 0 {
+            findings.push(
+                ConfigError::Missing {
+                    what: "praemptierbare Modelle brauchen backend.preemptible_lanes >= 1; \
+                           sonst liefen sie als unteilbarer Block auf einem geschuetzten Slot",
+                }
+                .at("backend.preemptible_lanes"),
+            );
+        } else if let Err(e) = slots.add_preemptible_lanes(lanes, mask) {
+            findings.push(ConfigError::Slots(e).at("backend.preemptible_lanes"));
+        }
     }
 }
 

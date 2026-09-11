@@ -137,6 +137,51 @@ pub fn guard_protected<'a, I>(
 where
     I: IntoIterator<Item = &'a ExpectedArrival>,
 {
+    guard_protected_with_residual(
+        slots,
+        candidate_model,
+        candidate_criticality,
+        candidate_runtime,
+        now,
+        forecast,
+        horizon,
+        Duration::ZERO,
+    )
+}
+
+/// Wie [`guard_protected`], fuer einen Kandidaten, dessen Arbeit die
+/// geschuetzte unterbricht (ADR-0035).
+///
+/// Ein praemptierbarer Kandidat belegt keinen geschuetzten Slot; er
+/// verspaetet eine geschuetzte Ankunft nicht um seine Laufzeit, sondern
+/// um die gemessene Restblockierung `candidate_residual`. Die Frage lautet
+/// dann nicht mehr „passen 90 ms in die Luecke", sondern „passt die
+/// Restblockierung in den Slack der geschuetzten Arbeit".
+///
+/// Gerechnet wird fuer **alle** erwarteten Ankuenfte im Horizont, nicht nur
+/// fuer die vor dem geplanten Ende: ein unterbrochener Auftrag endet spaeter,
+/// als seine Laufzeit sagt, und belastet solange jede Ankunft.
+///
+/// Mit `candidate_residual = 0` ist das exakt [`guard_protected`].
+#[must_use]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "dieselbe Parameterliste wie guard_protected plus die eine Groesse, um die es geht"
+)]
+pub fn guard_protected_with_residual<'a, I>(
+    slots: &SlotSet,
+    candidate_model: ModelIdx,
+    candidate_criticality: Criticality,
+    candidate_runtime: Duration,
+    now: Instant,
+    forecast: I,
+    horizon: Duration,
+    candidate_residual: Duration,
+) -> GuardVerdict
+where
+    I: IntoIterator<Item = &'a ExpectedArrival>,
+{
+    let preemptible = candidate_residual > Duration::ZERO;
     let Some(limit) = now.checked_add(horizon) else {
         return GuardVerdict::Clear;
     };
@@ -198,13 +243,24 @@ where
 
     for expected in ordered.iter() {
         // Sortiert nach Ankunftszeit: ab hier ist der Kandidat schon fertig,
-        // und alles Weitere geht ihn nichts mehr an.
-        if expected.at >= candidate_finish {
+        // und alles Weitere geht ihn nichts mehr an. Ein praemptierbarer
+        // Kandidat ist es nicht — unterbrochen endet er spaeter als geplant.
+        if !preemptible && expected.at >= candidate_finish {
             break;
         }
 
+        // Mit dem Kandidaten laeuft die geschuetzte Ankunft um seine
+        // Restblockierung laenger. Ohne Praemption ist das null.
+        let mut burdened = *expected;
+        burdened.runtime = Duration::from_nanos_unbounded(
+            expected
+                .runtime
+                .as_nanos()
+                .saturating_add(candidate_residual.as_nanos()),
+        );
+
         let without = feasible_for(&baseline, expected);
-        let with = feasible_for(&hypothetical, expected);
+        let with = feasible_for(&hypothetical, &burdened);
 
         // Nur vetoieren, wenn der Kandidat die Ursache ist.
         if without && !with {
@@ -218,7 +274,7 @@ where
         }
 
         reserve(&mut baseline, expected);
-        reserve(&mut hypothetical, expected);
+        reserve(&mut hypothetical, &burdened);
     }
     GuardVerdict::Clear
 }
@@ -279,4 +335,125 @@ fn feasible_for(slots: &SlotSet, expected: &ExpectedArrival) -> bool {
 #[must_use]
 pub fn absolute_deadline(generation_time: Instant, relative: Duration) -> Option<Instant> {
     generation_time.checked_add(relative)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
+
+    use super::*;
+    use crate::slots::ModelMask;
+
+    const DETECTOR: ModelIdx = ModelIdx(0);
+    const VLM: ModelIdx = ModelIdx(1);
+
+    fn ms(v: u64) -> Duration {
+        Duration::from_nanos_unbounded(v.saturating_mul(1_000_000))
+    }
+
+    fn at(v: u64) -> Instant {
+        Instant::from_nanos(v.saturating_mul(1_000_000))
+    }
+
+    /// Ein Detektor, der in 10 ms kommt, 15 ms rechnet und 33 ms Frist hat.
+    fn detector_soon() -> ExpectedArrival {
+        ExpectedArrival {
+            model: DETECTOR,
+            criticality: Criticality::Protected,
+            at: at(10),
+            deadline: at(43),
+            runtime: ms(15),
+        }
+    }
+
+    fn with_lane() -> SlotSet {
+        let mut slots = SlotSet::homogeneous(1, 0).unwrap();
+        slots
+            .add_preemptible_lanes(1, ModelMask::NONE.with(VLM))
+            .unwrap();
+        slots
+    }
+
+    /// ADR-0012: auf einem einzigen Slot verhindert ein 90-ms-Block die
+    /// naechste geschuetzte Ankunft — der Look-ahead haelt ihn zurueck.
+    #[test]
+    fn a_non_preemptible_block_is_held_back() {
+        let slots = SlotSet::homogeneous(1, 0).unwrap();
+        let verdict = guard_protected(
+            &slots,
+            VLM,
+            Criticality::BestEffort,
+            ms(90),
+            at(0),
+            [detector_soon()].iter(),
+            DEFAULT_HORIZON,
+        );
+        assert!(matches!(verdict, GuardVerdict::WouldEndanger { .. }));
+    }
+
+    /// ADR-0035: auf einer Spur, mit 5 ms gemessener Restblockierung, passt
+    /// derselbe Auftrag — der Detektor braucht 20 statt 15 ms und haelt seine
+    /// Frist.
+    #[test]
+    fn a_preemptible_job_starts_when_its_residual_fits() {
+        let verdict = guard_protected_with_residual(
+            &with_lane(),
+            VLM,
+            Criticality::BestEffort,
+            ms(90),
+            at(0),
+            [detector_soon()].iter(),
+            DEFAULT_HORIZON,
+            ms(5),
+        );
+        assert_eq!(verdict, GuardVerdict::Clear);
+    }
+
+    /// Passt die Restblockierung nicht in den Slack, bleibt es beim Veto:
+    /// 15 + 30 ms ab 10 ms enden nach der Frist bei 43 ms.
+    #[test]
+    fn a_preemptible_job_is_held_back_when_its_residual_does_not_fit() {
+        let verdict = guard_protected_with_residual(
+            &with_lane(),
+            VLM,
+            Criticality::BestEffort,
+            ms(90),
+            at(0),
+            [detector_soon()].iter(),
+            DEFAULT_HORIZON,
+            ms(30),
+        );
+        assert!(matches!(
+            verdict,
+            GuardVerdict::WouldEndanger {
+                model: DETECTOR,
+                ..
+            }
+        ));
+    }
+
+    /// Ein unterbrochener Auftrag endet spaeter als geplant; eine Ankunft
+    /// nach seinem nominellen Ende traegt die Restblockierung trotzdem.
+    #[test]
+    fn a_preemptible_job_burdens_arrivals_after_its_nominal_end() {
+        let late = ExpectedArrival {
+            at: at(60),
+            deadline: at(80),
+            ..detector_soon()
+        };
+        // 20 ms Laufzeit, 50 ms Frist: nominell ist der Kandidat bei 50 ms
+        // fertig. Mit 10 ms Restblockierung braucht der Detektor 25 ms und
+        // reisst ab 60 ms seine Frist bei 80 ms.
+        let verdict = guard_protected_with_residual(
+            &with_lane(),
+            VLM,
+            Criticality::BestEffort,
+            ms(50),
+            at(0),
+            [late].iter(),
+            DEFAULT_HORIZON,
+            ms(10),
+        );
+        assert!(matches!(verdict, GuardVerdict::WouldEndanger { .. }));
+    }
 }
