@@ -46,6 +46,7 @@ Spec-Stelle explizit.
 | [0035](0035-preemption-is-a-measured-backend-property.md) | Praemption ist eine gemessene Eigenschaft des Backends | NV-15, ADR-0012, ADR-0014, ADR-0033, ADR-0034 | Akzeptiert |
 | [0036](0036-the-look-ahead-counts-from-the-capture.md) | Der Look-ahead rechnet ab der Aufnahme und sieht jede naechste Ankunft | NV-23, Spec 10.7, 10.8, L-010, ADR-0020, ADR-0032 | Akzeptiert |
 | [0037](0037-a-domain-is-a-gpu-with-one-owner.md) | Eine Domaene ist eine GPU mit genau einem Besitzer | NV-22, ADR-0004, ADR-0020, ADR-0024 | Akzeptiert |
+| [0038](0038-the-plan-calibrates-to-the-card.md) | Die Planung kalibriert sich an der Karte | Spec 13.3, ADR-0016, ADR-0023, ADR-0034 | Akzeptiert, opt-in |
 | [0040](0040-a-restart-proves-only-what-died-with-it.md) | Ein Neustart belegt nur, was mit ihm starb | Review 11.09. R01/R02, ADR-0004, ADR-0032 | Akzeptiert |
 
 ## Format

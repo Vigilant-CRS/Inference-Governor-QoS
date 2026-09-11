@@ -75,7 +75,139 @@ fn scaled_period(base_ms: u64, load_percent: u64) -> u64 {
         .max(5)
 }
 
-fn config_yaml(load: u64, endpoint: &str) -> String {
+/// Die Stellgroessen eines Experiments, aus der Umgebung (ADR-0038).
+///
+/// Ohne gesetzte Variable ist jede davon die bisherige Voreinstellung, und die
+/// Konfiguration des Governors ist bitgleich zu der vor diesen Schaltern. Der
+/// Direktpfad zu Triton bleibt in jedem Fall unberuehrt.
+///
+/// * `VIG_RAMP_MARGIN` — `safety_margin_percent`, Voreinstellung 110.
+/// * `VIG_RAMP_PREDICTION` — `shadow` oder `active`.
+/// * `VIG_RAMP_MARGIN_LEARNING` — `an` oder `aus`: `margin_learning: {}`.
+/// * `VIG_RAMP_PROFILE_SCALE` — die Profile des Governors mal diesem Faktor,
+///   z. B. `2` oder `0.7`: ein absichtlich falsches Profil, damit die
+///   Konvergenz der Kalibrierung auf echter Hardware sichtbar wird.
+/// * `VIG_RAMP_POINTS` — die Lastpunkte der Rampe in Prozent, z. B.
+///   `90,95,100,105,110,125`.
+/// * `VIG_RAMP_PIPELINING` — `pipelining_depth`, Voreinstellung 0. Mit null
+///   startet der Governor den naechsten Auftrag erst nach der Antwort auf den
+///   vorigen; Triton direkt hat bis zu acht in der Schwebe. Die Luecke
+///   dazwischen ist der Kandidat fuer den Verlust an der Kante (ADR-0038).
+#[derive(Debug, Clone)]
+struct Knobs {
+    margin_percent: u32,
+    pipelining: usize,
+    active: bool,
+    learning: bool,
+    profile_permille: u64,
+    points: Vec<u64>,
+}
+
+impl Knobs {
+    fn from_env() -> Self {
+        let var = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+        let margin_percent = var("VIG_RAMP_MARGIN").map_or(110, |v| {
+            v.trim()
+                .parse()
+                .expect("VIG_RAMP_MARGIN: eine ganze Zahl in Prozent")
+        });
+        let active = var("VIG_RAMP_PREDICTION").is_some_and(|v| match v.trim() {
+            "active" => true,
+            "shadow" => false,
+            other => panic_on(&format!(
+                "VIG_RAMP_PREDICTION: shadow oder active, nicht {other}"
+            )),
+        });
+        let learning = var("VIG_RAMP_MARGIN_LEARNING").is_some_and(|v| {
+            match v.trim().to_lowercase().as_str() {
+                "an" | "on" | "ja" | "true" | "1" => true,
+                "aus" | "off" | "nein" | "false" | "0" => false,
+                other => panic_on(&format!(
+                    "VIG_RAMP_MARGIN_LEARNING: an oder aus, nicht {other}"
+                )),
+            }
+        });
+        let profile_permille = var("VIG_RAMP_PROFILE_SCALE").map_or(1_000, |v| {
+            permille(&v).expect("VIG_RAMP_PROFILE_SCALE: ein Faktor wie 2 oder 0.7")
+        });
+        let pipelining = var("VIG_RAMP_PIPELINING").map_or(0, |v| {
+            v.trim()
+                .parse()
+                .expect("VIG_RAMP_PIPELINING: eine ganze Zahl")
+        });
+        let points = var("VIG_RAMP_POINTS").map_or_else(
+            || LOADS.to_vec(),
+            |v| {
+                v.split(',')
+                    .map(|p| p.trim().parse().expect("VIG_RAMP_POINTS: z. B. 90,100,110"))
+                    .collect()
+            },
+        );
+        Self {
+            margin_percent,
+            pipelining,
+            active,
+            learning,
+            profile_permille,
+            points,
+        }
+    }
+
+    /// Eine Profillaufzeit, mal dem Profilfaktor.
+    fn scale(&self, us: u64) -> u64 {
+        us * self.profile_permille / 1_000
+    }
+
+    /// Was die Konfiguration des Governors ueber die Marge hinaus bekommt.
+    fn backend_extra(&self) -> String {
+        let mut extra = String::new();
+        if self.active {
+            extra.push_str("\n  prediction: active");
+        }
+        if self.learning {
+            extra.push_str("\n  margin_learning: {}");
+        }
+        extra
+    }
+
+    /// Eine Kopfzeile, damit jede Ergebnisdatei ihre Einstellungen nennt.
+    fn describe(&self) -> String {
+        format!(
+            "Governor: Marge {} %, Pipelining {}, Prognose {}, Margenlernen {}, Profil x{}.{:03}",
+            self.margin_percent,
+            self.pipelining,
+            if self.active { "active" } else { "shadow" },
+            if self.learning { "an" } else { "aus" },
+            self.profile_permille / 1_000,
+            self.profile_permille % 1_000,
+        )
+    }
+}
+
+/// Bricht mit einer Meldung ab: ein Experiment mit einer unverstandenen
+/// Einstellung soll nicht stillschweigend etwas anderes messen.
+#[allow(clippy::panic)]
+fn panic_on(message: &str) -> bool {
+    panic!("{message}")
+}
+
+/// `2` -> 2000, `0.7` -> 700, `1,25` -> 1250; hoechstens drei Nachkommastellen.
+fn permille(text: &str) -> Option<u64> {
+    let text = text.trim().replace(',', ".");
+    let (int, frac) = text.split_once('.').unwrap_or((text.as_str(), ""));
+    if frac.len() > 3 {
+        return None;
+    }
+    let int: u64 = if int.is_empty() { 0 } else { int.parse().ok()? };
+    let frac: u64 = if frac.is_empty() {
+        0
+    } else {
+        format!("{frac:0<3}").parse().ok()?
+    };
+    Some(int * 1_000 + frac).filter(|v| *v > 0)
+}
+
+fn config_yaml(load: u64, endpoint: &str, knobs: &Knobs) -> String {
     let mut models = String::new();
     for (logical, physical, base_period, base_age) in BASE {
         let period = scaled_period(base_period, load);
@@ -90,6 +222,7 @@ fn config_yaml(load: u64, endpoint: &str) -> String {
             "pose_main" => (3987, 4630, 5506),
             _ => (7908, 9367, 9534),
         };
+        let (p50, p95, p99) = (knobs.scale(p50), knobs.scale(p95), knobs.scale(p99));
         let _ = write!(
             models,
             "\n  {logical}:\n    class: {class}\n    \
@@ -103,7 +236,10 @@ fn config_yaml(load: u64, endpoint: &str) -> String {
     }
     format!(
         "version: 1\nbackend:\n  type: triton\n  grpc_endpoint: {endpoint}\n  \
-         slots: 1\n  pipelining_depth: 0\n  safety_margin_percent: 110\nmodels:{models}\n"
+         slots: 1\n  pipelining_depth: {}\n  safety_margin_percent: {}{}\nmodels:{models}\n",
+        knobs.pipelining,
+        knobs.margin_percent,
+        knobs.backend_extra(),
     )
 }
 
@@ -273,12 +409,13 @@ const BURSTS: [(u64, u64, u64, u64); 3] = [
 const BURST_SECONDS: u64 = 20;
 
 #[allow(clippy::similar_names)]
-async fn bursts(triton_endpoint: &str, specs: &HashMap<String, InputSpec>) {
+async fn bursts(triton_endpoint: &str, specs: &HashMap<String, InputSpec>, knobs: &Knobs) {
     println!("load-ramp bursts: Lastspitzen ueber einer Grundlast (Spec 19.4)");
     println!(
         "Triton {triton_endpoint} · RF-DETR, Pose, Tiefe · ein Slot · \
          Shared Memory auf beiden Seiten"
     );
+    println!("{}", knobs.describe());
     println!(
         "{BURST_SECONDS} s je Lauf, {REPEATS} Wiederholungen je Profil, \
          Puffertiefen {CAPS:?} auf beiden Seiten\n"
@@ -294,7 +431,7 @@ async fn bursts(triton_endpoint: &str, specs: &HashMap<String, InputSpec>) {
 
     let duration = Duration::from_secs(BURST_SECONDS);
     for (base, peak, length_ms, every_ms) in BURSTS {
-        let yaml = config_yaml(base, triton_endpoint);
+        let yaml = config_yaml(base, triton_endpoint, knobs);
         let gateway = start_gateway(&yaml).await;
         let burst = Some((
             peak,
@@ -445,8 +582,9 @@ async fn run() {
         regions.push(region);
     }
 
+    let knobs = Knobs::from_env();
     if std::env::args().nth(1).as_deref() == Some("bursts") {
-        Box::pin(bursts(triton_endpoint, &specs)).await;
+        Box::pin(bursts(triton_endpoint, &specs, &knobs)).await;
         return;
     }
 
@@ -455,6 +593,7 @@ async fn run() {
         "Triton {triton_endpoint} · RF-DETR, Pose, Tiefe · ein Slot · \
          Shared Memory auf beiden Seiten"
     );
+    println!("{}", knobs.describe());
     println!(
         "{SECONDS} s je Lauf, {REPEATS} Wiederholungen je Punkt, \
          Puffertiefen {CAPS:?} auf beiden Seiten\n"
@@ -467,8 +606,8 @@ async fn run() {
     );
 
     let duration = Duration::from_secs(SECONDS);
-    for load in LOADS {
-        let yaml = config_yaml(load, triton_endpoint);
+    for load in knobs.points.iter().copied() {
+        let yaml = config_yaml(load, triton_endpoint, &knobs);
         let gateway = start_gateway(&yaml).await;
 
         let mut direct_unc = Vec::new();

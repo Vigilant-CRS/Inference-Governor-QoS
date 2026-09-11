@@ -121,6 +121,17 @@ pub(crate) async fn run(
         );
     }
 
+    // ADR-0038: ein Faktor unter 100 % in den Metriken soll niemanden
+    // ueberraschen; ob die Planung sich kalibriert, gehoert in den Start.
+    if let Some(learning) = resolved.margin_learning {
+        tracing::info!(
+            min_factor_percent = learning.min_factor_percent(),
+            max_factor_percent = learning.max_factor_percent(),
+            min_observations = learning.min_observations(),
+            "Planung kalibriert sich an der Karte (margin_learning)"
+        );
+    }
+
     // Der Metrik-Endpunkt laeuft auf einem eigenen Port und in einem eigenen
     // Task: er darf den Inferenzpfad weder blockieren noch mit ihm um
     // Verbindungen konkurrieren. Faellt er aus, laeuft der Governor weiter —

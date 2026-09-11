@@ -375,6 +375,17 @@ pub struct BackendConfig {
     /// kein Konfigurationsschritt erreichte ihn (Review R09).
     #[serde(default)]
     pub prediction: PredictionMode,
+    /// Ob sich die Planung an der Karte kalibriert, auf der sie laeuft
+    /// (ADR-0038).
+    ///
+    /// Nicht gesetzt heisst: wie bisher — die konfigurierte Marge ist der
+    /// Boden, das Profil-p99 die Untergrenze. Gesetzt lernt der Governor je
+    /// Karte einen Faktor zwischen Profil und gemessener Laufzeit, auch unter
+    /// 100 %, und plant nie unter dem beobachteten Median. Wie
+    /// `prediction: active` eine Handlung des Betreibers; beides zusammen
+    /// wird abgelehnt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub margin_learning: Option<MarginLearningConfig>,
     /// Transport- und Zugangssicherung (TLS, mTLS, Token).
     #[serde(default)]
     pub security: SecurityConfig,
@@ -446,6 +457,45 @@ impl PredictionMode {
             Self::Active => vig_core::predictor::Mode::Active,
         }
     }
+}
+
+/// Die Kalibrierung an der Karte (ADR-0038).
+///
+/// Jedes Feld hat eine Voreinstellung; `margin_learning: {}` schaltet sie mit
+/// diesen ein.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MarginLearningConfig {
+    /// Der harte Boden des gelernten Faktors, in Prozent des Profils
+    /// (10 bis 100, Voreinstellung 50).
+    ///
+    /// Unter 100 plant die Karte schneller, als ihr Profil sagt — weil sie es
+    /// gemessen hat. Unter dem beobachteten Median plant sie ohnehin nie.
+    #[serde(default = "default_learning_min_factor")]
+    pub min_factor_percent: u32,
+    /// Die Obergrenze des gelernten Faktors, in Prozent des Profils
+    /// (100 bis 10000, Voreinstellung 1000).
+    ///
+    /// Hoeher als eine konfigurierte Marge sein darf: ein Profil von
+    /// schnellerer Hardware soll auch auf einem langsamen Geraet konvergieren.
+    #[serde(default = "default_learning_max_factor")]
+    pub max_factor_percent: u32,
+    /// Ausfuehrungen je Modell, bevor der Faktor mutiger werden darf
+    /// (Voreinstellung 48). Vorsichtiger wird er sofort.
+    #[serde(default = "default_learning_observations")]
+    pub min_observations: u32,
+}
+
+const fn default_learning_min_factor() -> u32 {
+    vig_core::learning::MarginLearning::DEFAULT_MIN_FACTOR_PERCENT
+}
+
+const fn default_learning_max_factor() -> u32 {
+    vig_core::learning::MarginLearning::DEFAULT_MAX_FACTOR_PERCENT
+}
+
+const fn default_learning_observations() -> u32 {
+    vig_core::learning::MarginLearning::DEFAULT_OBSERVATIONS
 }
 
 /// Ein Tensor in der zugesagten Schnittstelle eines logischen Modells.
@@ -1511,6 +1561,8 @@ pub struct Resolved {
     pub miss_aware_policy: bool,
     /// Ob die zustandsabhaengige Prognose entscheidet (NV-06).
     pub prediction: vig_core::predictor::Mode,
+    /// Die Kalibrierung an der Karte, falls eingeschaltet (ADR-0038).
+    pub margin_learning: Option<vig_core::learning::MarginLearning>,
     /// Die Hinweispolicy des Betreibers (NV-18).
     pub hint_policy: vig_core::hints::HintPolicy,
     /// Die laengste zulaessige Geltungsdauer eines Hinweises; `None` ohne
@@ -1937,6 +1989,48 @@ impl Config {
             );
         }
 
+        // ADR-0038: die Kalibrierung an der Karte. Ohne Block aendert sich
+        // nichts; mit ihm werden Bereich und Widersprueche geprueft.
+        let margin_learning = match self.backend.margin_learning {
+            None => None,
+            Some(learning) => {
+                let range = vig_core::learning::MarginLearning::new(
+                    learning.min_factor_percent,
+                    learning.max_factor_percent,
+                    learning.min_observations,
+                );
+                if range.is_none() {
+                    findings.push(
+                        ConfigError::OutOfRange {
+                            expected: "min_factor_percent 10 bis 100, max_factor_percent \
+                                       100 bis 10000, min_observations 1 bis 100000",
+                        }
+                        .at("backend.margin_learning"),
+                    );
+                }
+                if learning.max_factor_percent < self.backend.safety_margin_percent {
+                    findings.push(
+                        ConfigError::Inconsistent {
+                            what: "max_factor_percent liegt unter safety_margin_percent; \
+                                   der Faktor begaenne ueber seiner eigenen Obergrenze",
+                        }
+                        .at("backend.margin_learning.max_factor_percent"),
+                    );
+                }
+                if self.backend.prediction == PredictionMode::Active {
+                    findings.push(
+                        ConfigError::Inconsistent {
+                            what: "margin_learning und prediction: active lernen beide den \
+                                   Abstand zwischen Profil und Karte; zwei Regler auf \
+                                   demselben Plan jagen einander (ADR-0038)",
+                        }
+                        .at("backend.margin_learning"),
+                    );
+                }
+                range
+            }
+        };
+
         let mut slots =
             match SlotSet::homogeneous(self.backend.slots, self.backend.pipelining_depth) {
                 Ok(s) => s,
@@ -2045,6 +2139,7 @@ impl Config {
             security: self.backend.security.clone(),
             miss_aware_policy: self.backend.miss_aware_policy,
             prediction: self.backend.prediction.to_core(),
+            margin_learning,
             actuation: self.backend.actuation.clone(),
             interference,
             domains,

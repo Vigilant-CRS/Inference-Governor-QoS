@@ -446,6 +446,14 @@ fn render_per_model_series(out: &mut String, metrics: &Metrics) {
         &metrics.margin_percent,
         metrics.models,
     );
+    // ADR-0038: mit ihm liest sich die Marge je Modell als Geraetefaktor mal
+    // Rest; null ohne Kalibrierung.
+    render_scalar(
+        out,
+        "vig_learned_device_factor_percent",
+        "Gelernter Faktor zwischen Profil und Karte in Prozent (ADR-0038); 0 ohne margin_learning.",
+        u64::from(metrics.learned_device_factor_percent),
+    );
 }
 
 /// Nanosekunden als Sekunden mit Millisekundenaufloesung.

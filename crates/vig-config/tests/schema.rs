@@ -1272,3 +1272,62 @@ fn the_rfdetr_variant_example_resolves_and_reports_its_conflicts() {
         "nicht beschrieben ist eine ehrliche Aussage; eine geratene Labelliste waere keine"
     );
 }
+
+/// ADR-0038: die Kalibrierung an der Karte ist ein ausdruecklicher Schritt,
+/// ihr Bereich wird geprueft, und zusammen mit der scharfen Prognose wird sie
+/// abgelehnt.
+#[test]
+fn margin_learning_is_opt_in_and_bounded() {
+    use vig_core::learning::MarginLearning;
+
+    let with =
+        |block: &str| EXAMPLE.replace("  type: triton\n", &format!("  type: triton\n{block}"));
+
+    let default = Config::from_yaml(EXAMPLE).unwrap().resolve().unwrap();
+    assert_eq!(default.margin_learning, None);
+
+    let on = Config::from_yaml(&with("  margin_learning: {}\n")).unwrap();
+    assert_eq!(
+        on.resolve().unwrap().margin_learning,
+        Some(MarginLearning::default_range())
+    );
+
+    let custom = with(
+        "  margin_learning: { min_factor_percent: 30, max_factor_percent: 500, min_observations: 100 }\n",
+    );
+    assert_eq!(
+        Config::from_yaml(&custom)
+            .unwrap()
+            .resolve()
+            .unwrap()
+            .margin_learning,
+        MarginLearning::new(30, 500, 100)
+    );
+
+    for bad in [
+        "{ min_factor_percent: 5 }",
+        "{ min_factor_percent: 120 }",
+        "{ max_factor_percent: 20000 }",
+        "{ min_observations: 0 }",
+        "{ max_factor_percent: 105 }",
+    ] {
+        let config = Config::from_yaml(&with(&format!("  margin_learning: {bad}\n"))).unwrap();
+        assert!(
+            !config.diagnose().is_empty(),
+            "{bad} haette abgelehnt werden muessen"
+        );
+    }
+    assert!(
+        Config::from_yaml(&with("  margin_learning: { floor: 50 }\n")).is_err(),
+        "ein vertippter Schluessel"
+    );
+
+    let both = Config::from_yaml(&with("  prediction: active\n  margin_learning: {}\n")).unwrap();
+    let findings = both.diagnose();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.to_string().contains("prediction: active")),
+        "{findings:?}"
+    );
+}

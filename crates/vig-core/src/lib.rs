@@ -34,6 +34,7 @@ pub mod generative;
 pub mod hints;
 pub mod ids;
 pub mod interference;
+pub mod learning;
 pub mod metrics;
 pub mod model;
 pub mod overload;

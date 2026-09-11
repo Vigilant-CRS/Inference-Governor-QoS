@@ -217,6 +217,13 @@ pub struct Metrics {
     /// ob das System zur Ruhe kommt oder langsam immer vorsichtiger wird —
     /// und das sieht man an keinem Zaehler.
     pub margin_percent: [u32; MAX_MODELS],
+    /// Der gelernte Geraetefaktor in Prozent (ADR-0038); null ohne
+    /// Kalibrierung an der Karte.
+    ///
+    /// Mit ihm liest sich `margin_percent`: der Faktor eines Modells ist
+    /// Geraetefaktor mal Rest dieses Modells. Unter 100 heisst, das Profil ist
+    /// fuer diese Karte zu pessimistisch, und gemessen ist, um wie viel.
+    pub learned_device_factor_percent: u32,
     /// Best-Effort-Requests, die terminal wurden, ohne je gelaufen zu sein.
     ///
     /// ADR-0012: Aushungerung ist ein Befund, kein Nebeneffekt. Ohne diesen
@@ -429,6 +436,7 @@ impl Metrics {
             arrival_period_us,
             contract_period_us,
             margin_percent,
+            learned_device_factor_percent,
             best_effort_starved,
             preemptible_dispatched,
             protected_overlapped,
@@ -508,6 +516,11 @@ impl Metrics {
             .consecutive_transport_failures
             .max(consecutive_transport_failures);
         self.predictor_active = self.predictor_active.max(predictor_active);
+        // Je Domaene ein eigener Geraetefaktor; die Gesamtsicht zeigt den
+        // vorsichtigsten.
+        self.learned_device_factor_percent = self
+            .learned_device_factor_percent
+            .max(learned_device_factor_percent);
         self.generative_context_tokens = self
             .generative_context_tokens
             .max(generative_context_tokens);

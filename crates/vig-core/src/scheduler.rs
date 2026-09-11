@@ -29,6 +29,7 @@ use crate::feasibility::{ExpectedArrival, GuardVerdict, guard_protected};
 use crate::hints::{Effect, Hint, HintPolicy, Hints, Rejection};
 use crate::ids::{MAX_MODELS, ModelIdx, RequestId, SlotIdx, VariantIdx};
 use crate::interference::{Interference, InterferenceVerdict};
+use crate::learning::{FactorLearner, MarginLearning};
 use crate::metrics::Metrics;
 use crate::model::{ContractError, ModelContract};
 use crate::overload::{OverloadController, OverloadState, PressureSample};
@@ -258,6 +259,13 @@ pub struct Scheduler {
     margin: SafetyMargin,
     /// Je Modell eine langsam angepasste Marge (Spec 13.3).
     margins: [MarginController; MAX_MODELS],
+    /// Die Kalibrierung an der Karte, falls der Betreiber sie eingeschaltet
+    /// hat (ADR-0038).
+    ///
+    /// Dann plant jedes Modell mit dem gelernten Faktor statt mit seinem
+    /// Margenregler, und die Regler ruhen. `None` ist das bisherige
+    /// Verhalten, bitgleich.
+    learning: Option<FactorLearner>,
     /// Je praemptierbarem Modell die gemessene Restblockierung (ADR-0035).
     ///
     /// `None` fuer jedes Modell, dessen Arbeit nicht unterbrochen werden
@@ -431,6 +439,7 @@ impl Scheduler {
             overload,
             margin,
             margins,
+            learning: None,
             residual: [None; MAX_MODELS],
             estimator: RuntimeEstimator::new(),
             inflight: ArrayVec::new(),
@@ -467,11 +476,21 @@ impl Scheduler {
             *controller = MarginController::provisional(self.margin)
                 .with_target_permille(controller.target_permille());
         }
+        // ADR-0038: mit Kalibrierung beginnt der Rest dieses Modells erhoeht,
+        // und was unter dem alten Profil beobachtet wurde, gilt nicht mehr —
+        // der Datenboden darf nicht aus einem anderen Profil stammen.
+        if let Some(learner) = self.learning.as_mut() {
+            learner.mark_unverified(model, self.margin, MarginController::UNVERIFIED_SURCHARGE);
+            self.estimator.forget(model);
+        }
     }
 
     /// Die aktuell wirksame Marge eines Modells.
     #[must_use]
     pub fn margin_of(&self, model: ModelIdx) -> SafetyMargin {
+        if let Some(learner) = self.learning.as_ref() {
+            return learner.margin(model);
+        }
         self.margins
             .get(model.get())
             .map_or(self.margin, MarginController::margin)
@@ -734,7 +753,13 @@ impl Scheduler {
         // gedauert hat als geplant. Eine verpasste Deadline aus Wartezeit
         // wuerde durch eine groessere Marge nur schlimmer.
         let underpredicted = compute.as_nanos() > entry.predicted.as_nanos();
-        if let Some(controller) = self.margins.get_mut(entry.descriptor.logical_model.get()) {
+        if let Some(learner) = self.learning.as_mut() {
+            // ADR-0038: derselbe Quantilschritt, multiplikativ, auf Geraet und
+            // Modell — und ohne den Boden der konfigurierten Marge.
+            learner.observe(entry.descriptor.logical_model, underpredicted);
+            self.metrics.learned_device_factor_percent = learner.device_percent();
+        } else if let Some(controller) = self.margins.get_mut(entry.descriptor.logical_model.get())
+        {
             if underpredicted {
                 controller.tighten();
             } else {
@@ -901,6 +926,49 @@ impl Scheduler {
         self.publish_predictor();
     }
 
+    /// Laesst die Planung sich an dieser Karte kalibrieren (ADR-0038).
+    ///
+    /// Wie die Prognose eine ausdrueckliche Handlung des Betreibers. Mit
+    /// `Some` plant jedes Modell mit `Profil-p99 × gelernter Faktor`, der
+    /// Faktor darf unter 100 % fallen, und der beobachtete Median ist der
+    /// Boden. `None` stellt das bisherige Verhalten her.
+    ///
+    /// Ein schon als nicht verifiziert markiertes Profil (ADR-0016) behaelt
+    /// seinen erhoehten Start: der Lerner uebernimmt ihn.
+    pub fn set_margin_learning(&mut self, learning: Option<MarginLearning>) {
+        self.estimator.set_learning(learning.is_some());
+        self.learning = learning.map(|params| {
+            let mut targets = [MarginController::DEFAULT_TARGET_PERMILLE; MAX_MODELS];
+            for (target, controller) in targets.iter_mut().zip(self.margins.iter()) {
+                *target = controller.target_permille();
+            }
+            let mut learner = FactorLearner::new(params, self.margin, &targets);
+            let configured = self.margin.as_percent();
+            for (index, controller) in self.margins.iter().enumerate() {
+                if controller.margin().as_percent() > configured
+                    && let Ok(raw) = u16::try_from(index)
+                {
+                    learner.mark_unverified(
+                        ModelIdx(raw),
+                        self.margin,
+                        MarginController::UNVERIFIED_SURCHARGE,
+                    );
+                }
+            }
+            learner
+        });
+        self.metrics.learned_device_factor_percent = self
+            .learning
+            .as_ref()
+            .map_or(0, FactorLearner::device_percent);
+    }
+
+    /// Der Lernbereich der Kalibrierung, falls eingeschaltet (ADR-0038).
+    #[must_use]
+    pub fn margin_learning(&self) -> Option<MarginLearning> {
+        self.learning.as_ref().map(FactorLearner::params)
+    }
+
     /// Der Schattenvergleich der Prognose (NV-06).
     #[must_use]
     /// Die Prognosetabelle, fuer Pruefungen.
@@ -945,10 +1013,9 @@ impl Scheduler {
         let Some(profile) = contract.variant(variant).map(|v| &v.profile) else {
             return;
         };
-        let margin = self
-            .margins
-            .get(model.get())
-            .map_or(self.margin, MarginController::margin);
+        // Die wirksame Marge, auch die gelernte (ADR-0038): der Vergleich
+        // soll zeigen, was die Planung tatsaechlich naehme.
+        let margin = self.margin_of(model);
         let Some(legacy) =
             self.estimator
                 .conservative(model, variant, entry.occupancy, profile, margin)

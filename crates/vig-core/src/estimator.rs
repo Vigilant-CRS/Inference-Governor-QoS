@@ -131,6 +131,11 @@ fn quantile_of(sorted: &[u32], percent: usize) -> u32 {
 #[derive(Debug)]
 pub struct RuntimeEstimator {
     cells: Vec<Cell>,
+    /// Ob sich die Planung an der Karte kalibriert (ADR-0038).
+    ///
+    /// Dann ist die Marge ein gelernter Faktor auf das **Profil**, und die
+    /// Beobachtung liefert den Boden aus Daten statt der Untergrenze.
+    learning: bool,
 }
 
 impl RuntimeEstimator {
@@ -142,6 +147,31 @@ impl RuntimeEstimator {
     pub fn new() -> Self {
         Self {
             cells: vec![Cell::default(); MAX_MODELS * MAX_VARIANTS * MAX_SLOTS],
+            learning: false,
+        }
+    }
+
+    /// Schaltet die Kalibrierung an der Karte ein oder aus (ADR-0038).
+    ///
+    /// Aus ist das bisherige Verhalten, bitgleich.
+    pub const fn set_learning(&mut self, on: bool) {
+        self.learning = on;
+    }
+
+    /// Vergisst alle Beobachtungen eines Modells.
+    ///
+    /// Fuer ein Profil, das nicht mehr gilt: wer der Beobachtung den Boden
+    /// ueberlaesst, darf keine Beobachtung eines anderen Profils behalten.
+    pub fn forget(&mut self, model: ModelIdx) {
+        for v in 0..MAX_VARIANTS {
+            let variant = VariantIdx(u16::try_from(v).unwrap_or(u16::MAX));
+            for occupancy in 0..MAX_SLOTS {
+                if let Some(cell) =
+                    Self::index(model, variant, occupancy).and_then(|i| self.cells.get_mut(i))
+                {
+                    *cell = Cell::default();
+                }
+            }
         }
     }
 
@@ -223,6 +253,11 @@ impl RuntimeEstimator {
     /// neuere Wert: der Schaetzer darf die Planung verschaerfen, aber nie
     /// optimistischer machen als das Profil. Wer sein Profil unterbieten will,
     /// misst es neu.
+    ///
+    /// Mit Kalibrierung an der Karte (ADR-0038) misst der Betrieb es neu:
+    /// `margin` ist dann ein gelernter Faktor auf das Profil-p99, auch unter
+    /// 100 %, und die Planung liegt nie unter dem beobachteten Median dieser
+    /// Zelle — der Boden kommt aus Daten, nicht aus dem Profil.
     #[must_use]
     pub fn conservative(
         &self,
@@ -233,6 +268,18 @@ impl RuntimeEstimator {
         margin: SafetyMargin,
     ) -> Option<Duration> {
         let base = offline.at_occupancy(occupancy)?.p99;
+        if self.learning {
+            // Der Faktor bezieht sich auf das Profil und nur auf das Profil:
+            // er ist das gelernte Quantil von `tatsaechlich / Profil-p99`.
+            // Kaeme das Online-p95 als zweite Basis hinzu, wechselte die
+            // Groesse, deren Quantil er schaetzt, mit dem Fuellstand einer
+            // Zelle — und er konvergierte gegen nichts.
+            let planned = margin.apply(base)?;
+            return Some(match self.observed_p50(model, variant, occupancy) {
+                Some(median) => planned.max(median),
+                None => planned,
+            });
+        }
         let effective = match self.observed_p95(model, variant, occupancy) {
             Some(online) => base.max(online),
             None => base,
@@ -254,6 +301,12 @@ impl RuntimeEstimator {
         offline: &VariantProfile,
     ) -> Option<Duration> {
         let base = offline.at_occupancy(occupancy)?.p50;
+        if self.learning {
+            // ADR-0038: der gemessene Median dieser Karte, sobald es ihn gibt.
+            // Ein Profilmedian, der ueber ihm liegt, verwirft Frames als
+            // wertlos, die rechtzeitig angekommen waeren.
+            return Some(self.observed_p50(model, variant, occupancy).unwrap_or(base));
+        }
         Some(match self.observed_p50(model, variant, occupancy) {
             Some(online) => base.max(online),
             None => base,
@@ -735,6 +788,71 @@ mod tests {
             controller.margin().as_percent(),
             SafetyMargin::MAX_PERCENT,
             "und nie ueber die harte Obergrenze"
+        );
+    }
+
+    /// ADR-0038: mit Kalibrierung ist die Marge ein Faktor auf das Profil,
+    /// auch unter 100 % — aber die Planung liegt nie unter dem beobachteten
+    /// Median, und die optimistische Schaetzung ist der gemessene Median.
+    #[test]
+    fn a_learned_factor_scales_the_profile_and_stops_at_the_observed_median() {
+        let profile = offline(10, 20);
+        let half = SafetyMargin::learned(50);
+
+        let mut slower = RuntimeEstimator::new();
+        slower.set_learning(true);
+        assert_eq!(
+            slower
+                .conservative(M, V, 0, &profile, half)
+                .unwrap()
+                .as_millis(),
+            10,
+            "ohne Beobachtung: Profil-p99 mal Faktor"
+        );
+        for _ in 0..MIN_OBSERVATIONS {
+            slower.record(M, V, 0, ms(12));
+        }
+        assert_eq!(
+            slower
+                .conservative(M, V, 0, &profile, half)
+                .unwrap()
+                .as_millis(),
+            12,
+            "der Datenboden: nie unter dem beobachteten Median"
+        );
+        assert_eq!(
+            slower
+                .conservative(M, V, 0, &profile, SafetyMargin::learned(80))
+                .unwrap()
+                .as_millis(),
+            16
+        );
+
+        let mut faster = RuntimeEstimator::new();
+        faster.set_learning(true);
+        for _ in 0..MIN_OBSERVATIONS {
+            faster.record(M, V, 0, ms(8));
+        }
+        assert_eq!(
+            faster.optimistic(M, V, 0, &profile).unwrap().as_millis(),
+            8,
+            "der gemessene Median, nicht der des Profils"
+        );
+        faster.forget(M);
+        assert_eq!(faster.observations(M, V, 0), 0);
+        assert_eq!(
+            faster.optimistic(M, V, 0, &profile).unwrap().as_millis(),
+            10
+        );
+
+        // Ausgeschaltet gilt wieder max(Profil, Beobachtung), bitgleich.
+        slower.set_learning(false);
+        assert_eq!(
+            slower
+                .conservative(M, V, 0, &profile, SafetyMargin::NONE)
+                .unwrap()
+                .as_millis(),
+            20
         );
     }
 }

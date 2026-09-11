@@ -936,6 +936,10 @@ fn spawn_owned(
     // beobachteten Hardwarezustand (`observe_hardware`) faellt jede Zelle
     // trotzdem auf den bisherigen Weg zurueck — scharf heisst nicht blind.
     scheduler.set_predictor_mode(config.prediction);
+    // ADR-0038: die Kalibrierung an der Karte, wenn der Betreiber sie will.
+    // Vor den nicht verifizierten Profilen unten, damit deren erhoehter Start
+    // im Lerner ankommt.
+    scheduler.set_margin_learning(config.margin_learning);
     // NV-18: dasselbe fuer die Hinweispolicy. Ohne `hints:` in der
     // Konfiguration ist sie geschlossen und nimmt nichts an.
     scheduler.set_hint_policy(config.hint_policy);

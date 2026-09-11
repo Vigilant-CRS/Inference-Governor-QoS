@@ -7,6 +7,26 @@ bedeutet, steht in [docs/releases.md](docs/releases.md).
 
 ### Hinzugefuegt
 
+- **Die Planung kalibriert sich an der Karte** (opt-in,
+  [ADR-0038](docs/adr/0038-the-plan-calibrates-to-the-card.md)).
+  `backend.margin_learning: {}` laesst den Governor je GPU einen Faktor
+  zwischen Profil-p99 und gemessener Laufzeit lernen: derselbe
+  Quantilschaetzer wie der Margenregler (ein Prozent Ueberziehungen), aber
+  multiplikativ, als Geraetefaktor mal Rest je Modell, und ohne den Boden der
+  konfigurierten Marge — er darf unter 100 % fallen, wenn das Profil
+  pessimistisch ist, nie unter den beobachteten Median und nie unter
+  `min_factor_percent` (50 %). Anlass war der Verlust an der Kante (bei
+  100 % Last verwarf Vigilant 165 ‰ eines `high`-Stroms); die Simulation
+  derselben Last zeigt aber, dass die Marge dort nichts entscheidet — die
+  Kalibrierung macht das Ergebnis unabhaengig vom Profilfehler, sie loest
+  nicht die Kante (ADR-0038, Abschnitt Simulation). Nach ADR-0036 hungert
+  ein zu pessimistisches Profil mit fester Marge alle anderen Stroeme aus;
+  gelernt bekommen sie Arbeit zurueck. Ohne den Block bitgleich; zusammen mit
+  `prediction: active` abgelehnt. Neue Kennzahl
+  `vig_learned_device_factor_percent`; `vig doctor` nennt den Modus.
+  `load-ramp` bekommt dafuer `VIG_RAMP_MARGIN`, `VIG_RAMP_PREDICTION`,
+  `VIG_RAMP_MARGIN_LEARNING`, `VIG_RAMP_PROFILE_SCALE`, `VIG_RAMP_POINTS`
+  und `VIG_RAMP_PIPELINING`. Auf Hardware noch nicht gemessen.
 - **Mehrere Ressourcendomaenen** (NV-22,
   [ADR-0037](docs/adr/0037-a-domain-is-a-gpu-with-one-owner.md)).
   `backend.domains.<name>` beschreibt eine weitere GPU mit `gpu_index`,

@@ -64,6 +64,33 @@ impl SafetyMargin {
         })
     }
 
+    /// Die kleinste gelernte Marge, in Prozent (ADR-0038).
+    pub const LEARNED_MIN_PERCENT: u32 = 1;
+
+    /// Die groesste gelernte Marge, in Prozent (ADR-0038).
+    pub const LEARNED_MAX_PERCENT: u32 = 10_000;
+
+    /// Ein aus Beobachtung gelernter Faktor zwischen Profil und Karte
+    /// (ADR-0038), begrenzt auf
+    /// [`Self::LEARNED_MIN_PERCENT`]`..=`[`Self::LEARNED_MAX_PERCENT`].
+    ///
+    /// **Nur fuer den Lerner.** Er darf unter 100 % liegen: dann ist das
+    /// Profil fuer diese Karte zu pessimistisch, und gemessen ist, dass die
+    /// Karte schneller rechnet. Eine *konfigurierte* Marge unter 100 % gibt es
+    /// weiterhin nicht — [`Self::from_percent`] lehnt sie ab —, denn ohne
+    /// Messung waere sie eine Behauptung.
+    #[must_use]
+    pub const fn learned(percent: u32) -> Self {
+        let num = if percent < Self::LEARNED_MIN_PERCENT {
+            Self::LEARNED_MIN_PERCENT
+        } else if percent > Self::LEARNED_MAX_PERCENT {
+            Self::LEARNED_MAX_PERCENT
+        } else {
+            percent
+        };
+        Self { num, den: 100 }
+    }
+
     /// Der Prozentwert dieser Marge.
     #[must_use]
     pub const fn as_percent(self) -> u32 {

@@ -89,6 +89,7 @@ pub(crate) async fn run(
     verdict = verdict.max(check_profiles(&resolved, offline).await);
     verdict = verdict.max(check_variant_signatures(&resolved, offline).await);
     verdict = verdict.max(check_security(&resolved));
+    verdict = verdict.max(check_margin_learning(&resolved));
     verdict = verdict.max(check_semantics(&resolved));
     verdict = verdict.max(check_hardware(offline));
 
@@ -595,6 +596,27 @@ async fn check_capabilities(resolved: &Resolved, offline: bool) -> Verdict {
 /// er diese Steuerung an jeden weiter, der ihn erreicht. Das ist fuer ein
 /// abgeschlossenes Geraet in Ordnung und sonst nicht — und der Unterschied
 /// gehoert vor den Start, nicht in ein Postmortem.
+/// Nennt, ob und wie sich die Planung an der Karte kalibriert (ADR-0038).
+///
+/// Eine Warnung, solange auf echter Hardware nicht gemessen ist, was die
+/// Kalibrierung tut: erreichbar ist nicht qualifiziert.
+fn check_margin_learning(resolved: &Resolved) -> Verdict {
+    let Some(learning) = resolved.margin_learning else {
+        return Verdict::Ready;
+    };
+    warn(&format!(
+        "Planung kalibriert sich an der Karte (ADR-0038): Faktor auf das Profil-p99 \
+         zwischen {} und {} %, Start bei {} %,\n     mutiger erst nach {} Ausfuehrungen \
+         je Modell, nie unter dem beobachteten Median. Nicht qualifiziert: auf \
+         echter Hardware\n     noch nicht gemessen.",
+        learning.min_factor_percent(),
+        learning.max_factor_percent(),
+        resolved.margin.as_percent(),
+        learning.min_observations(),
+    ));
+    Verdict::ReadyWithWarnings
+}
+
 fn check_security(resolved: &Resolved) -> Verdict {
     let s = &resolved.security;
     let mut verdict = Verdict::Ready;
