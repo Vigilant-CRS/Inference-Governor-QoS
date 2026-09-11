@@ -1,0 +1,47 @@
+# Gate-M3-Analogon auf der GPU eines Pixel 2, SCHWERE Ueberlast (ADR-0039).
+#
+# vig-overload.yaml bringt das Backend direkt nicht zum Einbrechen: auf dem
+# Telefon ueberlappt es Transport und CPU-Anteile mehrerer Modelle, die
+# serialisierte Rechnung (138 %) ist keine Ueberlast der GPU. Hier noch einmal
+# doppelte Bildraten fuer Detektor und Pose, doppelte fuer die Tiefe.
+# Serialisierte Auslastung mit p99: 287/250 + 120/125 + 206/500 = 252 %,
+# mit p50 200 %. Profile wie vig.yaml (`vig profile` auf dem Telefon).
+version: 1
+
+backend:
+  type: oip
+  grpc_endpoint: "127.0.0.1:8001"
+  slots: 1
+  pipelining_depth: 0
+  safety_margin_percent: 110
+
+models:
+  detector:
+    class: protected
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 250, deadline_ms: 250, max_age_ms: 500 }
+    variants:
+      - id: main
+        backend_model: detector
+        quality: { value: 1.00, source: user_declared }
+        profile: { p50_us: 224650, p95_us: 256420, p99_us: 287339, samples: 200 }
+
+  pose:
+    class: high
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 125, deadline_ms: 125, max_age_ms: 250 }
+    variants:
+      - id: main
+        backend_model: pose
+        quality: { value: 1.00, source: user_declared }
+        profile: { p50_us: 90215, p95_us: 112685, p99_us: 120457, samples: 200 }
+
+  depth:
+    class: high
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 500, deadline_ms: 500, max_age_ms: 1000 }
+    variants:
+      - id: main
+        backend_model: depth
+        quality: { value: 1.00, source: user_declared }
+        profile: { p50_us: 195941, p95_us: 201777, p99_us: 205646, samples: 200 }

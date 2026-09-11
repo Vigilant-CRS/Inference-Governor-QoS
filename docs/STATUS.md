@@ -124,7 +124,22 @@ Schranke verliert damit die Transportzeit `δ`), und er sah fest 100 ms voraus
 A76-Klasse) kostet ein Scheduling-Ereignis im Gate-M3-Satz p99 3–20 µs, mit
 32 Modellen bis 150 µs. Eine Entscheidung braucht auf dem ältesten Kern
 0,08 % einer 33-ms-Periode ([Messung](benchmark/arm-phones.md)). Das ist
-der Kern, nicht die Inferenz — auf ARM ist keine gemessen.
+der Kern, nicht die Inferenz.
+
+**Eine zweite GPU, ein zweites Backend (NV-25).** Derselbe Governor vor
+TFLite auf der Adreno 540 eines Pixel 2, alles auf dem Telefon
+([Messung](benchmark/android-gpu.md), [ADR-0039](adr/0039-a-second-backend-proves-the-seam.md)).
+Die Logik läuft unverändert; der Einbruch des ungesteuerten Backends aus
+Gate M3 tritt dort bei geplanten 138 % nicht ein, weil sich Transport und
+CPU-Anteile überlappen und die GPU nicht voll ist. Der Governor hält die
+längste Lücke des Detektors um ein Viertel kürzer und bezahlt mit älteren
+Ergebnissen der anderen Ströme. Bei geplanten 277 % verliert er auf jedem
+Strom: ein serieller Slot reicht dann schon für den Detektor allein nicht,
+während das Backend direkt überlappt; ein Zusatzkredit
+(`pipelining_depth: 1`) ändert daran nichts. Mit der Rechenzeit statt der
+gemessenen Laufzeit als Profil ist er dreimal schlechter als kein Governor.
+Ein Sprachmodell auf der CPU daneben kostet den Detektor nichts und sich
+selbst ein Achtel seines Durchsatzes.
 
 ## Fertige Ausbaustufe R0
 
@@ -158,6 +173,7 @@ Vier Zustände, nicht zwei: **gebaut**, **erreichbar**, **angeschlossen**,
 | NV-17 Gültigkeitsbewusster DAG | **erreichbar**: der Client nennt `vig_capture_id` und `vig_depends_on`; eine Zusammenführung über Aufnahmegrenzen wird abgelehnt, bevor sie rechnet. Der Fehler, dass nach 256 Aufnahmen je Prozess jede weitere abgelehnt wurde (gefunden live von der ROS-2-Brücke), ist behoben: jedes Ende schließt seinen Knoten, ein Test liefert 2000 Aufnahmen aus. Kennungen gelten je Aufrufer, mit Kontingent je Identität | [0028](adr/0028-a-fusion-needs-a-common-capture.md), [Clientparameter](getting-started.md#results-from-the-same-capture) |
 | NV-18 Anwendungssemantik | erreichbar: ein Hinweis darf verschärfen, nie lockern | [0029](adr/0029-a-hint-may-tighten-never-loosen.md) |
 | NV-24 Missbudget in Entscheidungen | erreichbar, Voreinstellung **aus** | [0027](adr/0027-a-miss-budget-that-decides-not-only-observes.md) |
+| NV-25 Zweites Backend | **gebaut, auf einem Gerät gemessen**: `vig-tflite-server` (TFLite, GPU-Delegate, Android) als eigener Prozess hinter dem unveränderten Governor; Gate-M3-Analogon auf der Adreno 540 eines Pixel 2. Bis 138 % kein Einbruch des Backends wie in Gate M3, der Governor hält den Detektor bei kürzeren Lücken; bei 277 % ist ein Slot schon für den Detektor zu wenig, und er verliert überall; mit Rechenzeit statt gemessener Laufzeit geplant schadet er. Es fehlt: Slots, die der gemessenen Nebenläufigkeit entsprechen (zweiter Betriebspunkt) | [0039](adr/0039-a-second-backend-proves-the-seam.md), [Messung](benchmark/android-gpu.md) |
 
 **Erreichbar ist nicht qualifiziert.** Ein erreichbares Paket hat einen
 dokumentierten Schalter und einen Test, der zeigt, dass der Schalter eine

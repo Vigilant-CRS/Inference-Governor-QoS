@@ -1,9 +1,11 @@
 # Messungen
 
-Alle Zahlen in diesem Verzeichnis stammen von einer Maschine: RTX 3070 Laptop
+Die Zahlen in diesem Verzeichnis stammen von einer Maschine: RTX 3070 Laptop
 (8 GB), Triton 2.70.0, Ubuntu 26.04. Bis zum 10.09. lief Treiber 580.173.02,
-ab dem 11.09. 580.178.04; jeder Bericht nennt seinen. Sie sind reproduzierbar
-beschrieben und **nicht** als allgemeingültige Produktleistung zu lesen.
+ab dem 11.09. 580.178.04; jeder Bericht nennt seinen. Ausnahmen sind die drei
+Telefonberichte (`arm-phones.md`, `arm-serve.md`, `android-gpu.md`), die ihr
+Gerät selbst nennen. Alle sind reproduzierbar beschrieben und **nicht** als
+allgemeingültige Produktleistung zu lesen.
 
 | Dokument | Frage | Antwort |
 |---|---|---|
@@ -21,6 +23,7 @@ beschrieben und **nicht** als allgemeingültige Produktleistung zu lesen.
 | [`rfdetr-variants.md`](rfdetr-variants.md) | Belegen vier echte RF-DETR-Varianten die Variantenwahl? | **nein** — die Auflaesung bestimmt die Laufzeit, das Modell fast nicht |
 | [`arm-phones.md`](arm-phones.md) | Ist der Kern auf schwacher ARM-Hardware ein Engpass? | **nein** — p99 3–20 µs je Ereignis (Pixel 2/5, A53 bis A76); eine Entscheidung kostet auf dem ältesten Kern 0,08 % einer 33-ms-Periode |
 | [`arm-serve.md`](arm-serve.md) | Was kostet der ganze Governor je Request auf schwacher ARM-Hardware? | **mehr als die Laptop-Budgets erlauben** — Pixel 2: +2,1 ms je Request auf dem Shm-Pfad statt +0,17 ms, größtenteils Kernelzeit; nicht größenabhängig; `vig serve` läuft dort |
+| [`android-gpu.md`](android-gpu.md) | Hängt der Vorteil an Triton und an NVIDIA? (Pixel 2, Adreno 540, zweites Backend) | **der Governor läuft unverändert, der Einbruch aus Gate M3 tritt dort aber nicht ein** — mit Rechenzeit statt Laufzeit geplant schadet er (Faktor 3–4); mit gemessenen Profilen hält er bis 138 % den Detektor bei kürzeren Lücken und bezahlt mit den anderen Strömen; bei 277 % ist ein Slot schon für den Detektor zu wenig, und er verliert überall |
 | [`tensorrt.md`](tensorrt.md) | Beseitigt TensorRT den Engpass? | **nein** — Auslastung 103 % → 76 %, Vorsprung halbiert, Engpass bleibt |
 | [`messkette-2026-09-11.md`](messkette-2026-09-11.md) | Was hält auf dem neuen Treiber, mit korrigierten Werkzeugen? | Überlast 21–125x und Datenpfad bestanden; **Schwächen** an der Kante bei 100 %, bei Lastspitzen und in der Variantenwahl; mit XSched Gleichstand mit Triton, das VLM läuft erstmals unter dem Governor |
 | [`scenarios.md`](scenarios.md) | Welche Lastfälle tragen die Aussagen, wogegen, mit welchem Preis? | Plan für S1–S12, darunter Detektor + LLM, zwei LLMs nebeneinander, langer Job unter Sättigung, zweite GPU |

@@ -1,0 +1,51 @@
+# Wie vig-overload.yaml, aber mit pipelining_depth: 1 — der Governor darf den
+# naechsten Auftrag abschicken, waehrend der vorige noch unterwegs ist. Frage:
+# ist auf dem Kopierpfad des Telefons der Transport der Engpass, den ein
+# einzelner Slot nicht ueberlappen laesst? (ADR-0039, android-gpu.md)
+#
+# Gate-M3-Analogon auf der GPU eines Pixel 2, UEBER Last.
+#
+# Dieselben Modelle und Profile wie vig.yaml (`vig profile` auf dem Telefon,
+# mit Transport), doppelte Bildraten.
+# Serialisierte Auslastung mit p99: 287/500 + 120/250 + 206/1000 = 126 %,
+# mit p50 102 %. `vig doctor` lehnt das ab, und das ist beabsichtigt: es ist
+# der Bereich, in dem sich entscheidet, ob Steuerung etwas bringt.
+version: 1
+
+backend:
+  type: oip
+  grpc_endpoint: "127.0.0.1:8001"
+  slots: 1
+  pipelining_depth: 1
+  safety_margin_percent: 110
+
+models:
+  detector:
+    class: protected
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 500, deadline_ms: 500, max_age_ms: 1000 }
+    variants:
+      - id: main
+        backend_model: detector
+        quality: { value: 1.00, source: user_declared }
+        profile: { p50_us: 224650, p95_us: 256420, p99_us: 287339, samples: 200 }
+
+  pose:
+    class: high
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 250, deadline_ms: 250, max_age_ms: 500 }
+    variants:
+      - id: main
+        backend_model: pose
+        quality: { value: 1.00, source: user_declared }
+        profile: { p50_us: 90215, p95_us: 112685, p99_us: 120457, samples: 200 }
+
+  depth:
+    class: high
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 1000, deadline_ms: 1000, max_age_ms: 2000 }
+    variants:
+      - id: main
+        backend_model: depth
+        quality: { value: 1.00, source: user_declared }
+        profile: { p50_us: 195941, p95_us: 201777, p99_us: 205646, samples: 200 }

@@ -27,6 +27,16 @@ bedeutet, steht in [docs/releases.md](docs/releases.md).
   `load-ramp` bekommt dafuer `VIG_RAMP_MARGIN`, `VIG_RAMP_PREDICTION`,
   `VIG_RAMP_MARGIN_LEARNING`, `VIG_RAMP_PROFILE_SCALE`, `VIG_RAMP_POINTS`
   und `VIG_RAMP_PIPELINING`. Auf Hardware noch nicht gemessen.
+- **Ein zweites Backend: TFLite auf einer Android-GPU** (NV-25,
+  [ADR-0039](docs/adr/0039-a-second-backend-proves-the-seam.md)).
+  `backends/android-tflite` ist ein eigener Prozess und Workspace, der das
+  OIP-Subset des Governors spricht (Live, Ready, Metadaten, Inferenz,
+  Statistik mit Abschlussnachweis) und TFLite 2.16.1 mit GPU-Delegate V2
+  ueber GLES laedt; `unsafe` bleibt ausserhalb des Root-Workspace. Nur
+  Kopierpfad. Gemessen auf der Adreno 540 eines Pixel 2, Governor und Last
+  auf dem Telefon ([android-gpu.md](docs/benchmark/android-gpu.md)).
+  `gate-m3` hat dafuer `VIG_GATE_COPY`, `VIG_GATE_NO_HARDWARE` und
+  `VIG_GATE_SECONDS`; `tools/android/` beschafft, baut und misst.
 - **Mehrere Ressourcendomaenen** (NV-22,
   [ADR-0037](docs/adr/0037-a-domain-is-a-gpu-with-one-owner.md)).
   `backend.domains.<name>` beschreibt eine weitere GPU mit `gpu_index`,
