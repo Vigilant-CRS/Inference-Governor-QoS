@@ -84,6 +84,23 @@ das Modell fast nicht ([Messung](benchmark/rfdetr-variants.md)).
 
 **Datenpfad (NV-20).** _Neumessung läuft (11.09.), Ergebnis folgt._
 
+**Planbarkeit im begrenzten Modell (NV-23).** Unter neun benannten Annahmen —
+ein Slot, ein geschützter Strom, Laufzeiten innerhalb des Plans, Jitter J,
+Horizont 100 ms — ist das Alter jedes geschützten Frames höchstens
+`δ + 2J + D`, und die längste Versorgungslücke ist nach oben begrenzt.
+Bewiesen, und gegen den echten Scheduler über 176 472 Parametersätze ohne
+Gegenbeispiel geprüft; die Schranke wird exakt erreicht. Die Suche hat die
+erste Fassung des Satzes widerlegt und drei Schwächen des Look-ahead
+gefunden: er gibt verspätete Frames auf, seine Deadline zählt ab Ankunft
+statt Aufnahme, und er sieht fest 100 ms voraus
+([Analyse](analysis/nv23-bounded-claim.md)).
+
+**Der Kern auf ARM.** Auf echten ARM-Kernen (Pixel 2 und Pixel 5, A53- bis
+A76-Klasse) kostet ein Scheduling-Ereignis im Gate-M3-Satz p99 3–20 µs, mit
+32 Modellen bis 150 µs. Eine Entscheidung braucht auf dem ältesten Kern
+0,08 % einer 33-ms-Periode ([Messung](benchmark/arm-phones.md)). Das ist
+der Kern, nicht die Inferenz — auf ARM ist keine gemessen.
+
 ## Fertige Ausbaustufe R0
 
 | Paket | Was es ändert | ADR |
@@ -156,7 +173,8 @@ per Voreinstellung nichts. _Neumessung läuft (11.09.), Ergebnis folgt._
 |---|---|---|
 | NV-15 XSched | funktioniert, ungemessen | Die Messung: zwei Tritonprozesse ohne XSched, mit Level 2, mit TSG, je drei Läufe (`InferenceQoS-runtime/xsched-triton-alt.sh`; `gate-m3` fährt mehrere Backendprozesse gleichzeitig). Dann die Planung: präemptierbare Hintergrundlast als gemessene Eigenschaft des Backends (ADR-0033, Punkt 2), damit der Governor das VLM laufen lässt, statt es zu halten. |
 | Zweiter Betriebspunkt | offen | Zwei Ausführungseinheiten (`slots: 2`, Instance Groups mit zwei Instanzen) samt gemessener Parallelprofile. Die Lastrampe sagt selbst, dass sich ihre Kante damit verschiebt. |
-| NV-21/22/23 | optional / Forschung | Ein weiterer Backendadapter, mehrere Ressourcendomänen, formale Analyse. |
+| NV-22 mehrere Ressourcendomänen | offen | Domänenregister, Routing, unabhängige Budgets; bauen und mit Fake-Executoren testen geht, qualifizieren braucht eine zweite GPU. Erledigt aus diesem Block: NV-21 ([ROS-2-Brücke](integrations/ros2.md)) und NV-23 ([begrenzter Nachweis](analysis/nv23-bounded-claim.md)). |
+| Look-ahead nach NV-23 | offen | Die drei Schwächen aus der Gegenbeispielsuche beheben: verspätete Frames nicht aufgeben, Deadline ab Aufnahme, Horizont aus den Perioden ableiten statt fest 100 ms. |
 
 ## Offen für eine Produktionsfreigabe
 

@@ -19,6 +19,7 @@ beschrieben und **nicht** als allgemeingültige Produktleistung zu lesen.
 | [`soak.md`](soak.md) | Haelt es acht Stunden durch? | keine Drift, kein unbegrenztes Speicherwachstum im Fenster — „kein Leck" folgt daraus nicht |
 | [`portability.md`](portability.md) | Laeuft es auch vor anderen OIP-Servern? | OVMS: 150/150 ohne Codeaenderung |
 | [`rfdetr-variants.md`](rfdetr-variants.md) | Belegen vier echte RF-DETR-Varianten die Variantenwahl? | **nein** — die Auflaesung bestimmt die Laufzeit, das Modell fast nicht |
+| [`arm-phones.md`](arm-phones.md) | Ist der Kern auf schwacher ARM-Hardware ein Engpass? | **nein** — p99 3–20 µs je Ereignis (Pixel 2/5, A53 bis A76); eine Entscheidung kostet auf dem ältesten Kern 0,08 % einer 33-ms-Periode |
 | [`tensorrt.md`](tensorrt.md) | Beseitigt TensorRT den Engpass? | **nein** — Auslastung 103 % → 76 %, Vorsprung halbiert, Engpass bleibt |
 
 ## Regeln, die für jede Zahl hier gelten

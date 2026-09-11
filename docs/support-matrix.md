@@ -37,7 +37,7 @@ Three levels are used throughout, and the difference matters:
 | XSched preemption (Level 2) under Triton | Untested | Runs under Triton 26.06 (CUDA 13.3) on sm86 with `CUXTRA_CUDA_LIB` and a nine-line patch — setup and pitfalls in [deploy/xsched](../deploy/xsched/README.md). Not measured; the governor does not plan with preemption yet |
 | Any other inference server | **Not supported** | The backend seam exists ([ADR-0024](adr/0024-the-backend-is-a-seam-not-a-type.md)) and has exactly one implementation. |
 | Linux, glibc | **Qualified** | `x86_64-unknown-linux-gnu` |
-| Linux, `aarch64` | Built and tested | Cross-built and unit-tested under emulation in CI. |
+| Linux, `aarch64` | Built and tested | Cross-built and unit-tested under emulation in CI. The decision path was also measured on real ARM cores (Pixel 2 and Pixel 5, A53 to A76 class): p99 3–20 µs per scheduling event for the Gate M3 model set ([arm-phones.md](benchmark/arm-phones.md)). No inference was measured on ARM. |
 | musl, Windows, macOS | Untested | No target in the release workflow. |
 | Rust toolchain | — | 1.98 or newer, edition 2024 |
 
