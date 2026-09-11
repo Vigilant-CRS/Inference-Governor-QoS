@@ -76,6 +76,19 @@ impl Region {
     }
 }
 
+impl Region {
+    /// Der Pfad unter `/dev/shm`.
+    ///
+    /// Wer echte Bilder statt Nullen schicken will — der Edge-Pilot —,
+    /// schreibt sie hierhin, bevor er den Auftrag abschickt. Eine Region je
+    /// gleichzeitig offenem Auftrag: wer ueberschreibt, waehrend das Backend
+    /// noch liest, misst Datensalat.
+    #[must_use]
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
 impl Drop for Region {
     fn drop(&mut self) {
         // Ein Benchmark, der /dev/shm zumuellt, wird beim naechsten Lauf zur

@@ -68,13 +68,14 @@ impl GrpcInferenceService for BackendService {
     ) -> Result<Response<ModelInferResponse>, Status> {
         let request = r.into_inner();
         self.backend.execute(&request.model_name, &request.id).await;
+        let (outputs, raw_output_contents) = self.backend.fixed_output.clone().unwrap_or_default();
         Ok(Response::new(ModelInferResponse {
             model_name: request.model_name,
             model_version: "1".to_owned(),
             id: request.id,
             parameters: HashMap::new(),
-            outputs: Vec::new(),
-            raw_output_contents: Vec::new(),
+            outputs,
+            raw_output_contents,
         }))
     }
 

@@ -35,7 +35,19 @@ pub struct Backend {
     pub executed: AtomicU64,
     /// Summe der tatsaechlich verbrauchten Ausfuehrungszeit in Nanosekunden.
     pub busy_nanos: AtomicU64,
+    /// Eine feste Antwort, falls gesetzt: Ausgabetensoren und ihre Rohdaten.
+    ///
+    /// Ohne sie antwortet das Backend leer — genug fuer Laufzeitfragen. Wer
+    /// wissen will, ob ein Client eine Antwort auch **liest** (der
+    /// Edge-Pilot dekodiert Detektionen), braucht Inhalt.
+    pub fixed_output: Option<FixedOutput>,
 }
+
+/// Ausgabetensoren und Rohdaten einer festen Antwort.
+pub type FixedOutput = (
+    Vec<vig_protocol_oip::inference::model_infer_response::InferOutputTensor>,
+    Vec<Vec<u8>>,
+);
 
 impl Backend {
     /// Baut ein Backend.
@@ -51,7 +63,15 @@ impl Backend {
             seed,
             executed: AtomicU64::new(0),
             busy_nanos: AtomicU64::new(0),
+            fixed_output: None,
         }
+    }
+
+    /// Dasselbe Backend, das auf jede Inferenz mit `output` antwortet.
+    #[must_use]
+    pub fn with_fixed_output(mut self, output: FixedOutput) -> Self {
+        self.fixed_output = Some(output);
+        self
     }
 
     /// Zieht die Laufzeit fuer einen Frame.

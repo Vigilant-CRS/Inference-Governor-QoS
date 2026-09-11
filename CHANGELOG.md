@@ -48,6 +48,25 @@ bedeutet, steht in [docs/releases.md](docs/releases.md).
   (Spec 19.4); `frontier` vergleicht automatische Variantenwahl mit festen
   Varianten (Spec 19.7); `gate-m3` faehrt Modelle mit eigenem Backendprozess
   gleichzeitig und gibt den Schattenvergleich der Prognose aus.
+- **Praemptierbare Hintergrund-Lanes** (NV-15, [ADR-0035](docs/adr/0035-preemption-is-a-measured-backend-property.md)).
+  `backend.preemptible_lanes` und `preemptible: { residual_blocking_us, source }`
+  je Modell. Ein Modell in einem eigenen, niedrig priorisierten Backendprozess
+  laeuft auf seiner Lane statt auf dem geschuetzten Slot; geschuetzte Arbeit
+  plant waehrenddessen mit dem **gemessenen** Restblocking R, der Look-ahead
+  fragt, ob R in die geschuetzte Reserve passt. `vig calibrate` misst R ueber
+  mehrere Endpunkte, `vig doctor` warnt, solange es nur erklaert ist. Ohne
+  diese Angaben aendert sich keine Entscheidung. Drei neue Kennzahlen.
+- **Vig-Edge-Pilot, ein interner Referenzpilot** ([docs/pilot/edge-pilot.md](docs/pilot/edge-pilot.md)):
+  annotierte Videosequenzen als Kameras, ein interner 23-Klassen-Detektor als
+  geschuetzter Strom, Lageberichte ueber ein LLM als Hintergrundlast.
+  Alarmlatenz und Lagebild-Trefferquote gegen die Annotation, Abnahmekriterien
+  K1–K8 vor der Messung festgelegt; das Binary `edge-pilot` druckt das Urteil.
+- **Der Kern auf ARM gemessen** ([docs/benchmark/arm-phones.md](docs/benchmark/arm-phones.md)):
+  `decision-bench` in `vig-sim`, statisch fuer aarch64, auf Pixel 2 und
+  Pixel 5 gefahren.
+- **Ein begrenzter Nachweis** (NV-23, [docs/analysis/nv23-bounded-claim.md](docs/analysis/nv23-bounded-claim.md)):
+  eine Schranke fuer das Alter geschuetzter Frames, bewiesen und per
+  Gegenbeispielsuche gegen den echten Scheduler geprueft.
 - **ROS-2-Bruecke** (NV-21, `integrations/ros2/`). Ein rclpy-Knoten, der
   Kamera-Topics mit Altersangabe, Aufnahmekennung und Supersession-Schluessel
   an den Governor gibt — ueber Shared Memory auf demselben Host, sonst per
@@ -140,6 +159,11 @@ bedeutet, steht in [docs/releases.md](docs/releases.md).
   laengste Luecke 99 statt 15 ms ([Messung](docs/benchmark/nv06-ab.md)). Die
   Zelle ersetzt jetzt das Profil und nicht die Marge; der Schattenvergleich
   rechnet ebenfalls mit Marge.
+
+- **`vig calibrate` mass nach einer verworfenen Paarmessung unter fremder
+  Last.** Die Lasttasks der verworfenen Messung liefen weiter, und jede
+  spaetere Messung derselben Kalibrierung lief unter einer Last, die in
+  keinem Profil stand. Sie werden jetzt vor der Pruefung beendet.
 
 ### Geaendert
 

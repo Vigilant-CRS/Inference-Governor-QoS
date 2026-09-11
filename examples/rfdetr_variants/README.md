@@ -16,7 +16,7 @@ lists taken from the `*.classmap.json` next to them.
 | `rfdetr_768` | `1×3×768×768` | `1×300×4` | `1×300×10` | 9 + no-object, **same order** |
 | `rfdetr_nano_512` | `1×3×512×512` | `1×300×4` | `1×300×8` | 7 + no-object, order unknown |
 | `rfdetr_23cls_768` | `1×3×768×768` | `1×300×4` | `1×300×24` | 23 + no-object |
-| `rfdetr_28cls_768` | `1×3×768×768` | `1×300×4` | `1×300×29` | 28 + no-object, **superset of v4** |
+| `rfdetr_28cls_768` | `1×3×768×768` | `1×300×4` | `1×300×29` | 28 + no-object, **superset of the 23-class model** |
 
 `rfdetr_512` is byte-identical to the detector every published Gate-M3 number
 was measured with — same SHA-256. The measurement and this example describe the
@@ -38,10 +38,10 @@ character-for-character identical. Only the input differs. That is not a
 substitute, it is a different preprocessing — and it costs time, which is why
 `preprocess_us` exists.
 
-**Case 2 — same resolution, superset of classes.** The unpleasant one. v5 knows
-all 23 of v4's classes in the same order plus five more, so a detection with
+**Case 2 — same resolution, superset of classes.** The unpleasant one. The 28-class model knows
+all 23 classes of the 23-class model in the same order plus five more, so a detection with
 class id ≤ 22 means the same thing in both. They are still not interchangeable:
-the governor picks per request, and v4 instead of v5 silently loses five
+the governor picks per request, and the 23-class model instead of the 28-class one silently loses five
 classes. Interchangeability has to hold in both directions.
 
 **Case 3 — a variant whose meaning nobody wrote down.** No class map ships with
@@ -58,9 +58,9 @@ None of it is convention or guesswork:
 |---|---|
 | Input and output shapes | `tools/onnx-signature.py`, measured from the files |
 | Class lists and order | `*.classmap.json` next to each model |
-| `coordinates: normalized`, `layout: cxcywh` | the deployment's own decode code, `dem Dekodiercode des Anwenders:267` |
-| `unit: logits` | same file, lines 266 and 301 — the values are pre-sigmoid |
-| `normalization: imagenet_after_square_bilinear_no_letterbox` | same file, lines 208 and 232 |
+| `coordinates: normalized`, `layout: cxcywh` | the deployment's own decode code |
+| `unit: logits` | same code — the values are pre-sigmoid |
+| `normalization: imagenet_after_square_bilinear_no_letterbox` | same code, its preprocessing |
 
 Reading that code corrected two assumptions we had written down first: the class
 output carries **logits, not probabilities**, and `dets` and `labels` are two

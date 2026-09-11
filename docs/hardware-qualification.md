@@ -212,8 +212,8 @@ variant's output by name gets a backend error after a switch.
 ```
 rfdetr.onnx            in input:FP32[1,3,512,512]   out labels:FP32[1,300,10]
 rfdetr_768.onnx        in input:FP32[1,3,768,768]   out labels:FP32[1,300,10]
-detector_23cls.onnx   in input:FP32[1,3,768,768]   out labels:FP32[1,300,24]
-rfdetr_28cls_4_large.onnx in input:FP32[1,3,768,768]   out labels:FP32[1,300,29]
+rfdetr_23cls_768.onnx  in input:FP32[1,3,768,768]   out labels:FP32[1,300,24]
+rfdetr_28cls_768.onnx  in input:FP32[1,3,768,768]   out labels:FP32[1,300,29]
 ```
 
 Four generations of the same detector: different input resolutions and 10, 24

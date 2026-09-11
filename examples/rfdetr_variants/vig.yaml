@@ -16,7 +16,7 @@
 # `tools/onnx-signature.py` aus den Dateien gemessen, die Klassenlisten stammen
 # aus den `*.classmap.json` daneben, und Koordinatenkonvention, Layout und
 # Einheit sind aus dem Dekodiercode des Anwenders belegt
-# (`dem Dekodiercode des Anwenders`, Zeilen 266/267 und 301). Beim Nachlesen dort haben sich
+# (Zeilen fuer Box-Layout, Einheit und Vorverarbeitung). Beim Nachlesen haben sich
 # zwei erste Annahmen als falsch erwiesen: die Klassenausgabe traegt **Logits**
 # und keine Wahrscheinlichkeiten, und `dets` und `labels` sind zwei Ausgaben
 # mit verschiedener Bedeutung und nicht eine.
@@ -85,12 +85,12 @@ models:
             width: 768
             height: 768
           outputs:
-            # Ausgabe 0 = `dets`. Belegt in dem Dekodiercode des Anwenders:267:
+            # Ausgabe 0 = `dets`. Belegt im Dekodiercode des Anwenders:
             # "boxes: [Q, 4] cxcywh, normalized 0..1".
             - kind: detections
               coordinates: normalized
               layout: cxcywh
-            # Ausgabe 1 = `labels`. Belegt in dem Dekodiercode des Anwenders:266 und 301:
+            # Ausgabe 1 = `labels`. Belegt im Dekodiercode des Anwenders:
             # "raw class logits (pre-sigmoid)", die Sigmoid-Funktion wird erst
             # im Client angewandt. Also `logits` und **nicht** `probability` —
             # ein Client, der die Werte fuer Wahrscheinlichkeiten haelt,
@@ -98,15 +98,15 @@ models:
             - kind: classification
               unit: logits
               labels:
-                - person
-                - civilian_vehicle
-                - military_vehicle
-                - aircraft
-                - alarm
-                - munition
-                - vessel
-                - drone
-                - benign_handheld
+                - klasse_01
+                - klasse_02
+                - klasse_03
+                - klasse_04
+                - klasse_05
+                - klasse_06
+                - klasse_07
+                - klasse_08
+                - klasse_09
       - id: r512
         backend_model: rfdetr_512
         quality: { value: 0.92, source: user_declared }
@@ -127,12 +127,12 @@ models:
             width: 512
             height: 512
           outputs:
-            # Ausgabe 0 = `dets`. Belegt in dem Dekodiercode des Anwenders:267:
+            # Ausgabe 0 = `dets`. Belegt im Dekodiercode des Anwenders:
             # "boxes: [Q, 4] cxcywh, normalized 0..1".
             - kind: detections
               coordinates: normalized
               layout: cxcywh
-            # Ausgabe 1 = `labels`. Belegt in dem Dekodiercode des Anwenders:266 und 301:
+            # Ausgabe 1 = `labels`. Belegt im Dekodiercode des Anwenders:
             # "raw class logits (pre-sigmoid)", die Sigmoid-Funktion wird erst
             # im Client angewandt. Also `logits` und **nicht** `probability` —
             # ein Client, der die Werte fuer Wahrscheinlichkeiten haelt,
@@ -140,23 +140,23 @@ models:
             - kind: classification
               unit: logits
               labels:
-                - person
-                - civilian_vehicle
-                - military_vehicle
-                - aircraft
-                - alarm
-                - munition
-                - vessel
-                - drone
-                - benign_handheld
+                - klasse_01
+                - klasse_02
+                - klasse_03
+                - klasse_04
+                - klasse_05
+                - klasse_06
+                - klasse_07
+                - klasse_08
+                - klasse_09
 
   # ---------------------------------------------------------------------
   # Fall 2: dieselbe Auflaesung, eine Obermenge an Klassen.
   #
-  # v5 kennt alle 23 Klassen von v4 in derselben Reihenfolge und fuenf weitere.
+  # Die 28er-Variante kennt alle 23 Klassen der 23er in derselben Reihenfolge und fuenf weitere.
   # Ein Ergebnis mit Klassen-ID <= 22 bedeutet in beiden dasselbe — und
   # trotzdem sind die Varianten nicht austauschbar: der Governor waehlt je
-  # Request, und v4 statt v5 verliert fuenf Klassen, ohne dass der Client es
+  # Request, und die 23er statt der 28er verliert fuenf Klassen, ohne dass der Client es
   # erfaehrt. Der gemeldete Grund ist `Labels`, und zwar fuer Ausgabe 1.
   # ---------------------------------------------------------------------
   detector_classes:
@@ -168,7 +168,7 @@ models:
       max_age_ms: 132
       variant_dwell_ms: 200
     variants:
-      - id: v5
+      - id: k28
         backend_model: rfdetr_28cls_768
         quality: { value: 1.00, source: user_declared }
         # Platzhalter, nicht gemessen — siehe Kopf der Datei.
@@ -187,12 +187,12 @@ models:
             width: 768
             height: 768
           outputs:
-            # Ausgabe 0 = `dets`. Belegt in dem Dekodiercode des Anwenders:267:
+            # Ausgabe 0 = `dets`. Belegt im Dekodiercode des Anwenders:
             # "boxes: [Q, 4] cxcywh, normalized 0..1".
             - kind: detections
               coordinates: normalized
               layout: cxcywh
-            # Ausgabe 1 = `labels`. Belegt in dem Dekodiercode des Anwenders:266 und 301:
+            # Ausgabe 1 = `labels`. Belegt im Dekodiercode des Anwenders:
             # "raw class logits (pre-sigmoid)", die Sigmoid-Funktion wird erst
             # im Client angewandt. Also `logits` und **nicht** `probability` —
             # ein Client, der die Werte fuer Wahrscheinlichkeiten haelt,
@@ -200,35 +200,35 @@ models:
             - kind: classification
               unit: logits
               labels:
-                - person
-                - car
-                - truck
-                - bus
-                - motorcycle
-                - bicycle
-                - military_vehicle
-                - military_tank
-                - military_truck
-                - military_artillery
-                - aircraft
-                - drone
-                - vessel
-                - alarm
-                - klasse_a
-                - klasse_b
-                - knife
-                - munition
-                - bag_package
-                - benign_handheld
-                - dog
-                - animal
-                - construction_vehicle
-                - camera
-                - phone
-                - umbrella
-                - bottle
-                - microphone
-      - id: v4
+                - klasse_01
+                - klasse_02
+                - klasse_03
+                - klasse_04
+                - klasse_05
+                - klasse_06
+                - klasse_07
+                - klasse_08
+                - klasse_09
+                - klasse_10
+                - klasse_11
+                - klasse_12
+                - klasse_13
+                - klasse_14
+                - klasse_15
+                - klasse_16
+                - klasse_17
+                - klasse_18
+                - klasse_19
+                - klasse_20
+                - klasse_21
+                - klasse_22
+                - klasse_23
+                - klasse_24
+                - klasse_25
+                - klasse_26
+                - klasse_27
+                - klasse_28
+      - id: k23
         backend_model: rfdetr_23cls_768
         quality: { value: 0.95, source: user_declared }
         # Platzhalter, nicht gemessen — siehe Kopf der Datei.
@@ -247,12 +247,12 @@ models:
             width: 768
             height: 768
           outputs:
-            # Ausgabe 0 = `dets`. Belegt in dem Dekodiercode des Anwenders:267:
+            # Ausgabe 0 = `dets`. Belegt im Dekodiercode des Anwenders:
             # "boxes: [Q, 4] cxcywh, normalized 0..1".
             - kind: detections
               coordinates: normalized
               layout: cxcywh
-            # Ausgabe 1 = `labels`. Belegt in dem Dekodiercode des Anwenders:266 und 301:
+            # Ausgabe 1 = `labels`. Belegt im Dekodiercode des Anwenders:
             # "raw class logits (pre-sigmoid)", die Sigmoid-Funktion wird erst
             # im Client angewandt. Also `logits` und **nicht** `probability` —
             # ein Client, der die Werte fuer Wahrscheinlichkeiten haelt,
@@ -260,34 +260,34 @@ models:
             - kind: classification
               unit: logits
               labels:
-                - person
-                - car
-                - truck
-                - bus
-                - motorcycle
-                - bicycle
-                - military_vehicle
-                - military_tank
-                - military_truck
-                - military_artillery
-                - aircraft
-                - drone
-                - vessel
-                - alarm
-                - klasse_a
-                - klasse_b
-                - knife
-                - munition
-                - bag_package
-                - benign_handheld
-                - dog
-                - animal
-                - construction_vehicle
+                - klasse_01
+                - klasse_02
+                - klasse_03
+                - klasse_04
+                - klasse_05
+                - klasse_06
+                - klasse_07
+                - klasse_08
+                - klasse_09
+                - klasse_10
+                - klasse_11
+                - klasse_12
+                - klasse_13
+                - klasse_14
+                - klasse_15
+                - klasse_16
+                - klasse_17
+                - klasse_18
+                - klasse_19
+                - klasse_20
+                - klasse_21
+                - klasse_22
+                - klasse_23
 
   # ---------------------------------------------------------------------
   # Fall 3: eine Variante, deren Bedeutung niemand aufgeschrieben hat.
   #
-  # Zu `rfdetr_nano_512` liegt in das Anwenderprojekt keine Klassenkarte. Die Klassenzahl ist
+  # Zu `rfdetr_nano_512` liegt keine Klassenkarte vor. Die Klassenzahl ist
   # aus der Logit-Breite ableitbar (8 = 7 + No-Object), die **Reihenfolge**
   # nicht — und die Reihenfolge ist die Bedeutung. Deshalb steht hier keine
   # Semantikangabe und keine geratene Labelliste: nicht beschrieben ist eine

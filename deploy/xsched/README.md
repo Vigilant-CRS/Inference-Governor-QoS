@@ -108,12 +108,14 @@ Der Governor spricht beide über `backend_endpoint` je Modell an
   den hoch priorisierten Prozess bei 98–110 ms unter Konkurrenz statt
   182–205 ms ohne XSched (allein 96 ms). Wie sich das auf Gate M3 überträgt,
   misst `gate-m3` mit der Zwei-Prozess-Konfiguration.
-- **Keine Planung mit Präemption.** Der Governor behandelt die GPU als eine
-  Ausführungseinheit; mit `slots: 1` und `no_corun` hält er das
-  Hintergrundmodell weiter zurück. Damit er es laufen lässt, muss die Planung
-  präemptierbare Arbeit als **gemessene** Eigenschaft des Backends kennen —
-  nicht als Annahme, denn die XSched-API meldet für jede Ebene „Erfolg", auch
-  für die unfertige.
+- **Planung mit Präemption nur mit eigener Konfiguration.** Mit `slots: 1`
+  und `no_corun` hält der Governor das Hintergrundmodell weiter zurück. Damit
+  er es laufen lässt, braucht die Konfiguration eine präemptierbare Lane und
+  das **gemessene** Restblocking R — nicht als Annahme, denn die XSched-API
+  meldet für jede Ebene „Erfolg", auch für die unfertige
+  ([ADR-0035](../../docs/adr/0035-preemption-is-a-measured-backend-property.md),
+  [Beispiel](../../examples/gate_m3/vig-preemptible.yaml)). `vig calibrate`
+  misst R, solange A und B unter XSched laufen.
 - **Kein qualifizierter Stack.** Upstream-Stand `f49289f` plus Patch, auf
   einer Karte. Andere Architekturen, andere Treiber: erst prüfen.
 

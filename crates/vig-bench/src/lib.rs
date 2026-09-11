@@ -29,6 +29,7 @@
 #![allow(clippy::expect_used)]
 
 pub mod backend;
+pub mod pilot;
 pub mod service;
 pub mod shm;
 pub mod workload;

@@ -42,7 +42,7 @@ Betriebspunkt**, und zwar aus zwei unabhaengigen Gruenden:
    Eingabeauflaesung. `vig doctor` nennt beides beim Namen; Belege in
    [`examples/rfdetr_variants/README.md`](../../examples/rfdetr_variants/README.md).
 2. **Und selbst wenn sie austauschbar waeren, waere nichts zu gewinnen.**
-   Zwischen `rfdetr_768`, `v4` und `v5` liegen 1,1 % Laufzeit. Eine
+   Zwischen `rfdetr_768` und den beiden Varianten mit 23 und 28 Klassen liegen 1,1 % Laufzeit. Eine
    Degradation, die ein Prozent bringt, ist keine.
 
 Der einzige echte Hebel — 512 gegen 768 px, 20 ms Unterschied — ist genau der,
