@@ -68,7 +68,11 @@ pub enum Governor {
 }
 
 impl Governor {
-    fn on_event(&mut self, now: Instant, event: Event, sink: &mut Actions) {
+    /// Reicht ein Ereignis an den Governor weiter.
+    ///
+    /// Oeffentlich fuer Messwerkzeuge, die den Entscheidungspfad selbst
+    /// vermessen (`decision-bench`, ueber [`run_observed`]).
+    pub fn on_event(&mut self, now: Instant, event: Event, sink: &mut Actions) {
         match self {
             Self::Vigilant(s) => s.on_event(now, event, sink),
             Self::Baseline(s) => s.on_event(now, event, sink),
@@ -154,7 +158,33 @@ impl RunResult {
 /// Wenn das Szenario ungueltige Laufzeitprofile enthaelt (`p99 < p50` oder
 /// `p50 == 0`). Das ist ein Konfigurationsfehler im Szenario, kein Laufzeitfall.
 #[must_use]
-pub fn run(scenario: &Scenario, mut governor: Governor, label: String, seed: u64) -> RunResult {
+pub fn run(scenario: &Scenario, governor: Governor, label: String, seed: u64) -> RunResult {
+    run_observed(scenario, governor, label, seed, |g, now, event, actions| {
+        g.on_event(now, event, actions);
+    })
+}
+
+/// Faehrt einen Lauf und reicht jedes Ereignis durch `step`.
+///
+/// Dieselbe Ereignisfolge wie [`run`], bitgleich: `step` muss das Ereignis
+/// an den Governor weitergeben und darf darum herum messen. So vermisst
+/// `decision-bench` den Entscheidungspfad auf fremder Hardware, ohne eine
+/// zweite, abweichende Simulationsschleife zu pflegen.
+///
+/// # Panics
+///
+/// Wie [`run`].
+#[must_use]
+pub fn run_observed<F>(
+    scenario: &Scenario,
+    mut governor: Governor,
+    label: String,
+    seed: u64,
+    mut step: F,
+) -> RunResult
+where
+    F: FnMut(&mut Governor, Instant, Event, &mut Actions),
+{
     // Laufzeitverteilungen je Modell und Variante.
     let dists: Vec<Vec<RuntimeDistribution>> = scenario
         .streams
@@ -194,17 +224,27 @@ pub fn run(scenario: &Scenario, mut governor: Governor, label: String, seed: u64
         match event {
             crate::event::SimEvent::Arrival { key, .. } => {
                 if let Some(descriptor) = pending.remove(&key.0) {
-                    governor.on_event(now, Event::Arrival(descriptor), &mut actions);
+                    step(&mut governor, now, Event::Arrival(descriptor), &mut actions);
                 }
             }
             crate::event::SimEvent::Completion { request, slot } => {
-                governor.on_event(now, Event::Completion { request, slot }, &mut actions);
+                step(
+                    &mut governor,
+                    now,
+                    Event::Completion { request, slot },
+                    &mut actions,
+                );
             }
             crate::event::SimEvent::BackendFailure { request, slot } => {
-                governor.on_event(now, Event::BackendFailure { request, slot }, &mut actions);
+                step(
+                    &mut governor,
+                    now,
+                    Event::BackendFailure { request, slot },
+                    &mut actions,
+                );
             }
             crate::event::SimEvent::Tick | crate::event::SimEvent::EndOfRun => {
-                governor.on_event(now, Event::Tick, &mut actions);
+                step(&mut governor, now, Event::Tick, &mut actions);
             }
         }
 
