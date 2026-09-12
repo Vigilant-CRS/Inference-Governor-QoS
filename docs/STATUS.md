@@ -237,7 +237,7 @@ per Voreinstellung nichts. Mit Marge ist `active` sicher, auf Gate M3 aber ohne 
   | Rechteliste, Modellverwaltung, Offlinebetrieb | [support-matrix.md](support-matrix.md) |
   | Installationspfad mit Bereitschaftsprüfung | `deploy/docker-compose/` |
   | SBOM, signierbare Artefakte, `cargo auditable` | `.github/workflows/release.yml` |
-  | Dauerlauf auf dem freizugebenden Stand | bestanden, 8 Stunden ([soak.md](benchmark/soak.md)) |
+  | Dauerlauf auf dem freizugebenden Stand | bestanden, zweimal 8 Stunden: 02.09. und 11./12.09. auf dem Stand mit den Review-Fixes — kein Speicherwachstum, keine Drift, kein Fehler ([soak.md](benchmark/soak.md)) |
   | Datenpfadbudgets | [datapath-budgets.md](datapath-budgets.md) — definiert; Urteil auf ruhiger Maschine ausstehend |
   | Freigabe durch Pilotverantwortliche | offen, braucht NV-19 |
 - **Zweite Hardware.** Die Logik ist portabel, die Zahlen sind es nicht. Auf

@@ -157,3 +157,41 @@ USB angebundener Datenträger, in den acht Stunden lang jede Minute ein paar
 Zeilen geschrieben werden, ist genau der Kandidat für eine
 Energiesparabschaltung — der erste Lauf überlebte das nur, weil die Platte
 sich erst nach dem Ende aushängte.
+
+## Zweiter Lauf, 11./12.09.2026: der Stand mit den Review-Fixes
+
+Acht Stunden, 479 Fenster, 19:37 bis 03:37, auf dem eingefrorenen Binary von
+`64c9d06` (Hash und Treiber im Manifest des Laufs). Der Stand enthält den
+Security-Review, den NV-17-Fix, NV-22, `TCP_NODELAY` in den Werkzeugen und
+die Korrektur der Bereitschaftsprüfung.
+
+**Dieser Lauf ist ein Stabilitätslauf, keine Latenzqualifikation.** Parallel
+liefen die Builds der laufenden Korrekturen auf den Kernen 0–7, der Lauf
+selbst auf 8–15; der Wächter markierte 38 seiner rund 480 Proben mit
+Fremdlast. Die Abdeckungszahlen unten sind deshalb Hinweise. Was er zeigen
+soll — Speicher, Fehler, Drift — hängt daran nicht.
+
+| | erste Stunde | letzte Stunde |
+|---|---:|---:|
+| Detektor, Verbrauchersicht unabgedeckt | 0,1 ‰ | 0,1 ‰ |
+| Pose, Verbrauchersicht | 59,9 ‰ | 34,4 ‰ |
+| Tiefe, Verbrauchersicht | 158,8 ‰ | 155,0 ‰ |
+| längste Detektorlücke | 39 ms | 21 ms |
+| längste Poselücke | 1083 ms | 107 ms |
+| längste Tiefenlücke | 29,3 s | 5,5 s |
+
+- **Kein Speicherwachstum.** RSS zwischen 10,9 und 15,3 MB, am Ende 11,9 MB —
+  niedriger als am Anfang (13,4 MB). Über acht Stunden ist kein Trend zu
+  sehen. „Kein Leck" folgt daraus weiterhin nicht.
+- **Keine Drift.** Die Werte der letzten Stunde sind nicht schlechter als die
+  der ersten; Pose und die längsten Lücken werden besser, was zu den
+  eingeschwungenen Margen passt.
+- **Der Preis steht daneben.** Von 3 190 800 angebotenen Aufträgen wurden
+  2 962 026 geliefert und 228 589 abgelehnt (7,2 %) — fast alle in den
+  Spitzenfenstern, und fast alle aus dem Tiefenstrom, der in der ersten
+  Stunde bis zu 29 Sekunden ohne frisches Ergebnis blieb. Der Governor hält
+  den Detektor und bezahlt mit dem Strom, der es am ehesten verträgt.
+- **Kein Fehler, kein Absturz, kein Backendausfall** in acht Stunden.
+
+Rohdaten: `InferenceQoS-runtime/soak-2026-09-11/` (Fensterprotokoll,
+Metrikabzug, Taktmitschnitt, Wächterprotokoll, Manifest).
