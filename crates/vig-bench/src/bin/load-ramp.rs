@@ -89,6 +89,10 @@ fn scaled_period(base_ms: u64, load_percent: u64) -> u64 {
 ///   Konvergenz der Kalibrierung auf echter Hardware sichtbar wird.
 /// * `VIG_RAMP_POINTS` — die Lastpunkte der Rampe in Prozent, z. B.
 ///   `90,95,100,105,110,125`.
+/// * `VIG_RAMP_PROTECT_SUPPLY` — `an` oder `aus`: `protect_supply`. Der
+///   Look-ahead haelt Hintergrundarbeit dann auch zurueck, wenn die naechste
+///   geschuetzte Ankunft ihre Deadline haelt, ihr Ergebnis aber erst nach dem
+///   Ablauf des vorigen kaeme (ADR-0041). Kostet Hintergrundfortschritt.
 /// * `VIG_RAMP_PIPELINING` — `pipelining_depth`, Voreinstellung 0. Mit null
 ///   startet der Governor den naechsten Auftrag erst nach der Antwort auf den
 ///   vorigen; Triton direkt hat bis zu acht in der Schwebe. Die Luecke
@@ -99,6 +103,7 @@ struct Knobs {
     pipelining: usize,
     active: bool,
     learning: bool,
+    protect_supply: bool,
     profile_permille: u64,
     points: Vec<u64>,
 }
@@ -127,6 +132,15 @@ impl Knobs {
                 )),
             }
         });
+        let protect_supply = var("VIG_RAMP_PROTECT_SUPPLY").is_some_and(|v| {
+            match v.trim().to_lowercase().as_str() {
+                "an" | "on" | "ja" | "true" | "1" => true,
+                "aus" | "off" | "nein" | "false" | "0" => false,
+                other => panic_on(&format!(
+                    "VIG_RAMP_PROTECT_SUPPLY: an oder aus, nicht {other}"
+                )),
+            }
+        });
         let profile_permille = var("VIG_RAMP_PROFILE_SCALE").map_or(1_000, |v| {
             permille(&v).expect("VIG_RAMP_PROFILE_SCALE: ein Faktor wie 2 oder 0.7")
         });
@@ -148,6 +162,7 @@ impl Knobs {
             pipelining,
             active,
             learning,
+            protect_supply,
             profile_permille,
             points,
         }
@@ -167,17 +182,22 @@ impl Knobs {
         if self.learning {
             extra.push_str("\n  margin_learning: {}");
         }
+        if self.protect_supply {
+            extra.push_str("\n  protect_supply: true");
+        }
         extra
     }
 
     /// Eine Kopfzeile, damit jede Ergebnisdatei ihre Einstellungen nennt.
     fn describe(&self) -> String {
         format!(
-            "Governor: Marge {} %, Pipelining {}, Prognose {}, Margenlernen {}, Profil x{}.{:03}",
+            "Governor: Marge {} %, Pipelining {}, Prognose {}, Margenlernen {}, \
+             Versorgungsschutz {}, Profil x{}.{:03}",
             self.margin_percent,
             self.pipelining,
             if self.active { "active" } else { "shadow" },
             if self.learning { "an" } else { "aus" },
+            if self.protect_supply { "an" } else { "aus" },
             self.profile_permille / 1_000,
             self.profile_permille % 1_000,
         )
