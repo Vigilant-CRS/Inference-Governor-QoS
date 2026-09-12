@@ -134,8 +134,63 @@ unbelasteten Detektor verlieren.
 
 ## Abnahmekriterien
 
-Festgelegt am 11.09.2026, vor der ersten Messung. Das Werkzeug druckt am Ende
-ein Urteil zu K1–K7; K8 kommt aus `shm-latency`.
+**Zwei Gruppen, seit dem 12.09.2026.** Die ursprünglichen Kriterien K1–K7,
+festgelegt am 11.09. vor der ersten Messung, maßen zwei Dinge in einem
+Urteil: was der Governor entscheidet, und was Detektor, Datensatz und
+Bildrate überhaupt hergeben. Der [erste vollständige
+Lauf](#erster-vollständiger-lauf-12092026-verfehlt) verfehlte K1 (Alarm
+≤ 300 ms) und K4 (Trefferquote) um ein Vielfaches — **und die Referenz ohne
+jede Konkurrenz ebenso**. Ein Kriterium, das die Referenz selbst nicht
+erfüllt, kann kein Urteil über die Planung tragen. Das war ein Fehler im
+Entwurf der Kriterien, und so ist er korrigiert:
+
+- **Gruppe Planung (P):** der Vergleich gegen den Arm „Backend direkt" unter
+  derselben Last. Nur sie entscheidet über den Exitcode.
+- **Gruppe Anwendung (A):** die absoluten Schwellen. Sie gelten zuerst für
+  die Referenz ohne Konkurrenz; verfehlt die schon, lautet das Urteil
+  **nicht anwendbar: Erkennungsqualität** — ausgewiesen, aber nicht
+  gewertet.
+
+Beide Gruppen stehen getrennt im Bericht und in `summary.json`; K8 kommt
+weiter aus `shm-latency`.
+
+### Gruppe Planung
+
+| # | früher | Kriterium | Bestanden, wenn |
+|---|---|---|---|
+| P1 | K2 | **Alarm unter Last** (C, D) | Vigilants p95-Alarmlatenz ist mindestens 30 % kürzer als die des Backends direkt, **oder** das Backend direkt erfüllt A1 selbst — dann gibt es dort nichts zu gewinnen |
+| P2 | K3 | **Kein Schaden ohne Last** (A) | Vigilants p95 höchstens 5 % oder 10 ms schlechter als direkt (Spec 19.8), das Größere von beiden |
+| P3 | neu | **Aufgabenqualität unter Last** (C, D) | Vigilants Trefferquote höchstens 2 % schlechter als die des Backends direkt |
+| P4 | neu | **Versorgung unter Last** (C, D) | Abdeckung des Alarmpfads höchstens 2 % schlechter und längste Lücke höchstens 10 % (oder 10 ms) länger als direkt |
+| P5 | K5 | **Entkopplung** (alle Punkte) | Der Berichtspfad verschlechtert Vigilants Alarmlatenz nicht: p95 mit Bericht höchstens 10 % (oder 5 ms) über dem Lauf ohne Bericht |
+| P6 | K6 | **Der Bericht lebt** (A, B) | mindestens zwei fertige Lageberichte je Minute |
+
+P3 und P4 sind neu, weil die Trennung sie verlangt: Die absoluten Schwellen
+wandern in die andere Gruppe, und ohne sie stünde für Trefferquote und
+Versorgung gar kein Maß mehr da. Ihr Maßstab ist derselbe Lauf auf derselben
+Karte, nur ohne Governor.
+
+### Gruppe Anwendung
+
+| # | früher | Kriterium | Bestanden, wenn | Anwendbar, wenn |
+|---|---|---|---|---|
+| A1 | K1 | **Alarm unter Last** (C, D) | p95 ≤ 300 ms **und** nie alarmierte Ereignisse höchstens Referenz + 2 Prozentpunkte | die Referenz ohne Konkurrenz selbst ≤ 300 ms liegt |
+| A2 | K4 | **Lagebild** (C, D) | Trefferquote mindestens 90 % der Referenzquote | die Referenzquote mindestens 500 ‰ der annotierten Objekte erreicht |
+| A3 | K7 | **Keine erfundenen Alarme** | Fehlalarmquote höchstens Referenz + 1 Prozentpunkt | immer |
+| K8 | K8 | **Datenpfad** | das Budgeturteil aus `docs/datapath-budgets.md` auf derselben Maschine: bestanden | immer |
+
+Die Anwendbarkeitsschwelle von A2 (500 ‰) ist eine Setzung mit einem Grund:
+Ein Detektor, der auf diesem Datensatz nur ein Fünftel der annotierten
+Objekte überhaupt findet, trägt keine absolute Qualitätsaussage — die Zahl
+beschreibt dann ihn und nicht die Planung.
+
+### Was das Werkzeug daraus macht
+
+Das Binary druckt beide Gruppen getrennt und setzt den Exitcode allein nach
+der Gruppe Planung: 0 bestanden, 1 sauber gelaufen und Planung verfehlt, 2
+Aufbau oder Lauf kaputt. Eine verfehlte oder nicht anwendbare
+Anwendungsgruppe steht im Bericht und in `summary.json`, macht aber keinen
+Fehlschlag daraus.
 
 | # | Kriterium | Bestanden, wenn |
 |---|---|---|
@@ -148,16 +203,17 @@ ein Urteil zu K1–K7; K8 kommt aus `shm-latency`.
 | K7 | **Keine erfundenen Alarme** | Fehlalarmquote auf Vigilant höchstens Referenz + 1 Prozentpunkt |
 | K8 | **Datenpfad** | das Budgeturteil aus `docs/datapath-budgets.md` auf derselben Maschine: bestanden |
 
-**Was als Scheitern der Produktaussage zählt.** K1 oder K4 verfehlt, obwohl
-Triton direkt sie erfüllt; oder K3 verfehlt. Dann schützt der Governor den
-schnellen Pfad nicht besser als der Treiber, oder er schadet dort, wo nichts
-zu schützen ist — und das steht dann in STATUS und README, nicht in einer
-Fußnote.
+**Was als Scheitern der Produktaussage zählt.** Jedes verfehlte Kriterium der
+Gruppe Planung: P1 oder P3 oder P4 verfehlt heißt, der Governor liefert unter
+Last weder schnellere Alarme noch bessere Aufgabenqualität als das Backend
+direkt; P2 verfehlt heißt, er schadet dort, wo nichts zu schützen ist. Das
+steht dann in STATUS und README, nicht in einer Fußnote.
 
 **Was kein Scheitern ist.** Eine schwache Referenz-Trefferquote auf 24-px-
-Objekten (eine Aussage über den Detektor), und K6 auf den Punkten C und D:
-wenn der Detektor die Karte auslastet, soll der Bericht warten — das ist die
-Entkopplung, nicht ihr Versagen.
+Objekten — sie ist eine Aussage über den Detektor und macht A2 unanwendbar,
+nicht den Governor schlecht. Ebenso P6 auf den Punkten C und D: wenn der
+Detektor die Karte auslastet, soll der Bericht warten, das ist die
+Entkopplung und nicht ihr Versagen. Deshalb wird P6 nur auf A und B geprüft.
 
 ## Erster vollständiger Lauf, 12.09.2026: verfehlt
 

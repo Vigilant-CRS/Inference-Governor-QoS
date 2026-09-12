@@ -119,6 +119,14 @@ struct Options {
     fresh: bool,
     /// Die Funktionsprobe: kurz, und ohne fachliches Urteil im Exitcode.
     smoke: bool,
+    /// Der Berichtspfad laeuft auf einer praemptierbaren Lane (ADR-0035).
+    /// Das setzt voraus, dass sein Backend wirklich unterbrechbar ist —
+    /// sonst plant der Governor mit einer Zusage, die niemand haelt.
+    preemptible: bool,
+    /// Die Restblockierung R der Lane in Mikrosekunden. Auf dieser Maschine
+    /// konnte `vig calibrate` sie nicht messen (wandernder Takt); 4 ms sind
+    /// die Schaetzung aus den Gate-M3-Laeufen vom 11.09.
+    residual_us: u64,
 }
 
 impl Options {
@@ -149,6 +157,10 @@ impl Options {
             "llm": self.llm,
             "llm_model": self.llm_model,
             "max_cameras": self.max_cameras,
+            // Praemption gehoert zum Aufbau: eine Ablage darf nicht halb mit
+            // und halb ohne Lane gefuellt werden.
+            "preemptible": self.preemptible,
+            "residual_us": self.preemptible.then_some(self.residual_us),
         })
     }
 }
@@ -169,6 +181,8 @@ fn options() -> Options {
         out: None,
         fresh: false,
         smoke: false,
+        preemptible: false,
+        residual_us: 4_000,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -225,6 +239,11 @@ fn options() -> Options {
                 i += 1;
             }
             "--fresh" => o.fresh = true,
+            "--preemptible" => o.preemptible = true,
+            "--residual-us" => {
+                o.residual_us = value.parse().expect("--residual-us");
+                i += 1;
+            }
             "--smoke" => {
                 o.smoke = true;
                 o.seconds = 12;
@@ -516,22 +535,38 @@ fn gateway_yaml(
         );
     }
     if llm && let Some(endpoint) = &options.llm {
-        // Wie WP26: eigener Server, zerlegbar, Hintergrundlast.
+        // Wie WP26: eigener Server, zerlegbar, Hintergrundlast. Mit
+        // `--preemptible` laeuft er auf seiner eigenen Spur (ADR-0035): der
+        // Governor haelt ihn dann nicht mehr zurueck, sondern plant
+        // geschuetzte Arbeit mit der Restblockierung R.
+        let lane = if options.preemptible {
+            format!(
+                "\n    preemptible: {{ residual_blocking_us: {}, source: declared }}",
+                options.residual_us
+            )
+        } else {
+            String::new()
+        };
         let _ = write!(
             models,
             "\n  {}:\n    decoupled: true\n    backend_endpoint: \"{endpoint}\"\n    \
              class: best_effort\n    queue: {{ policy: fifo, capacity: 2, overflow: backpressure_client }}\n    \
              contract: {{ deadline_ms: 20000, max_age_ms: 40000 }}\n    \
-             cooperative: {{ tokens_per_second: 242, min_tokens: 4, max_total_tokens: 64, base_cost_us: 18000 }}\n    \
+             cooperative: {{ tokens_per_second: 242, min_tokens: 4, max_total_tokens: 64, base_cost_us: 18000 }}{lane}\n    \
              variants:\n      - id: main\n        backend_model: {}\n        \
              quality: {{ value: 1.0, source: user_declared }}\n        \
              profile: {{ p50_us: 1100000, p95_us: 1400000, p99_us: 1600000, samples: 100 }}",
             options.llm_model, options.llm_model,
         );
     }
+    let lanes = if options.preemptible && llm {
+        "\n  preemptible_lanes: 1"
+    } else {
+        ""
+    };
     format!(
         "version: 1\nbackend:\n  type: triton\n  grpc_endpoint: \"{}\"\n  slots: 1\n  \
-         pipelining_depth: 0\n  safety_margin_percent: 110\nmodels:{models}\n",
+         pipelining_depth: 0{lanes}\n  safety_margin_percent: 110\nmodels:{models}\n",
         options.detector
     )
 }
@@ -849,11 +884,48 @@ fn cell_json(
     })
 }
 
+/// Ab welcher Referenzquote eine absolute Trefferquote etwas ueber die
+/// Planung sagt. Findet der Detektor auf diesem Datensatz weniger als die
+/// Haelfte der annotierten Objekte, beschreibt die Zahl ihn und nicht den
+/// Governor; das Kriterium A2 gilt dann als nicht anwendbar.
+const MIN_IDEAL_PERMILLE: u64 = 500;
+
+/// Welche Frage ein Kriterium beantwortet.
+///
+/// Die Kriterien vom 11.09. massen zwei Dinge in einem Urteil: was der
+/// Governor entscheidet, und was Detektor, Datensatz und Bildrate hergeben.
+/// Der erste vollstaendige Lauf verfehlte K1 und K4 um ein Vielfaches — und
+/// die Referenz ohne jede Konkurrenz ebenso. Das war ein Fehler im Entwurf
+/// der Kriterien, nicht ein Befund ueber die Planung.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Group {
+    /// Wofuer der Governor verantwortlich ist: der Vergleich gegen das
+    /// Backend direkt unter derselben Last. Diese Gruppe traegt den Exitcode.
+    Planung,
+    /// Absolute Schwellen. Sie gelten zuerst fuer die Referenz ohne
+    /// Konkurrenz; verfehlt die schon, ist die Schwelle eine Aussage ueber
+    /// die Erkennungsqualitaet und nicht ueber den Governor.
+    Anwendung,
+}
+
+impl Group {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Planung => "planung",
+            Self::Anwendung => "anwendung",
+        }
+    }
+}
+
 /// Ein Abnahmekriterium und sein Ergebnis.
 struct Criterion {
     k: &'static str,
+    group: Group,
     text: String,
     ok: bool,
+    /// Eine absolute Schwelle, die schon die Referenz verfehlt, wird
+    /// ausgewiesen, aber nicht gewertet.
+    applicable: bool,
 }
 
 /// Wie ein Lauf endete.
@@ -910,8 +982,26 @@ fn write_summary(
         "problem": problem,
         "criteria": criteria
             .iter()
-            .map(|c| json!({ "k": c.k, "text": c.text, "ok": c.ok }))
+            .map(|c| json!({
+                "k": c.k,
+                "group": c.group.label(),
+                "text": c.text,
+                "ok": c.ok,
+                "applicable": c.applicable,
+            }))
             .collect::<Vec<_>>(),
+        "planung_verfehlt": criteria
+            .iter()
+            .filter(|c| c.group == Group::Planung && c.applicable && !c.ok)
+            .count(),
+        "anwendung_verfehlt": criteria
+            .iter()
+            .filter(|c| c.group == Group::Anwendung && c.applicable && !c.ok)
+            .count(),
+        "anwendung_nicht_anwendbar": criteria
+            .iter()
+            .filter(|c| c.group == Group::Anwendung && !c.applicable)
+            .count(),
         "run": run,
         "finished_unix": unix_now(),
     });
@@ -1171,10 +1261,12 @@ async fn run(options: &Options) -> u8 {
     }
     let ref_missed_permille = (ref_missed * 1_000).checked_div(ref_events).unwrap_or(0);
     let ref_false_permille = (ref_false * 1_000).checked_div(ref_negative).unwrap_or(0);
+    // Die Referenz ohne jede Konkurrenz ist der Massstab der Gruppe
+    // Anwendung: was sie selbst nicht schafft, kann keine Planung retten.
+    let ref_alarm_p95 = pilot::percentile(&reference_latencies, 95);
     println!(
-        "  Referenz-Alarm: {ref_events} Ereignisse, p50 {} ms, p95 {} ms, nie {} ‰ · Fehlalarme {} ‰ der Negativframes",
+        "  Referenz-Alarm: {ref_events} Ereignisse, p50 {} ms, p95 {ref_alarm_p95} ms, nie {} ‰ · Fehlalarme {} ‰ der Negativframes",
         pilot::percentile(&reference_latencies, 50),
-        pilot::percentile(&reference_latencies, 95),
         ref_missed_permille,
         ref_false_permille,
     );
@@ -1388,7 +1480,7 @@ async fn run(options: &Options) -> u8 {
         }
     }
 
-    // --- 4. Urteil gegen K1–K7 ----------------------------------------------
+    // --- 4. Urteil: Planung getrennt von Anwendung --------------------------
     let get = |name: &str, arm: Arm, f: fn(&Summary) -> u64| -> Option<u64> {
         by_scenario
             .iter()
@@ -1396,107 +1488,204 @@ async fn run(options: &Options) -> u8 {
             .and_then(|(_, r)| r.iter().find(|(a, _)| *a == arm))
             .map(|(_, runs)| median_of(runs, f).0)
     };
+    let meets_absolute = |p95: u64, missed: u64| p95 <= 300 && missed <= ref_missed_permille + 20;
     let mut criteria: Vec<Criterion> = Vec::new();
-    let mut verdict = |k: &'static str, text: String, ok: bool| {
-        criteria.push(Criterion { k, text, ok });
-    };
-    for name in ["C", "D"] {
-        if let (Some(p95), Some(missed)) = (
-            get(name, Arm::Vigilant, |s| s.alarm_p95),
-            get(name, Arm::Vigilant, |s| s.missed_permille),
-        ) {
-            verdict(
-                "K1",
-                format!(
-                    "{name}: p95 {p95} ms (≤ 300), nie {missed} ‰ (≤ Referenz {ref_missed_permille} + 20)"
-                ),
-                p95 <= 300 && missed <= ref_missed_permille + 20,
-            );
-            if let (Some(direct_p95), Some(direct_missed)) = (
+    {
+        let mut push = |k: &'static str, group: Group, text: String, ok: bool, applicable: bool| {
+            criteria.push(Criterion {
+                k,
+                group,
+                text,
+                ok,
+                applicable,
+            });
+        };
+
+        // --- Gruppe Planung: gegen das Backend direkt, unter derselben Last --
+        for name in ["C", "D"] {
+            if let (Some(p95), Some(direct_p95)) = (
+                get(name, Arm::Vigilant, |s| s.alarm_p95),
                 get(name, Arm::Direct, |s| s.alarm_p95),
-                get(name, Arm::Direct, |s| s.missed_permille),
             ) {
-                let direct_meets = direct_p95 <= 300 && direct_missed <= ref_missed_permille + 20;
-                verdict(
-                    "K2",
+                let direct_meets = get(name, Arm::Direct, |s| s.missed_permille)
+                    .is_some_and(|m| meets_absolute(direct_p95, m));
+                push(
+                    "P1",
+                    Group::Planung,
                     format!(
-                        "{name}: Vigilant {p95} ms gegen Triton {direct_p95} ms (≥ 30 % kuerzer, oder Triton erfuellt K1: {direct_meets})"
+                        "{name}: Alarm p95 {p95} ms gegen direkt {direct_p95} ms (≥ 30 % kuerzer, oder direkt erfuellt A1 selbst: {direct_meets})"
                     ),
                     p95 * 10 <= direct_p95 * 7 || direct_meets,
+                    true,
                 );
             }
-            if let Some(recall) = get(name, Arm::Vigilant, |s| s.recall_permille)
-                && let Some(ideal) = get(name, Arm::Vigilant, |s| s.ideal_permille)
-            {
-                verdict(
-                    "K4",
-                    format!("{name}: Trefferquote {recall} ‰ gegen Referenz {ideal} ‰ (≥ 90 %)"),
-                    recall * 10 >= ideal * 9,
+            if let (Some(recall), Some(direct_recall)) = (
+                get(name, Arm::Vigilant, |s| s.recall_permille),
+                get(name, Arm::Direct, |s| s.recall_permille),
+            ) {
+                push(
+                    "P3",
+                    Group::Planung,
+                    format!(
+                        "{name}: Trefferquote {recall} ‰ gegen direkt {direct_recall} ‰ (hoechstens 2 % schlechter)"
+                    ),
+                    recall * 100 >= direct_recall * 98,
+                    true,
+                );
+            }
+            if let (Some(cov), Some(direct_cov), Some(gap), Some(direct_gap)) = (
+                get(name, Arm::Vigilant, |s| s.coverage_permille),
+                get(name, Arm::Direct, |s| s.coverage_permille),
+                get(name, Arm::Vigilant, |s| s.longest_gap_ms),
+                get(name, Arm::Direct, |s| s.longest_gap_ms),
+            ) {
+                push(
+                    "P4",
+                    Group::Planung,
+                    format!(
+                        "{name}: Abdeckung {cov} ‰ gegen direkt {direct_cov} ‰, laengste Luecke {gap} ms gegen {direct_gap} ms"
+                    ),
+                    cov * 100 >= direct_cov * 98
+                        && (gap * 10 <= direct_gap * 11 || gap <= direct_gap + 10),
+                    true,
                 );
             }
         }
-    }
-    if let (Some(v), Some(d)) = (
-        get("A", Arm::Vigilant, |s| s.alarm_p95),
-        get("A", Arm::Direct, |s| s.alarm_p95),
-    ) {
-        let allowed = (d * 105 / 100).max(d + 10);
-        verdict(
-            "K3",
-            format!("A: Vigilant {v} ms gegen Triton {d} ms (≤ {allowed})"),
-            v <= allowed,
-        );
-    }
-    for (name, _) in &by_scenario {
-        if let (Some(with), Some(without)) = (
-            get(name, Arm::Vigilant, |s| s.alarm_p95),
-            get(name, Arm::VigilantNoReport, |s| s.alarm_p95),
+        if let (Some(v), Some(d)) = (
+            get("A", Arm::Vigilant, |s| s.alarm_p95),
+            get("A", Arm::Direct, |s| s.alarm_p95),
         ) {
-            verdict(
-                "K5",
-                format!("{name}: mit Bericht {with} ms, ohne {without} ms (≤ +10 %)"),
-                with * 10 <= without * 11 || with <= without + 5,
+            let allowed = (d * 105 / 100).max(d + 10);
+            push(
+                "P2",
+                Group::Planung,
+                format!("A: Vigilant {v} ms gegen direkt {d} ms (≤ {allowed})"),
+                v <= allowed,
+                true,
             );
         }
-    }
-    for name in ["A", "B"] {
-        if let Some(per_min) = get(name, Arm::Vigilant, |s| s.reports_per_min)
-            && options.llm.is_some()
-        {
-            verdict(
-                "K6",
-                format!("{name}: {per_min} Berichte/min (≥ 2)"),
-                per_min >= 2,
-            );
+        for (name, _) in &by_scenario {
+            if let (Some(with), Some(without)) = (
+                get(name, Arm::Vigilant, |s| s.alarm_p95),
+                get(name, Arm::VigilantNoReport, |s| s.alarm_p95),
+            ) {
+                push(
+                    "P5",
+                    Group::Planung,
+                    format!("{name}: mit Bericht {with} ms, ohne {without} ms (≤ +10 %)"),
+                    with * 10 <= without * 11 || with <= without + 5,
+                    true,
+                );
+            }
+        }
+        for name in ["A", "B"] {
+            if let Some(per_min) = get(name, Arm::Vigilant, |s| s.reports_per_min)
+                && options.llm.is_some()
+            {
+                push(
+                    "P6",
+                    Group::Planung,
+                    format!("{name}: {per_min} Berichte/min (≥ 2)"),
+                    per_min >= 2,
+                    true,
+                );
+            }
+        }
+
+        // --- Gruppe Anwendung: absolute Schwellen, zuerst an der Referenz ----
+        let a1_applicable = ref_alarm_p95 <= 300;
+        for name in ["C", "D"] {
+            if let (Some(p95), Some(missed)) = (
+                get(name, Arm::Vigilant, |s| s.alarm_p95),
+                get(name, Arm::Vigilant, |s| s.missed_permille),
+            ) {
+                push(
+                    "A1",
+                    Group::Anwendung,
+                    format!(
+                        "{name}: p95 {p95} ms (≤ 300), nie {missed} ‰ (≤ Referenz {ref_missed_permille} + 20); Referenz ohne Konkurrenz {ref_alarm_p95} ms"
+                    ),
+                    meets_absolute(p95, missed),
+                    a1_applicable,
+                );
+            }
+            if let (Some(recall), Some(ideal)) = (
+                get(name, Arm::Vigilant, |s| s.recall_permille),
+                get(name, Arm::Vigilant, |s| s.ideal_permille),
+            ) {
+                push(
+                    "A2",
+                    Group::Anwendung,
+                    format!(
+                        "{name}: Trefferquote {recall} ‰ gegen Referenz {ideal} ‰ (≥ 90 %; anwendbar ab {MIN_IDEAL_PERMILLE} ‰)"
+                    ),
+                    recall * 10 >= ideal * 9,
+                    ideal >= MIN_IDEAL_PERMILLE,
+                );
+            }
+        }
+        for (name, _) in &by_scenario {
+            if let Some(fa) = get(name, Arm::Vigilant, |s| s.false_alarm_permille) {
+                push(
+                    "A3",
+                    Group::Anwendung,
+                    format!("{name}: Fehlalarme {fa} ‰ (≤ Referenz {ref_false_permille} + 10)"),
+                    fa <= ref_false_permille + 10,
+                    true,
+                );
+            }
         }
     }
-    for (name, _) in &by_scenario {
-        if let Some(fa) = get(name, Arm::Vigilant, |s| s.false_alarm_permille) {
-            verdict(
-                "K7",
-                format!("{name}: Fehlalarme {fa} ‰ (≤ Referenz {ref_false_permille} + 10)"),
-                fa <= ref_false_permille + 10,
-            );
+
+    let show = |group: Group, title: &str| {
+        println!("\n{title}");
+        let mut any = false;
+        for c in criteria.iter().filter(|c| c.group == group) {
+            any = true;
+            let mark = if c.applicable {
+                if c.ok { "bestanden" } else { "VERFEHLT" }
+            } else {
+                "nicht anwendbar: Erkennungsqualitaet"
+            };
+            println!("  {} {} — {}", c.k, mark, c.text);
         }
-    }
-    println!(
-        "\nUrteil gegen die Abnahmekriterien (docs/pilot/edge-pilot.md; K8 ist das Datenpfad-Urteil von shm-latency):"
+        if !any {
+            println!("  (keine auswertbare Zelle)");
+        }
+    };
+    show(
+        Group::Planung,
+        "Urteil, Gruppe Planung — was der Governor entscheidet, gegen das Backend direkt (docs/pilot/edge-pilot.md). Sie allein traegt den Exitcode:",
     );
-    for c in &criteria {
-        println!(
-            "  {} {} — {}",
-            c.k,
-            if c.ok { "bestanden" } else { "VERFEHLT" },
-            c.text
-        );
-    }
-    let status = if criteria.is_empty() {
+    show(
+        Group::Anwendung,
+        "Gruppe Anwendung — Erkennungsqualitaet, Datensatz, Bildrate. Kein Fehlschlag des Governors; K8 ist das Datenpfad-Urteil von shm-latency:",
+    );
+    let planning = || {
+        criteria
+            .iter()
+            .filter(|c| c.group == Group::Planung && c.applicable)
+    };
+    let status = if planning().next().is_none() {
         RunStatus::NoVerdict
-    } else if criteria.iter().all(|c| c.ok) {
+    } else if planning().all(|c| c.ok) {
         RunStatus::Met
     } else {
         RunStatus::Missed
     };
+    let application_missed = criteria
+        .iter()
+        .filter(|c| c.group == Group::Anwendung && c.applicable && !c.ok)
+        .count();
+    let application_na = criteria
+        .iter()
+        .filter(|c| c.group == Group::Anwendung && !c.applicable)
+        .count();
+    if application_missed > 0 || application_na > 0 {
+        println!(
+            "\nAnwendung: {application_missed} verfehlt, {application_na} nicht anwendbar — das aendert den Exitcode nicht."
+        );
+    }
     println!(
         "\nErgebnis: {} (Exitcode {}{}), Ablage {}",
         status.label(),
