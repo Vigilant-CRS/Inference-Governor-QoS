@@ -125,6 +125,14 @@ Das Antwortalter p95 des Detektors liegt bei 20–21 ms (Triton 25 ms), das
 des VLM bei 291–321 ms (Triton 198–200 ms). Der Befund vom Vortag hält auf
 dem neuen Stand.
 
+**Was XSched kostet, steht erst seit dem 12.09. in Zahlen.** Der Shim
+verlangsamt den geschützten Pfad selbst: derselbe Referenztest auf derselben
+Karte, nur mit Shim, braucht beim Detektor p50 32,5 statt 27,7 ms und p99
+34,4 statt 28,7 ms — 17 bis 20 % mehr Laufzeit
+([Pilot mit Präemption](pilot-praemption-2026-09-12.md)). In den Tabellen
+oben ist davon nichts zu sehen, weil die Abdeckung dort ohnehin am Anschlag
+liegt; auf einer Last, die enger liegt, ist es der Preis der Präemption.
+
 ## Der Pilot: relativ besser, absolut verfehlt
 
 Erster vollständiger Lauf des Vig-Edge-Piloten: vier Lastpunkte, drei

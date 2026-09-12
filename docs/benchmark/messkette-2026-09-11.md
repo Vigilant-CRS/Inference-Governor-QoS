@@ -158,6 +158,14 @@ oder, ohne Rechte dafür, online aus dem laufenden Betrieb (ADR-0038).
 für TSG; TSG wirkt erst ab Level 3 (Review R06, behoben in `64c9d06`). Die
 Zeile oben stammt aus dem Nachlauf mit Level 3.
 
+**Was XSched kostet, steht erst seit dem 12.09. in Zahlen.** Der Shim
+verlangsamt den geschützten Pfad selbst: derselbe Referenztest auf derselben
+Karte, nur mit Shim, braucht beim Detektor p50 32,5 statt 27,7 ms und p99
+34,4 statt 28,7 ms — 17 bis 20 % mehr Laufzeit
+([Pilot mit Präemption](pilot-praemption-2026-09-12.md)). In den Tabellen
+oben ist davon nichts zu sehen, weil die Abdeckung dort ohnehin am Anschlag
+liegt; auf einer Last, die enger liegt, ist es der Preis der Präemption.
+
 ## Was daraus folgt
 
 | Befund | Stand | Nächster Schritt |
