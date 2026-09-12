@@ -170,6 +170,27 @@ wandern in die andere Gruppe, und ohne sie stünde für Trefferquote und
 Versorgung gar kein Maß mehr da. Ihr Maßstab ist derselbe Lauf auf derselben
 Karte, nur ohne Governor.
 
+#### Offen: P1 braucht einen Vergleichsarm, der die Aufgabe noch erfüllt
+
+Der Lauf unter XSched vom 12.09. zeigt eine Lücke im Entwurf von P1. Bei den
+Lastpunkten C und D liefert der Arm „Backend direkt" gar keine Versorgung
+mehr: 0 ‰ Abdeckung, längste Lücke 45 s, Trefferquote 0 ‰. Seine Alarmzeit
+ist dann die Zeit bis zu einem zufälligen Treffer und kein Maßstab. An ihr
+gemessen verfehlt Vigilant die 30-Prozent-Schwelle (1778 gegen 2317 ms, also
+23 % kürzer) — obwohl es der einzige Arm ist, der die Aufgabe überhaupt noch
+erfüllt.
+
+**Ein relatives Kriterium braucht einen Vergleichsarm, der die Aufgabe noch
+erfüllt.** Vorgeschlagene Fassung, vor der nächsten Messung zu entscheiden:
+P1 gilt nur, solange der Vergleichsarm eine Mindestabdeckung hält (etwa
+500 ‰); darunter tragen P3 und P4 das Urteil, die ihn an derselben Stelle
+ohnehin deutlich schlagen.
+
+**Hier bewusst nicht umgesetzt.** Eine Schwelle nachträglich so
+zurechtzulegen, dass der eigene Lauf besteht, wäre genau der Fehler, den die
+Trennung in zwei Gruppen gerade behebt. Der Lauf vom 12.09. bleibt „Planung
+verfehlt", und die Begründung steht daneben.
+
 ### Gruppe Anwendung
 
 | # | früher | Kriterium | Bestanden, wenn | Anwendbar, wenn |

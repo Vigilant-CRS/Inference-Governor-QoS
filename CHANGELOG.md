@@ -363,6 +363,21 @@ Verbindungsgrenze am Metrikport.
 
 ### Geaendert
 
+- **Der Pilot urteilt getrennt ueber Planung und Anwendung.** Die Kriterien
+  vom 11.09. massen zwei Dinge in einem Urteil: was der Governor entscheidet,
+  und was Detektor, Datensatz und Bildrate hergeben. Der erste vollstaendige
+  Lauf verfehlte K1 und K4 um ein Vielfaches — und die Referenz ohne jede
+  Konkurrenz ebenso (347 ms statt 300, 213 von 1000 Objekten). Jetzt tragen
+  P1-P6 (gegen den Arm "Backend direkt", darunter die neuen P3 und P4 fuer
+  Trefferquote und Versorgung) allein den Exitcode; A1-A3 gelten zuerst fuer
+  die Referenz und heissen sonst "nicht anwendbar: Erkennungsqualitaet".
+  Beide Gruppen stehen getrennt im Bericht und in `summary.json`.
+- **`edge-pilot --preemptible` und `--residual-us`** legen den Berichtspfad
+  auf eine praemptierbare Lane (ADR-0035). Gemessen am 12.09.: Das
+  vLLM-Backend laedt unter dem XSched-Shim nicht, eine nur *angegebene* Lane
+  bringt dem Bericht 30 statt 2 Lageberichte je Minute und kostet den Alarm
+  28 % p95; der Shim selbst kostet am geschuetzten Pfad 17-20 % Laufzeit
+  ([Messung](docs/benchmark/pilot-praemption-2026-09-12.md)).
 - **Die Gate-M3-Beispielkonfiguration faehrt mit `pipelining_depth: 1`.** Ohne
   Pipelining laeuft die GPU zwischen zwei Auftraegen leer; bei genau 100 %
   Last kostete das 188 Promille Abdeckung des nachrangigen Stroms, mit
