@@ -80,6 +80,102 @@ fn element_size(datatype: &str) -> usize {
     }
 }
 
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+/// Echte Bilder statt Nullen, fuer den Kopierpfad (`VIG_GATE_FRAMES`).
+///
+/// Die Rechenzeit eines Faltungsnetzes haengt kaum am Inhalt, die einer
+/// Nachbearbeitung im Graphen (NMS) sehr wohl: auf Nullen findet ein Detektor
+/// nichts und sortiert nichts. Die Datei ist RGB24 aus quadratischen Bildern
+/// mit `VIG_GATE_FRAME_SIZE` Pixeln Kantenlaenge (Voreinstellung 512, wie die
+/// MOT16-Aufbereitung unter `tools/pilot/prepare-data.sh`). Gleichmaessig
+/// ueber die Datei verteilt werden `VIG_GATE_FRAME_COUNT` Bilder (16)
+/// genommen und reihum geschickt.
+fn load_frames(path: &str) -> (Vec<Vec<u8>>, usize) {
+    let size = env_usize("VIG_GATE_FRAME_SIZE", 512);
+    let count = env_usize("VIG_GATE_FRAME_COUNT", 16).max(1);
+    let bytes = std::fs::read(path).expect("Bilddatei lesbar");
+    let frame_bytes = size.saturating_mul(size).saturating_mul(3);
+    let available = bytes.len().checked_div(frame_bytes).unwrap_or(0);
+    assert!(
+        available > 0,
+        "{path}: kein ganzes Bild mit {size}x{size} RGB24"
+    );
+    let step = available.checked_div(count).unwrap_or(1).max(1);
+    let frames = (0..available)
+        .step_by(step)
+        .take(count)
+        .filter_map(|i| {
+            let start = i.saturating_mul(frame_bytes);
+            bytes
+                .get(start..start.saturating_add(frame_bytes))
+                .map(<[u8]>::to_vec)
+        })
+        .collect();
+    (frames, size)
+}
+
+/// Bringt ein quadratisches RGB24-Bild in die Eingabeform eines Modells:
+/// naechster Nachbar, NHWC oder NCHW, `UINT8` roh oder `FP32` in [0, 1].
+/// `None` fuer jede andere Form — dann bleibt es bei Nullen.
+fn tensor_from_frame(rgb: &[u8], size: usize, shape: &[i64], datatype: &str) -> Option<Vec<u8>> {
+    let dims: Vec<usize> = shape
+        .iter()
+        .map(|d| usize::try_from(*d).ok())
+        .collect::<Option<_>>()?;
+    let (nhwc, height, width) = match dims.as_slice() {
+        [1, h, w, 3] => (true, *h, *w),
+        [1, 3, h, w] => (false, *h, *w),
+        _ => return None,
+    };
+    let float = match datatype {
+        "UINT8" => false,
+        "FP32" => true,
+        _ => return None,
+    };
+    let pixel = |y: usize, x: usize, c: usize| -> u8 {
+        let sy = y.saturating_mul(size).checked_div(height).unwrap_or(0);
+        let sx = x.saturating_mul(size).checked_div(width).unwrap_or(0);
+        let offset = sy
+            .saturating_mul(size)
+            .saturating_add(sx)
+            .saturating_mul(3)
+            .saturating_add(c);
+        rgb.get(offset).copied().unwrap_or(0)
+    };
+    let mut out = Vec::new();
+    let mut push = |value: u8| {
+        if float {
+            out.extend_from_slice(&(f32::from(value) / 255.0).to_le_bytes());
+        } else {
+            out.push(value);
+        }
+    };
+    if nhwc {
+        for y in 0..height {
+            for x in 0..width {
+                for c in 0..3 {
+                    push(pixel(y, x, c));
+                }
+            }
+        }
+    } else {
+        for c in 0..3 {
+            for y in 0..height {
+                for x in 0..width {
+                    push(pixel(y, x, c));
+                }
+            }
+        }
+    }
+    Some(out)
+}
+
 fn main() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .thread_stack_size(8 * 1024 * 1024)
@@ -121,13 +217,21 @@ async fn run() {
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(RUN_SECONDS);
+    let frames = std::env::var("VIG_GATE_FRAMES")
+        .ok()
+        .filter(|_| copy)
+        .map(|path| (load_frames(&path), path));
     println!(
-        "Messdauer {run_seconds} s je Lauf und Puffertiefe {CAPS:?} · Datenpfad {}\n",
+        "Messdauer {run_seconds} s je Lauf und Puffertiefe {CAPS:?} · Datenpfad {} · Eingaben {}\n",
         if copy {
             "Kopie im Request"
         } else {
             "Shared Memory"
-        }
+        },
+        frames.as_ref().map_or_else(
+            || "Nullen".to_owned(),
+            |((f, size), path)| format!("{} Bilder {size}x{size} aus {path}", f.len())
+        )
     );
 
     // --- Vorbereiten: Metadaten holen, Shm-Regionen anlegen und registrieren
@@ -200,14 +304,35 @@ async fn run() {
             Some(region)
         };
 
+        let payload = frames.as_ref().and_then(|((images, size), _)| {
+            let tensors: Option<Vec<Vec<u8>>> = images
+                .iter()
+                .map(|image| tensor_from_frame(image, *size, &shape, &input.datatype))
+                .collect();
+            tensors
+                .filter(|t| {
+                    t.first()
+                        .is_some_and(|b| u64::try_from(b.len()).ok() == Some(byte_size))
+                })
+                .map(Arc::new)
+        });
+
         println!(
-            "  {logical:<9} -> {physical:<15} {:>6} KB  Periode {:>4} ms{}",
+            "  {logical:<9} -> {physical:<15} {:>6} KB  Periode {:>4} ms{}{}",
             byte_size / 1024,
             to_std(contract.deadline).as_millis(),
             if endpoint == resolved.backend_endpoint {
                 String::new()
             } else {
                 format!("  @ {endpoint}")
+            },
+            if frames.is_some() && payload.is_none() {
+                format!(
+                    "  (Form {shape:?} {} nicht aus Bildern baubar: Nullen)",
+                    input.datatype
+                )
+            } else {
+                String::new()
             }
         );
 
@@ -223,6 +348,7 @@ async fn run() {
                 shape,
                 region: region.as_ref().map(|r| r.name.clone()),
                 byte_size,
+                payload,
             },
             _region: region,
         });
@@ -426,4 +552,36 @@ async fn run() {
         "\nAbdeckung nach ADR-0005: Anteil der Perioden mit einem gelieferten Ergebnis,\n\
          dessen Alter unter max_age lag."
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tensor_from_frame;
+
+    /// Ein 2x2-Bild, jeder Pixel mit eigenem Rotwert.
+    fn image() -> Vec<u8> {
+        vec![10, 0, 0, 20, 0, 0, 30, 0, 0, 40, 0, 0]
+    }
+
+    #[test]
+    fn nhwc_uint8_is_the_resized_image_itself() {
+        let tensor = tensor_from_frame(&image(), 2, &[1, 2, 2, 3], "UINT8");
+        assert_eq!(tensor, Some(image()));
+    }
+
+    #[test]
+    fn nchw_float_puts_each_channel_in_its_own_plane_scaled_to_one() {
+        let tensor = tensor_from_frame(&image(), 2, &[1, 3, 1, 1], "FP32");
+        let expected: Vec<u8> = [10.0_f32 / 255.0, 0.0, 0.0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        assert_eq!(tensor, Some(expected));
+    }
+
+    #[test]
+    fn other_shapes_and_types_stay_zeros() {
+        assert_eq!(tensor_from_frame(&image(), 2, &[1, 4], "UINT8"), None);
+        assert_eq!(tensor_from_frame(&image(), 2, &[1, 2, 2, 3], "INT64"), None);
+    }
 }

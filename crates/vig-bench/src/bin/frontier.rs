@@ -495,6 +495,7 @@ async fn run() {
         shape,
         region: Some(region.name.clone()),
         byte_size,
+        payload: None,
     };
 
     let small_input = triton.model_metadata(SMALL).await.expect("Metadaten");

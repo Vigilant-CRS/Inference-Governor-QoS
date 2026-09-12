@@ -45,6 +45,12 @@ pub struct InputSpec {
     pub region: Option<String>,
     /// Groesse des Tensors in Bytes.
     pub byte_size: u64,
+    /// Echte Eingaben fuer den Kopierpfad, reihum nach Frame-Nummer.
+    ///
+    /// `None` schickt Nullbytes wie bisher. Fuer ein Faltungsnetz ist das
+    /// gleichgueltig, fuer eine Nachbearbeitung im Graphen nicht: auf Nullen
+    /// findet ein Detektor nichts, und seine NMS sortiert nichts.
+    pub payload: Option<Arc<Vec<Vec<u8>>>>,
 }
 
 /// Ein Sensorstrom im Lastmodell.
@@ -279,7 +285,7 @@ async fn run_stream(
         tokio::spawn(async move {
             let _permit = permit;
             let age = capture.elapsed();
-            let request = build_request(model, &id, via_governor, age, input.as_ref());
+            let request = build_request(model, &id, frame, via_governor, age, input.as_ref());
             state.sent.fetch_add(1, Ordering::Relaxed);
 
             match client.model_infer(request).await {
@@ -370,7 +376,14 @@ async fn run_stream_pump(
 
         let id = format!("{}:{frame}", stream.name);
         let age = capture.elapsed();
-        let request = build_request(stream.model, &id, via_governor, age, stream.input.as_ref());
+        let request = build_request(
+            stream.model,
+            &id,
+            frame,
+            via_governor,
+            age,
+            stream.input.as_ref(),
+        );
         state.sent.fetch_add(1, Ordering::Relaxed);
 
         match client.model_infer(request).await {
@@ -400,6 +413,7 @@ async fn run_stream_pump(
 fn build_request(
     model: &str,
     id: &str,
+    frame: u64,
     via_governor: bool,
     age: Duration,
     input: Option<&InputSpec>,
@@ -420,8 +434,16 @@ fn build_request(
     let mut raw_contents = Vec::new();
     let inputs = input.map_or_else(Vec::new, |spec| {
         let Some(region) = spec.region.clone() else {
-            // Kopierpfad: die Nullbytes reisen im Request mit.
-            raw_contents.push(vec![0_u8; usize::try_from(spec.byte_size).unwrap_or(0)]);
+            // Kopierpfad: die Nutzlast reist im Request mit — die echten
+            // Eingaben reihum, wenn es welche gibt, sonst Nullbytes.
+            let chosen = spec.payload.as_ref().and_then(|payload| {
+                let count = u64::try_from(payload.len()).ok()?;
+                let index = usize::try_from(frame.checked_rem(count)?).ok()?;
+                payload.get(index).cloned()
+            });
+            raw_contents.push(
+                chosen.unwrap_or_else(|| vec![0_u8; usize::try_from(spec.byte_size).unwrap_or(0)]),
+            );
             return vec![InferInputTensor {
                 name: spec.name.clone(),
                 datatype: spec.datatype.clone(),
@@ -512,11 +534,41 @@ pub async fn try_connect(
 
 #[cfg(test)]
 mod tests {
-    use super::Burst;
+    use super::{Burst, InputSpec, build_request};
+    use std::sync::Arc;
     use std::time::Duration;
 
     fn ms(v: u64) -> Duration {
         Duration::from_millis(v)
+    }
+
+    fn copy_spec(payload: Option<Vec<Vec<u8>>>) -> InputSpec {
+        InputSpec {
+            name: "in".to_owned(),
+            datatype: "UINT8".to_owned(),
+            shape: vec![1, 2],
+            region: None,
+            byte_size: 2,
+            payload: payload.map(Arc::new),
+        }
+    }
+
+    /// Auf dem Kopierpfad reisen die echten Eingaben reihum nach
+    /// Frame-Nummer; ohne sie bleibt es bei Nullbytes wie bisher.
+    #[test]
+    fn the_copy_path_cycles_real_inputs_by_frame() {
+        let spec = copy_spec(Some(vec![vec![1, 1], vec![2, 2], vec![3, 3]]));
+        let sent: Vec<Vec<u8>> = (0..4)
+            .map(|frame| {
+                build_request("m", "s:0", frame, false, ms(0), Some(&spec))
+                    .raw_input_contents
+                    .concat()
+            })
+            .collect();
+        assert_eq!(sent, vec![vec![1, 1], vec![2, 2], vec![3, 3], vec![1, 1]]);
+
+        let zeros = build_request("m", "s:0", 7, false, ms(0), Some(&copy_spec(None)));
+        assert_eq!(zeros.raw_input_contents, vec![vec![0, 0]]);
     }
 
     /// 200 ms Spitze alle 2 s: innerhalb der Spitze die kurze Periode,

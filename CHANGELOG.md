@@ -37,6 +37,21 @@ bedeutet, steht in [docs/releases.md](docs/releases.md).
   auf dem Telefon ([android-gpu.md](docs/benchmark/android-gpu.md)).
   `gate-m3` hat dafuer `VIG_GATE_COPY`, `VIG_GATE_NO_HARDWARE` und
   `VIG_GATE_SECONDS`; `tools/android/` beschafft, baut und misst.
+- **Der zweite Betriebspunkt, auf der Telefon-GPU gemessen** (Paket „zweiter
+  Betriebspunkt", ADR-0004, ADR-0026). `vig calibrate` laeuft jetzt auch
+  gegen das TFLite-Backend (`tools/android/gate-on-phone.sh
+  STEPS=calibrate`) und misst die gerichtete Interferenz: `pose` leidet
+  2,64x neben `depth`, umgekehrt nur 1,25x; zwei Richtungen sind unter Last
+  sogar schneller, weil der SoC hochtaktet. Mit `slots: 2` und dieser
+  Tabelle (`examples/android_gpu/vig-slots2*.yaml`) haelt der Governor ueber
+  Last alle drei Stroeme bei voller Abdeckung und liefert `pose` mehr
+  Fenster als das Backend direkt; der geschuetzte Detektor gibt dafuer
+  seinen Lueckenvorsprung ab ([Messung](docs/benchmark/android-gpu.md)).
+- **`gate-m3` kann echte Bilder schicken** statt Nullen: `VIG_GATE_FRAMES`
+  (RGB24, quadratisch, `VIG_GATE_FRAME_SIZE`, `VIG_GATE_FRAME_COUNT`), auf
+  dem Kopierpfad reihum nach Frame-Nummer. Fuer ein Faltungsnetz ist der
+  Inhalt gleichgueltig, fuer eine Nachbearbeitung im Graphen nicht: auf
+  Nullen findet ein Detektor nichts, und seine NMS sortiert nichts.
 - **Mehrere Ressourcendomaenen** (NV-22,
   [ADR-0037](docs/adr/0037-a-domain-is-a-gpu-with-one-owner.md)).
   `backend.domains.<name>` beschreibt eine weitere GPU mit `gpu_index`,

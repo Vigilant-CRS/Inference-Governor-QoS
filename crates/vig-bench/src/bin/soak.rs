@@ -299,6 +299,7 @@ async fn run() {
                 shape,
                 region: Some(region.name.clone()),
                 byte_size,
+                payload: None,
             },
         );
         regions.push(region);

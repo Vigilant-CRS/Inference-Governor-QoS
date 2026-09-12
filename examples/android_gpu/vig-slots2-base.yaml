@@ -1,0 +1,49 @@
+# Gate-M3-Analogon auf der GPU eines Pixel 2 mit ZWEI Slots (zweiter
+# Betriebspunkt, ADR-0004, ADR-0026).
+#
+# Grundlage fuer `vig calibrate`: dieselben Modelle, Raten und Profile wie
+# vig.yaml, aber `slots: 2`. Der Kalibrator misst damit jedes Modell allein,
+# mit einem weiteren belegten Slot, und jedes Modellpaar in beiden
+# Richtungen; die Paare landen als `backend.interference` in der
+# Ausgabedatei. Der TFLite-Server rechnet jedes Modell auf einem eigenen
+# Thread mit eigenem Interpreter; zwei Auftraege verschiedener Modelle laufen
+# dort also wirklich nebeneinander, zwei desselben Modells nacheinander.
+version: 1
+
+backend:
+  type: oip
+  grpc_endpoint: "127.0.0.1:8001"
+  slots: 2
+  pipelining_depth: 0
+  safety_margin_percent: 110
+
+models:
+  detector:
+    class: protected
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 1000, deadline_ms: 1000, max_age_ms: 2000 }
+    variants:
+      - id: main
+        backend_model: detector
+        quality: { value: 1.00, source: user_declared }
+        profile: { p50_us: 224650, p95_us: 256420, p99_us: 287339, samples: 200 }
+
+  pose:
+    class: high
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 500, deadline_ms: 500, max_age_ms: 1000 }
+    variants:
+      - id: main
+        backend_model: pose
+        quality: { value: 1.00, source: user_declared }
+        profile: { p50_us: 90215, p95_us: 112685, p99_us: 120457, samples: 200 }
+
+  depth:
+    class: high
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 2000, deadline_ms: 2000, max_age_ms: 4000 }
+    variants:
+      - id: main
+        backend_model: depth
+        quality: { value: 1.00, source: user_declared }
+        profile: { p50_us: 195941, p95_us: 201777, p99_us: 205646, samples: 200 }

@@ -1,7 +1,7 @@
 # Gate M3 auf der GPU eines Telefons
 
-Datum: 11.09.2026. Gerät: Pixel 2 (Snapdragon 835, Adreno 540, Android 11,
-ungerootet, passiv gekühlt). Backend: `vig-tflite-server` (ADR-0039) mit
+Datum: 11./12.09.2026. Gerät: Pixel 2 (Snapdragon 835, Adreno 540,
+Android 11, ungerootet, passiv gekühlt). Backend: `vig-tflite-server` (ADR-0039) mit
 TFLite 2.16.1 und GPU-Delegate V2 über GLES. Governor, Lastgenerator und
 Backend laufen auf dem Telefon; der Laptop schiebt nur Dateien. Rohdaten:
 `InferenceQoS-runtime/android-gpu-2026-09-11/`.
@@ -129,6 +129,137 @@ im Rahmen der Streuung dieselben Zahlen wie ohne: Detektor 100 / 100 %,
 längste Lücke 386–424 / 279–307 ms; Pose-Lieferfenster 75 / 52–55 %, aus
 Verbrauchersicht 99 / 65–99 %; Tiefe 100 / 93–100 %.
 
+## Der zweite Betriebspunkt: zwei Slots
+
+Der Befund oben verlangt die Konsequenz: ein Slot beschreibt dieses Backend
+falsch. Der TFLite-Server gibt jedem Modell einen eigenen Thread mit eigenem
+Interpreter — zwei **verschiedene** Modelle laufen dort wirklich
+nebeneinander, zwei Auftraege desselben Modells nacheinander. Also `slots: 2`
+und eine gemessene Interferenztabelle (ADR-0004, ADR-0026).
+
+### Was `vig calibrate` auf dem Telefon misst
+
+Erstmals gegen das TFLite-Backend gelaufen (11.09., 21:18–21:28, 200
+Messungen je Stufe, `tools/android/gate-on-phone.sh` mit `STEPS=calibrate`).
+Alle zwoelf Reihen qualifiziert: ohne `nvidia-smi` gibt es keinen
+Hardwarezustand, der eine Reihe verwerfen koennte — die Kehrseite ist, dass
+ein wandernder Takt hier **nicht** auffaellt.
+
+| Modell | allein p50 | daneben laeuft | Verhaeltnis | Aufschlag |
+|---|---:|---|---:|---:|
+| pose (90 ms) | 89 815 us | depth | **2,64x** | +147 650 us |
+| detector (222 ms) | 222 435 us | depth | 1,52x | +116 347 us |
+| depth (200 ms) | 199 642 us | detector | 1,25x | +51 155 us |
+| depth | — | pose | 1,25x | +50 063 us |
+| detector | — | pose | 0,65x | 0 |
+| pose | — | detector | 0,67x | 0 |
+
+Zwei Dinge stehen darin, die eine symmetrische Regel verstecken wuerde:
+
+- **Die Richtungen sind sehr verschieden.** Das lange `depth` verlaengert das
+  kurze `pose` um das 2,6-fache, umgekehrt kostet `pose` nur ein Viertel.
+  `vig calibrate` schlaegt deshalb `no_corun: [pose, depth]` vor, und die
+  gemessenen Konfigurationen uebernehmen es.
+- **Zwei Paarungen sind schneller als allein** (0,65x und 0,67x). Das ist
+  kein Messfehler, sondern der Frequenzregler des Telefons: unter Last
+  taktet der SoC hoch, und eine Einzelmessung laeuft im Sparmodus. Der
+  Kalibrator schreibt fuer solche Richtungen keinen Aufschlag (`added_us` 0),
+  und das ist die richtige Antwort — negative Interferenz gibt es nicht.
+
+**Die Laststufe `under_load` ist in den Messkonfigurationen von Hand
+entfernt.** Der Kalibrator belegt den zweiten Slot mit **demselben** Modell;
+auf diesem Server wartet dieser Auftrag im Modellthread, statt nebenher zu
+laufen (depth 2,11x, detector 1,82x — und pose 0,90x, wieder der Takt). Das
+ist eine Warteschlange, keine Nebenlaeufigkeit, und als Belegungsprofil
+waere es doppelt gezaehlt: die Interferenztabelle sagt dasselbe genauer.
+**Fuer Backends mit einem Thread je Modell misst die Belegungsstufe des
+Kalibrators die falsche Groesse** — ein Befund fuer `vig calibrate`, kein
+Fehler dieser Messung.
+
+### Gate M3 mit einem und mit zwei Slots
+
+Dieselben 30-Sekunden-Laeufe wie oben, je drei, abwechselnd ein und zwei
+Slots, mit 120 s Abkuehlpause; 11.09., 21:31–22:43. Angegeben ist die
+Verbrauchersicht (Abdeckung nach ADR-0005 und laengste Lueckenspanne),
+jeweils direkt / ueber den Governor.
+
+**Unter Last (geplant 69 %):**
+
+| Strom | direkt | ein Slot | zwei Slots |
+|---|---|---|---|
+| detector | 100 %, Luecke 404–412 ms | 100 %, **252–297 ms** | 100 %, 413–452 ms |
+| pose | 100 %, 306–352 ms | 100 %, 373–402 ms | 100 %, 393–433 ms |
+| depth | 100 %, 288–305 ms | 100 %, 602–650 ms | 100 %, **335–352 ms** |
+
+**Ueber Last (geplant 138 %, mit zwei Slots 70 % je Slot):**
+
+| Strom | direkt | ein Slot | zwei Slots |
+|---|---|---|---|
+| detector | 100 %, 379–405 ms | 100 %, **163–254 ms** | 100 %, 244–455 ms |
+| pose (Lieferfenster) | 75 % | 52–65 % | **80–83 %** |
+| depth | 100 %, 266–291 ms | 83–100 %, 370–1553 ms | 100 %, 313–422 ms |
+
+**Schwere Ueberlast (geplant 277 %, mit zwei Slots 141 % je Slot):**
+
+| Strom | direkt | ein Slot | zwei Slots |
+|---|---|---|---|
+| detector | 99 %, 381–412 ms | 98–100 %, **190–434 ms** | 96–99 %, 266–738 ms |
+| pose | 71–78 %, 352–364 ms | 8–13 %, 3102–5548 ms | **37–45 %**, 883–1367 ms |
+| depth | 100 %, 281–296 ms | 43–76 %, 2103–4302 ms | **85–95 %**, 785–2262 ms |
+
+**Der zweite Slot behebt den Nachteil zur Haelfte.** Ueber Last liefert der
+Governor mit zwei Slots dem `pose`-Strom mehr Lieferfenster als das Backend
+direkt (80–83 gegen 75 %) und haelt alle drei Stroeme bei 100 % Abdeckung;
+mit einem Slot verlor `pose` ein Drittel. In schwerer Ueberlast steigt
+`pose` von 8–13 auf 37–45 % und `depth` von 43–76 auf 85–95 %. Der Governor
+verwirft dort halb so viel als veraltet (206–227 statt 412–446) und stellt
+dafuer viermal so viel zurueck.
+
+**Bezahlt wird mit dem geschuetzten Strom.** Genau das, was ein Slot dem
+Detektor gab, gibt der zweite Slot wieder her: seine laengste Luecke steigt
+unter Last von 252–297 auf 413–452 ms, ueber Last von 163–254 auf
+244–455 ms, in schwerer Ueberlast von 190–434 auf 266–738 ms. Mit zwei
+Slots liegt er ungefaehr dort, wo das Backend ihn ohnehin liefert.
+
+**Und in schwerer Ueberlast bleibt das Backend direkt vorn.** 85–95 % gegen
+100 % bei `depth`, 37–45 % gegen 71–78 % bei `pose`. Zwei Slots sind auf
+diesem Geraet also die bessere Beschreibung, aber sie machen den Governor
+nicht zum Gewinner: wo der Engpass Transport und CPU sind, gewinnt, wer
+ueberlappt, und das Backend ueberlappt mit drei Threads mehr als der
+Governor mit zwei Slots. Die ehrliche Empfehlung fuer dieses Geraet bleibt:
+**so viele Slots wie das Backend nebenlaeufig rechnen kann**, hier drei, und
+die gemessene Interferenz dazu.
+
+**Thermik.** Ueber die 18 Laeufe blieb der SoC zwischen 35 und 43,7 °C, die
+Rueckseite zwischen 33 und 36 °C (Thermal-HAL, 19 Proben, je 120 s
+Abkuehlpause). Eine Drosselung ist in diesen Zahlen nicht zu sehen. Die
+Kalibrierung davor war haerter: zehn Minuten Dauerlast ohne Pause brachten
+den SoC von 37 auf 58 °C — die Profile stammen also aus einem waermeren
+Geraet als die Gate-Laeufe.
+
+### Mit echten Bildern statt Nullen
+
+Der Detektor traegt seine NMS im Graphen, und die haengt an der Zahl der
+Kandidaten: auf Nulltensoren findet er nichts und sortiert nichts. `gate-m3`
+schickt deshalb auf Wunsch echte Bilder (`VIG_GATE_FRAMES`, hier 16 Frames
+aus MOT16-02, 512x512 RGB24, oeffentlicher Datensatz), reihum, auf beiden
+Seiten dieselben. Ueber Last, je drei Laeufe, 12.09. 03:38–04:02:
+
+| Strom | direkt | ein Slot | zwei Slots |
+|---|---|---|---|
+| detector | 100 %, Luecke 405–425 ms | 100 %, **268–310 ms** | 100 %, 279–345 ms |
+| pose (Lieferfenster) | 75 % | 50–57 % | **79–82 %** |
+| depth | 100 %, 277–287 ms | 80–86 %, 1531–1568 ms | 100 %, 381–469 ms |
+
+**Die Richtung aendert sich nicht, die Zahlen werden etwas haerter.** Mit
+Bildern liegt die laengste Detektorluecke auf beiden Seiten rund 60 ms
+hoeher als mit Nullen, und der Ein-Slot-Governor verliert bei `depth` mehr
+(80–86 statt 83–100 % Abdeckung). Der zweite Slot haelt auch hier alle drei
+Stroeme bei voller Abdeckung und gibt `pose` mehr Fenster als das Backend
+direkt. Eine eigene Messung der NMS-Zeit auf Nullen gegen Bilder steht aus;
+`vig calibrate` misst weiter mit Nulltensoren, die Profile sind also
+optimistisch.
+
 ## Detektor plus kleines Sprachmodell
 
 Qwen2.5-0.5B-Instruct (Q4_K_M, Apache-2.0) in llama.cpp auf den vier
@@ -167,8 +298,12 @@ ist das nicht gemessen.
 2. **Die Engstelle entscheidet.** Auf dem Laptop ist sie GPU-Zeit, und dort
    hilft Serialisieren. Auf dem Telefon sind zwei Drittel einer Laufzeit
    Transport und CPU; ein einzelner Slot wirft die Überlappung weg, die das
-   Backend direkt nutzt. Richtig wären Slots, die der gemessenen
-   Nebenläufigkeit entsprechen — das offene Paket "zweiter Betriebspunkt".
+   Backend direkt nutzt. Mit `slots: 2` und gemessener Interferenz holt der
+   Governor die Hälfte davon zurück — über Last liegt er dann bei `pose` vor
+   dem Backend, in schwerer Überlast noch immer dahinter, und der geschützte
+   Detektor verliert genau den Vorsprung, den ihm der eine Slot gab. Die
+   Zahl der Slots ist damit kein Feintuning, sondern die Beschreibung des
+   Backends: so viele, wie es nebenläufig rechnet.
 3. **Ein Profil muss den Weg messen, den der Governor sieht.** Mit der
    Interpreterzeit statt der Laufzeit über gRPC ist er dreimal schlechter
    als kein Governor. `vig profile` misst richtig; eine Kalibrierung, die
@@ -177,5 +312,6 @@ ist das nicht gemessen.
    Sprachmodell verliert ein Achtel, der Detektor nichts.
 
 Nicht gemessen: ein anderes Telefon (die Profile gehören diesem Gerät),
-Drosselung über mehr als zwei Minuten, Eingaben mit echten Bildern statt
-Nullen (NMS hängt von der Zahl der Kandidaten ab), mehr als ein Slot.
+Drosselung über mehr als zwei Minuten, drei Slots (so viele Threads hat das
+Backend), `vig calibrate` mit echten Bildern (es misst mit Nulltensoren, und
+die NMS des Detektors hängt an der Zahl der Kandidaten).

@@ -1,0 +1,169 @@
+# Gate-M3-Analogon auf der GPU eines Pixel 2 UEBER Last, mit ZWEI Slots
+# (zweiter Betriebspunkt, ADR-0004, ADR-0026). Raten wie vig-overload.yaml (geplant 138 % auf einem Slot).
+#
+# Erzeugt von `vig calibrate` auf dem Telefon aus vig-slots2-base.yaml
+# (tools/android/gate-on-phone.sh, STEPS=calibrate), am 11.09.2026:
+# Soloprofile, gerichtete Interferenz und das vorgeschlagene `no_corun`
+# [pose, depth] (pose leidet 2,64x neben depth). Die Laststufe `under_load`
+# ist von Hand entfernt: der Kalibrator belegt den zweiten Slot mit
+# **demselben** Modell, und auf dem TFLite-Server wartet dieser Auftrag im
+# Modellthread, statt nebenher zu laufen (depth 2,1x, detector 1,8x) - das
+# ist Warteschlange, nicht Nebenlaeufigkeit (docs/benchmark/android-gpu.md).
+version: 1
+backend:
+  type: oip
+  grpc_endpoint: 127.0.0.1:8001
+  slots: 2
+  pipelining_depth: 0
+  no_corun:
+  - - pose
+    - depth
+  safety_margin_percent: 110
+  inference_timeout_ms: 30000
+  trust: open
+  max_inflight_mib: 512
+  interference:
+  - victim: depth
+    co_tenant: detector
+    added_us: 51155
+  - victim: detector
+    co_tenant: depth
+    added_us: 116347
+  miss_aware_policy: false
+  prediction: shadow
+  security:
+    shm_key_prefix: /vig_
+    max_shm_regions: 256
+    transport:
+      max_concurrent_streams: 256
+      concurrency_per_connection: 64
+      request_timeout_ms: 600000
+      keepalive_interval_ms: 30000
+      keepalive_timeout_ms: 10000
+models:
+  depth:
+    class: high
+    queue:
+      policy: latest
+      capacity: 1
+      overflow: reject_new
+    contract:
+      period_ms: 1000
+      deadline_ms: 1000
+      max_age_ms: 2000
+      variant_dwell_ms: 100
+    variants:
+    - id: main
+      backend_model: depth
+      quality:
+        value: 1.0
+        source: user_declared
+      profile:
+        p50_us: 199642
+        p95_us: 208416
+        p99_us: 217830
+        samples: 200
+        fingerprint: 0e1f8ee6932fd4cb
+        manifest:
+          revision: 2
+          recorded_at: 2026-09-11T19:17:59Z
+          artifact: {}
+          runtime:
+            server: vig-tflite
+            server_version: 0.1.0
+            platform: tflite_gpu
+          device: {}
+          resources: {}
+          measurement:
+            dataset: zeros
+            batch_size: 1
+            concurrency: 1
+            warmup: 20
+            independent_runs: 1
+          validity: {}
+    stateful: false
+    decoupled: false
+  detector:
+    class: protected
+    queue:
+      policy: latest
+      capacity: 1
+      overflow: reject_new
+    contract:
+      period_ms: 500
+      deadline_ms: 500
+      max_age_ms: 1000
+      variant_dwell_ms: 100
+    variants:
+    - id: main
+      backend_model: detector
+      quality:
+        value: 1.0
+        source: user_declared
+      profile:
+        p50_us: 222435
+        p95_us: 257436
+        p99_us: 296714
+        samples: 200
+        fingerprint: dbc4f037c9605708
+        manifest:
+          revision: 2
+          recorded_at: 2026-09-11T19:20:13Z
+          artifact: {}
+          runtime:
+            server: vig-tflite
+            server_version: 0.1.0
+            platform: tflite_gpu
+          device: {}
+          resources: {}
+          measurement:
+            dataset: zeros
+            batch_size: 1
+            concurrency: 1
+            warmup: 20
+            independent_runs: 1
+          validity: {}
+    stateful: false
+    decoupled: false
+  pose:
+    class: high
+    queue:
+      policy: latest
+      capacity: 1
+      overflow: reject_new
+    contract:
+      period_ms: 250
+      deadline_ms: 250
+      max_age_ms: 500
+      variant_dwell_ms: 100
+    variants:
+    - id: main
+      backend_model: pose
+      quality:
+        value: 1.0
+        source: user_declared
+      profile:
+        p50_us: 89815
+        p95_us: 112374
+        p99_us: 119953
+        samples: 200
+        fingerprint: 9463a398cc10daa5
+        manifest:
+          revision: 2
+          recorded_at: 2026-09-11T19:22:21Z
+          artifact: {}
+          runtime:
+            server: vig-tflite
+            server_version: 0.1.0
+            platform: tflite_gpu
+          device: {}
+          resources: {}
+          measurement:
+            dataset: zeros
+            batch_size: 1
+            concurrency: 1
+            warmup: 20
+            independent_runs: 1
+          validity: {}
+    stateful: false
+    decoupled: false

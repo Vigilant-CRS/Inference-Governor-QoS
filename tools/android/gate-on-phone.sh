@@ -3,13 +3,21 @@
 # Backend und Governor laufen beide auf dem Geraet, der Laptop schiebt nur
 # Dateien und holt Ergebnisse ab.
 #
-#   bench   Rechenzeit je Modell allein und alle gleichzeitig (Profile)
-#   gate    gate-m3 im Kopiermodus, je Konfiguration RUNS Laeufe mit
-#           Abkuehlpause dazwischen; Temperaturen vor jedem Lauf
+#   bench      Rechenzeit je Modell allein und alle gleichzeitig (Profile)
+#   calibrate  `vig calibrate` auf dem Telefon gegen den TFLite-Server, je
+#              Konfiguration in CONFIGS; die gemessene Datei landet als
+#              <name>-measured.yaml in OUT (Paare nur bei `slots` > 1)
+#   gate       gate-m3 im Kopiermodus, je Konfiguration RUNS Laeufe mit
+#              Abkuehlpause dazwischen; Temperaturen vor jedem Lauf
 #
 #   SKIP_BUILD=1 STEPS=bench tools/android/gate-on-phone.sh
 #   STEPS=gate CONFIGS="examples/android_gpu/vig.yaml examples/android_gpu/vig-overload.yaml" \
 #     tools/android/gate-on-phone.sh
+#   STEPS=calibrate CONFIGS=examples/android_gpu/vig-slots2.yaml tools/android/gate-on-phone.sh
+#
+# FRAMES=<datei.rgb> schickt statt Nullen echte Bilder (RGB24, quadratisch,
+# FRAME_SIZE Pixel, Voreinstellung 512; gate-m3 `VIG_GATE_FRAMES`). Die Datei
+# wird aufs Telefon geschoben; sie sollte klein sein (16 Bilder, 12 MB).
 #
 # Voraussetzungen: tools/android/fetch-assets.sh, NDK (build-backend.sh),
 # zig fuer ring im musl-Build von gate-m3 (tools/arm/serve-on-phone.sh).
@@ -74,11 +82,28 @@ for m in "${MODELS[@]}"; do
 done
 for c in $CONFIGS; do adb push "$c" "$PHONE/$(basename "$c")" >/dev/null; done
 adb shell chmod 755 $PHONE/vig-tflite-server $PHONE/gate-m3
+frames_env=""
+if [ -n "${FRAMES:-}" ]; then
+  adb push "$FRAMES" $PHONE/frames.rgb >/dev/null
+  frames_env="VIG_GATE_FRAMES=$PHONE/frames.rgb VIG_GATE_FRAME_SIZE=${FRAME_SIZE:-512}"
+fi
 model_args=""
 for m in "${MODELS[@]}"; do model_args="$model_args --model $m"; done
 
 server() { # Argumente an vig-tflite-server
   adb shell "cd $PHONE && ./vig-tflite-server --lib-dir $PHONE $model_args $*"
+}
+start_server() {
+  adb shell "cd $PHONE && (nohup ./vig-tflite-server --lib-dir $PHONE $model_args > server.log 2>&1 & echo \$! > server.pid)"
+  for _ in $(seq 1 60); do
+    adb shell "grep -q bereit $PHONE/server.log" 2>/dev/null && break
+    sleep 2
+  done
+  adb shell "cat $PHONE/server.log" | tee "$OUT/server-start.txt"
+}
+stop_server() {
+  adb shell "kill \$(cat $PHONE/server.pid)" || true
+  adb shell "cat $PHONE/server.log" > "$OUT/server.log" || true
 }
 
 for step in $STEPS; do
@@ -97,27 +122,37 @@ for step in $STEPS; do
       # ins Log.
       adb logcat -d -s tflite 2>&1 | grep -E 'Replacing|delegate|GPU' | tee "$OUT/delegation.txt" || true
       ;;
-    gate)
-      adb shell "cd $PHONE && (nohup ./vig-tflite-server --lib-dir $PHONE $model_args > server.log 2>&1 & echo \$! > server.pid)"
-      for _ in $(seq 1 60); do
-        adb shell "grep -q bereit $PHONE/server.log" 2>/dev/null && break
-        sleep 2
+    calibrate)
+      adb shell chmod 755 $PHONE/vig
+      start_server
+      for c in $CONFIGS; do
+        name=$(basename "$c" .yaml)
+        echo "== calibrate $name ($(date +%T))"
+        echo "$(date +%T) calibrate $name vorher $(thermal)" | tee -a "$OUT/thermal.txt"
+        adb shell "cd $PHONE && taskset $GATE_MASK ./vig calibrate -c $(basename "$c") \
+          -o $name-measured.yaml" > "$OUT/calibrate-$name.txt" 2>&1 || true
+        echo "$(date +%T) calibrate $name nachher $(thermal)" | tee -a "$OUT/thermal.txt"
+        adb pull "$PHONE/$name-measured.yaml" "$OUT/$name-measured.yaml" >/dev/null 2>&1 || true
+        tail -30 "$OUT/calibrate-$name.txt"
+        sleep "$COOLDOWN"
       done
-      adb shell "cat $PHONE/server.log" | tee "$OUT/server-start.txt"
+      stop_server
+      ;;
+    gate)
+      start_server
       for c in $CONFIGS; do
         name=$(basename "$c" .yaml)
         for r in $(seq 1 "$RUNS"); do
           echo "== $name Lauf $r ($(date +%T))"
           echo "$(date +%T) $name r$r $(thermal)" | tee -a "$OUT/thermal.txt"
           adb shell "cd $PHONE && VIG_GATE_COPY=1 VIG_GATE_NO_HARDWARE=1 VIG_GATE_SECONDS=$SECONDS_PER_RUN \
-            taskset $GATE_MASK ./gate-m3 $(basename "$c")" > "$OUT/gate-$name-r$r.txt" 2>&1 || true
+            $frames_env taskset $GATE_MASK ./gate-m3 $(basename "$c")" > "$OUT/gate-$name-r$r.txt" 2>&1 || true
           tail -20 "$OUT/gate-$name-r$r.txt"
           sleep "$COOLDOWN"
         done
       done
       echo "$(date +%T) Ende $(thermal)" | tee -a "$OUT/thermal.txt"
-      adb shell "kill \$(cat $PHONE/server.pid)" || true
-      adb shell "cat $PHONE/server.log" > "$OUT/server.log" || true
+      stop_server
       ;;
     *) echo "unbekannter Schritt: $step" >&2; exit 1 ;;
   esac

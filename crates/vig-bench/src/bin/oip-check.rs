@@ -87,6 +87,7 @@ async fn build_streams(resolved: &vig_config::schema::Resolved) -> Vec<StreamDef
                 shape,
                 region: None,
                 byte_size,
+                payload: None,
             }),
             pump: false,
             burst: None,
