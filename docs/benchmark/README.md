@@ -26,6 +26,7 @@ allgemeingültige Produktleistung zu lesen.
 | [`android-gpu.md`](android-gpu.md) | Hängt der Vorteil an Triton und an NVIDIA? (Pixel 2, Adreno 540, zweites Backend) | **der Governor läuft unverändert, der Einbruch aus Gate M3 tritt dort aber nicht ein** — mit Rechenzeit statt Laufzeit geplant schadet er (Faktor 3–4); mit gemessenen Profilen hält er bis 138 % den Detektor bei kürzeren Lücken und bezahlt mit den anderen Strömen; bei 277 % ist ein Slot schon für den Detektor zu wenig, und er verliert überall |
 | [`tensorrt.md`](tensorrt.md) | Beseitigt TensorRT den Engpass? | **nein** — Auslastung 103 % → 76 %, Vorsprung halbiert, Engpass bleibt |
 | [`messkette-2026-09-11.md`](messkette-2026-09-11.md) | Was hält auf dem neuen Treiber, mit korrigierten Werkzeugen? | Überlast 21–125x und Datenpfad bestanden; **Schwächen** an der Kante bei 100 %, bei Lastspitzen und in der Variantenwahl; mit XSched Gleichstand mit Triton, das VLM läuft erstmals unter dem Governor |
+| [`messkette-2026-09-12.md`](messkette-2026-09-12.md) | Was bringen die Korrekturen auf echter Hardware? | Kante bei 100 % ist die Dispatch-Luecke (188 → 17 ‰), Variantenwahl ueberall 0 ‰, Lastspitzen ohne Nachteil, gelernte Marge nuetzt bis 110 % und schadet bei 125 %, Pilot relativ besser und absolut verfehlt |
 | [`scenarios.md`](scenarios.md) | Welche Lastfälle tragen die Aussagen, wogegen, mit welchem Preis? | Plan für S1–S12, darunter Detektor + LLM, zwei LLMs nebeneinander, langer Job unter Sättigung, zweite GPU |
 
 ## Regeln, die für jede Zahl hier gelten

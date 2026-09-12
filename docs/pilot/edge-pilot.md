@@ -159,6 +159,24 @@ Objekten (eine Aussage über den Detektor), und K6 auf den Punkten C und D:
 wenn der Detektor die Karte auslastet, soll der Bericht warten — das ist die
 Entkopplung, nicht ihr Versagen.
 
+## Erster vollständiger Lauf, 12.09.2026: verfehlt
+
+Vier Lastpunkte, drei Wiederholungen, 60 s je Zelle, RTX 3070 Laptop, Stand
+`49f3639`; Exitcode 1, also sauber gelaufen und fachlich verfehlt. Zahlen und
+Einordnung: [messkette-2026-09-12.md](../benchmark/messkette-2026-09-12.md).
+
+- **Relativ gewinnt der Governor in jedem Lastpunkt:** Alarm p95 1343 gegen
+  1675 ms, Trefferquote 133 gegen 106 ‰, Abdeckung 969 gegen 854 ‰ (Punkt B).
+- **Absolut verfehlt er K1 und K4 um ein Vielfaches.** Beide Arme liegen bei
+  1,3–1,9 s Alarmzeit statt 300 ms, und die Referenz ohne Konkurrenz trifft
+  selbst nur 223 von 1000. Diese beiden Kriterien messen die Erkennungs-
+  qualität mit; sie gehören getrennt, bevor sie ein Urteil über die Planung
+  tragen.
+- **Der Berichtspfad verhungert** (1–2 statt 30 Berichte je Minute, ADR-0012).
+  Der Lauf gehört mit präemptierbarer Lane wiederholt.
+- **Bestanden:** K5 außer im härtesten Punkt, K6 bei moderater Last, K7
+  überall.
+
 ## Reproduzieren
 
 ```bash

@@ -106,6 +106,27 @@ Werkzeugen:
   +236 µs gegen den Mock, größenunabhängig; alle budgetierten Zeilen PASS
   ([datapath-budgets.md](datapath-budgets.md)).
 
+**Messkette vom 12.09.** ([Bericht](benchmark/messkette-2026-09-12.md)) —
+dieselbe Maschine, Stand mit allen Korrekturen, in 430 Wächterproben eine
+einzige mit Fremdlast:
+
+- **Gate M3 hält:** Detektor 85 gegen 100 %, Pose 91–92 gegen 100 %.
+- **Die Kante bei 100 % ist erklärt:** Es war die Lücke zwischen zwei
+  Aufträgen. Mit `pipelining_depth: 1` sinkt der Verlust des nachrangigen
+  Stroms von 188 auf 17 ‰, der Vorsprung des Detektors bleibt (78,5x bei
+  110 %).
+- **Die Variantenwahl ist behoben:** 0 ‰ über alle Lastpunkte, und bis 75 %
+  läuft weiter die große Variante.
+- **Lastspitzen sind kein Nachteil:** in der Verbrauchersicht 0 ‰ auf beiden
+  Seiten; die alte Zahl war die Fenstersicht.
+- **Die gelernte Marge** holt bei einem doppelt zu langsamen Profil bis 110 %
+  fast alles zurück (Detektor 15 statt 150 ‰) und schadet bei 125 % (479
+  statt 181 ‰). Voreinstellung bleibt aus.
+- **Der Pilot** ist zum ersten Mal vollständig gelaufen: relativ gewinnt der
+  Governor in jedem Lastpunkt (Alarm p95 1343 gegen 1675 ms, Trefferquote 133
+  gegen 106 ‰), absolut verfehlt er seine Kriterien, und der Berichtspfad
+  verhungert ohne Präemption.
+
 **Planbarkeit im begrenzten Modell (NV-23).** Unter benannten Annahmen —
 ein Slot, ein geschützter Strom, Laufzeiten innerhalb des Plans, Jitter J —
 ist das Alter jedes geschützten Frames höchstens `2J + D`, und die längste
@@ -214,10 +235,12 @@ per Voreinstellung nichts. Mit Marge ist `active` sicher, auf Gate M3 aber ohne 
 |---|---|---|
 | NV-15 XSched | gemessen, Gleichstand mit Triton + XSched | R messen statt schätzen: mit festem Takt (braucht Rechte) oder online aus dem Betrieb (ADR-0038). Die Antwort auf die Frage vom 11.09.: Die Lane schützt den Detektor (100 %), und das VLM bekommt unter dem Governor erstmals vollen Fortschritt (100 %). |
 | Externer Review vom 11.09. | **alle Befunde behoben** (R01–R08) | R01/R02 ([ADR-0040](adr/0040-a-restart-proves-only-what-died-with-it.md)): ein Backend-Neustart beendet nur Aufrufe, deren Verbindung schon abgebrochen ist; abgeglichen wird je Server und Backendmodell über alle Versionen. R03/R04: Puffer in Pilot und ROS-Brücke werden erst nach belegtem Ende wieder benutzt, sonst Quarantäne. R05: Samplingparameter über einen JSON-Parser. R06–R08: XSched-Level, Bereitschaft, Pilotmatrix mit Wiederaufnahme und Exitcodes. R09 (Gültigkeit je Messzelle) ist Regel in [scenarios.md](benchmark/scenarios.md), aber noch nicht automatisiert ([Review](reviews/2026-09-11-runtime/REVIEW.md)). |
-| Lastspitzen und Variantenwahl | Variantenwahl behoben (Simulator), Lastspitzen neu zu messen | Die Wahl achtet jetzt auf die Versorgung, nicht nur auf die Deadline; im Simulator verfehlt `auto` unter Überlast nichts mehr. Die Lastspitzen-Zahl war die Fenstersicht, die dort Phase misst. Nächster Schritt: `frontier` und `load-ramp bursts` mit beiden Sichten auf der GPU ([Analyse](analysis/bursts-and-frontier.md)). |
+| Lastspitzen und Variantenwahl | **erledigt** | Die Wahl achtet auf die Versorgung, nicht nur auf die Frist (`variant.rs`); auf der GPU am 12.09. 0 ‰ über alle Lastpunkte. Die Lastspitzen waren ein Artefakt der Fenstersicht; beide Werkzeuge zeigen jetzt auch die Verbrauchersicht ([Analyse](analysis/bursts-and-frontier.md), [Messung](benchmark/messkette-2026-09-12.md)). |
 | Zweiter Betriebspunkt | offen | Zwei Ausführungseinheiten (`slots: 2`, Instance Groups mit zwei Instanzen) samt gemessener Parallelprofile. Die Lastrampe sagt selbst, dass sich ihre Kante damit verschiebt. |
 | NV-22 mehrere Ressourcendomänen | **erreichbar, nicht qualifiziert** ([ADR-0037](adr/0037-a-domain-is-a-gpu-with-one-owner.md)) | Gebaut: ein Scheduler je GPU (`backend.domains`, `domain:` am Modell), feste Zuordnung, kein Failover, Kennzahlen je Domäne, `vig doctor` je GPU; mit zwei Fake-Executoren belegt, dass eine belegte oder ausgefallene GPU der anderen weder Slot noch Kredit nimmt. Es fehlt: eine zweite GPU für die Qualifikation (Interferenz über PCIe, Hauptspeicher, Leistungsbudget), Shared-Memory-Registrierung an allen Endpunkten, Domänen in `vig calibrate`. Erledigt aus diesem Block: NV-21 ([ROS-2-Brücke](integrations/ros2.md)) und NV-23 ([begrenzter Nachweis](analysis/nv23-bounded-claim.md)). |
-| Kante bei 100 % | **Ursache offen; Kalibrierung gebaut, opt-in, ungemessen** ([ADR-0038](adr/0038-the-plan-calibrates-to-the-card.md)) | Befund der Rampe vom 11.09.: bei 100 % verliert Triton nichts, Vigilant 165 ‰ eines `high`-Stroms. Die Simulation derselben Last zeigt: an der Kante entscheidet die Marge nichts (110 %, 100 % und gelernt liefern bis 105 % dieselbe Abdeckung); naechster Kandidat ist die Dispatchluecke bei `pipelining_depth: 0` — im Simulator kostet eine Luecke von 0,3–0,6 ms nur auf der Governorseite bei 95–100 % deutlich Abdeckung, ohne Luecke sind beide gleichauf ([Nachstellung](analysis/bursts-and-frontier.md#die-kante-bei-100-)). Gebaut ist trotzdem `backend.margin_learning`: je GPU ein Faktor zwischen Profil und gemessener Laufzeit (Quantilschaetzer auf ein Prozent Ueberziehung, multiplikativ, Geraetefaktor mal Rest je Modell, Boden aus dem beobachteten Median) — in der Simulation konvergiert er auf das p99 der Karte und verhaelt sich wie ein richtiges Profil (±25 ‰). Nach ADR-0036 hungert ein doppelt so langsames Profil mit fester Marge alle anderen Stroeme aus (1000 ‰); gelernt bekommen sie Arbeit zurueck (441–770 ‰), und der Detektor zahlt hoechstens, was ihn ein richtiges Profil kostet. Die Kalibrierung schuetzt nicht staerker als ein richtiges Profil; wer mehr Schutz will, stellt ihn im Vertrag ein. Es fehlt: die Rampe mit `VIG_RAMP_PIPELINING=1`, die Rampe mit Kalibrierung und falschen Profilen (×2, ×0,7), und die Speicherung des Faktors ueber einen Neustart. |
+| Kante bei 100 % | **Ursache belegt**: die Dispatch-Lücke | Ohne Pipelining startet der Governor den nächsten Auftrag erst nach der Antwort auf den vorigen. Mit `pipelining_depth: 1` sinkt der Verlust von 188 auf 17 ‰ bei 100 % Last, der Vorsprung bei Überlast bleibt ([Messung](benchmark/messkette-2026-09-12.md)). Offen: was Pipelining in Gate M3 kostet, und ob es in die empfohlene Konfiguration gehört. |
+| Gelernte Marge auf Hardware | gemessen, bleibt opt-in | Nützt bei falschem Profil bis 110 % (Detektor 15 statt 150 ‰), schadet bei 125 % (479 statt 181 ‰), weil ein knapperer Plan mehr Hintergrundarbeit zulässt. Die Korrektur dafür ist ADR-0041: der Wächter reserviert für die Versorgung, nicht nur für die Frist. |
+| Vig-Edge-Pilot | erster voller Lauf: relativ besser, absolut verfehlt | Alarmzeit und Trefferquote sind in jedem Lastpunkt besser als Triton direkt, verfehlen aber K1 und K4 um ein Vielfaches; die messen Erkennungsqualität mit und gehören getrennt. Der Berichtspfad verhungert (1–2 statt 30 Berichte/min) — Wiederholung mit Präemption ([Messung](benchmark/messkette-2026-09-12.md)). |
 
 ## Offen für eine Produktionsfreigabe
 
