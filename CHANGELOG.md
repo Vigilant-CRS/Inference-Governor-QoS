@@ -363,6 +363,14 @@ Verbindungsgrenze am Metrikport.
 
 ### Geaendert
 
+- **Die Gate-M3-Beispielkonfiguration faehrt mit `pipelining_depth: 1`.** Ohne
+  Pipelining laeuft die GPU zwischen zwei Auftraegen leer; bei genau 100 %
+  Last kostete das 188 Promille Abdeckung des nachrangigen Stroms, mit
+  Pipelining sind es 17, zusammen mit dem Versorgungsschutz 4. In Gate M3
+  aendern sich die Zahlen dadurch nicht (drei Laeufe,
+  [Abnahme](docs/benchmark/abnahme-2026-09-12.md)); die Berichte R03 und R04
+  bleiben gueltig.
+
 - **`frontier` und `load-ramp` zeigen die Verbrauchersicht** neben den
   Lieferfenstern. Die Fenstersicht kippt, wenn die Laufzeit an die Periode
   heranreicht: unter Lastspitzen verfehlte sie im Simulator fuer Governor und

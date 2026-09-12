@@ -137,3 +137,24 @@ bei 110 und 125 % Last mit gelernter Marge, einmal mit und einmal ohne
 wieder bei den 0–12 ‰ der festen Marge liegt, und in derselben Tabelle, was
 die uebrigen Stroeme und die Hintergrundarbeit dafuer zahlen. Ohne diese Zahl
 bleibt es bei opt-in.
+
+## Auf der GPU gemessen, 12.09.2026
+
+RTX 3070 Laptop, Rampe, je drei Laeufe, ohne Fremdlast
+([Abnahme](../benchmark/abnahme-2026-09-12.md)). Detektor unabgedeckt /
+alle Stroeme:
+
+| Last | ohne Schutz | Schutz, feste Marge | Schutz + gelernte Marge | Schutz + Pipelining |
+|---|---|---|---|---|
+| 100 % | 0 / 188 ‰ | — | — | 0 / 4 ‰ |
+| 110 % | 16 / 172 ‰ | 0 / 998 ‰ | 12 / 99 ‰ | 0 / 998 ‰ |
+| 125 % | 21 / 510 ‰ | 2 / 445 ‰ | 45 / 508 ‰ | 3 / 705 ‰ |
+
+Die Simulation hat den Preis richtig vorhergesagt: allein nimmt der Guard
+dem Hintergrund bei 110 % praktisch alles. Erst zusammen mit der
+Kalibrierung (ADR-0038) ist er in beiden Spalten besser als der Zustand
+ohne beides. Damit ist die offene Frage dieses ADR nicht mehr theoretisch:
+**ohne Deckelung durch `minimum_background_progress_pct` ist der Schalter
+nicht empfehlenswert**, ausser zusammen mit der Kalibrierung oder in einem
+Aufbau, in dem der Hintergrund ohnehin keine Chance hat (Gate M3: dort
+aendern sich die Zahlen nicht).

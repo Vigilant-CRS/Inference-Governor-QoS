@@ -27,7 +27,11 @@ backend:
   type: triton
   grpc_endpoint: "127.0.0.1:8001"
   slots: 1
-  pipelining_depth: 0
+  # Ein Auftrag darf schon unterwegs sein, bevor die Antwort auf den vorigen
+  # da ist. Ohne das laeuft die GPU zwischen zwei Auftraegen leer, und genau
+  # bei 100 % Last kostet das Abdeckung (188 statt 17 Promille, Messung vom
+  # 12.09.). Gate M3 kostet es nichts (docs/benchmark/abnahme-2026-09-12.md).
+  pipelining_depth: 1
   safety_margin_percent: 110
   # Der lange VLM-Block darf die zeitkritische Wahrnehmung nicht begleiten.
   no_corun:

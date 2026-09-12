@@ -27,6 +27,7 @@ allgemeingültige Produktleistung zu lesen.
 | [`tensorrt.md`](tensorrt.md) | Beseitigt TensorRT den Engpass? | **nein** — Auslastung 103 % → 76 %, Vorsprung halbiert, Engpass bleibt |
 | [`messkette-2026-09-11.md`](messkette-2026-09-11.md) | Was hält auf dem neuen Treiber, mit korrigierten Werkzeugen? | Überlast 21–125x und Datenpfad bestanden; **Schwächen** an der Kante bei 100 %, bei Lastspitzen und in der Variantenwahl; mit XSched Gleichstand mit Triton, das VLM läuft erstmals unter dem Governor |
 | [`messkette-2026-09-12.md`](messkette-2026-09-12.md) | Was bringen die Korrekturen auf echter Hardware? | Kante bei 100 % ist die Dispatch-Luecke (188 → 17 ‰), Variantenwahl ueberall 0 ‰, Lastspitzen ohne Nachteil, gelernte Marge nuetzt bis 110 % und schadet bei 125 %, Pilot relativ besser und absolut verfehlt |
+| [`abnahme-2026-09-12.md`](abnahme-2026-09-12.md) | Pipelining, Versorgungsschutz, Kalibrierung: was davon traegt? | Pipelining kostet nichts und behebt die Kante (188 → 17 ‰); der Versorgungsschutz wirkt, erschlaegt aber allein den Hintergrund (998 ‰) und gehoert mit der Kalibrierung zusammen; bei starker Ueberlast bleibt die feste Marge vorn |
 | [`scenarios.md`](scenarios.md) | Welche Lastfälle tragen die Aussagen, wogegen, mit welchem Preis? | Plan für S1–S12, darunter Detektor + LLM, zwei LLMs nebeneinander, langer Job unter Sättigung, zweite GPU |
 
 ## Regeln, die für jede Zahl hier gelten

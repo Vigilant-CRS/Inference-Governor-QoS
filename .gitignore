@@ -9,3 +9,4 @@
 *.plan
 *.engine
 __pycache__/
+backends/**/target/
