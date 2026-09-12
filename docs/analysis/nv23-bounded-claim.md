@@ -256,6 +256,16 @@ eine Wahrscheinlichkeit, keine Schranke), nichts über zerlegbare Aufträge.
 Das ist der Umfang, den NV-23 verlangt: eine präzise Teilfrage, keine
 Zertifizierung.
 
+**Und nichts über die Versorgung.** Die Schranke begrenzt das Alter eines
+gelieferten Frames, nicht die Lücke zwischen zwei brauchbaren Ergebnissen.
+Ein Vertrag mit `deadline = 1,5 T` und `max_age = 2 T` lässt zu, dass jeder
+Frame seine Frist hält und der Verbraucher trotzdem eine Lücke hat; dagegen
+steht der Versorgungsschutz des Look-ahead
+([ADR-0041](../adr/0041-the-look-ahead-protects-the-supply-not-only-the-deadline.md)),
+der abschaltbar und in der Voreinstellung aus ist. Die Gittersuche läuft
+gegen diese Voreinstellung, die Schranke bleibt also unberührt; eingeschaltet
+kann der Guard nur mehr zurückhalten und das Alter damit nur senken.
+
 ## Stand der Suche
 
 | Gitter | Wann | Parametersätze | innerhalb der Annahmen | Gegenbeispiel | nächste Annäherung an Δ |

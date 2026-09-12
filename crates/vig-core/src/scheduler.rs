@@ -331,6 +331,17 @@ pub struct Scheduler {
     /// Voreinstellung aus: dieses Paket liefert eine empirische Policy, keine
     /// formale Zusage. Wer sie einschaltet, soll es entschieden haben.
     miss_aware_policy: bool,
+    /// Ob der Look-ahead auch die **Versorgung** schuetzt (ADR-0041).
+    ///
+    /// Aus: er prueft je erwarteter Ankunft nur deren Deadline, wie bisher.
+    /// Ein: zusaetzlich den Ablauf des letzten brauchbaren Ergebnisses
+    /// (`Aufnahme + max_age`) — Hintergrundarbeit wird dann auch dann
+    /// zurueckgehalten, wenn der geschuetzte Frame seine Deadline noch
+    /// haelt, der Verbraucher dazwischen aber eine Luecke haette.
+    ///
+    /// Voreinstellung aus, weil es Hintergrundfortschritt kostet und die
+    /// Abnahme auf der GPU noch aussteht.
+    protect_supply: bool,
     /// Der Weakly-hard-Monitor je Modell, falls einer vereinbart ist (NV-02).
     ///
     /// `None`, wo kein Missbudget im Vertrag steht. Ein Monitor beobachtet;
@@ -434,6 +445,7 @@ impl Scheduler {
             hardware_state: StateClass::default(),
             profile_revision: 0,
             miss_aware_policy: false,
+            protect_supply: false,
             hints: Hints::new(HintPolicy::closed()),
             slots,
             overload,
@@ -873,6 +885,25 @@ impl Scheduler {
     /// zwischen Klassen ist die Betreiberpolicy und bleibt es.
     pub const fn set_miss_aware_policy(&mut self, enabled: bool) {
         self.miss_aware_policy = enabled;
+    }
+
+    /// Ob der Look-ahead die Versorgung schuetzt (ADR-0041).
+    #[must_use]
+    pub const fn protect_supply(&self) -> bool {
+        self.protect_supply
+    }
+
+    /// Schaltet den Versorgungsschutz des Look-ahead (ADR-0041).
+    ///
+    /// Eingeschaltet haelt der Guard Hintergrundarbeit auch dann zurueck,
+    /// wenn die erwartete geschuetzte Ankunft ihre Deadline noch haelt, ihr
+    /// Ergebnis aber erst nach dem Ablauf des vorigen kaeme. Das ist genau
+    /// die Luecke, die die Verbrauchersicht (ADR-0005) zaehlt.
+    ///
+    /// Der Preis ist Hintergrundfortschritt: jeder zusaetzliche Schutz ist
+    /// zusaetzliches absichtliches Idle.
+    pub const fn set_protect_supply(&mut self, enabled: bool) {
+        self.protect_supply = enabled;
     }
 
     /// Wie viele Misses das Fenster eines Modells noch vertraegt (NV-24).
@@ -2028,11 +2059,26 @@ impl Scheduler {
             ) else {
                 continue;
             };
+            // ADR-0041: bis wann das Ergebnis da sein muss, damit der
+            // Verbraucher lueckenlos versorgt bleibt. Ein Ablauf, der schon
+            // vorbei ist, ist kein Kriterium mehr — die Luecke ist dann
+            // bereits entstanden, und wer sie nicht mehr verhindern kann,
+            // soll dafuer keine Arbeit blockieren.
+            let supply = if self.protect_supply {
+                self.usable_until
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .filter(|until| until.as_nanos() > now.as_nanos())
+            } else {
+                None
+            };
             let _ = out.push(ExpectedArrival {
                 model,
                 criticality: contract.criticality,
                 at: expected_at.max(now),
                 deadline,
+                supply,
                 runtime,
             });
         }

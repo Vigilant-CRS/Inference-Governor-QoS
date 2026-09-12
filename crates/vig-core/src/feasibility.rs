@@ -74,6 +74,19 @@ pub struct ExpectedArrival {
     /// Deadline, die der Dispatch fuer denselben Frame rechnet (Spec L-010,
     /// ADR-0036).
     pub deadline: Instant,
+    /// Bis wann sein Ergebnis vorliegen muss, damit der Verbraucher
+    /// lueckenlos versorgt bleibt (NV-01, ADR-0041).
+    ///
+    /// Der Ablauf des letzten brauchbaren Ergebnisses, also dessen
+    /// `Aufnahme + max_age`. Kommt das naechste spaeter, hat der Verbraucher
+    /// dazwischen nichts Brauchbares — auch wenn der Frame seine eigene
+    /// Deadline haelt. Ein Vertrag mit `deadline = 1,5 T` und
+    /// `max_age = 2 T` erlaubt genau das.
+    ///
+    /// `None`, wo der Schutz nicht eingeschaltet ist, wo der Vertrag kein
+    /// Hoechstalter nennt, wo noch nie etwas Brauchbares geliefert wurde oder
+    /// wo der Ablauf schon vorbei ist. Dann bleibt es bei der Deadline.
+    pub supply: Option<Instant>,
     /// Die konservativ prognostizierte Laufzeit seiner besten Variante.
     pub runtime: Duration,
 }
@@ -257,11 +270,21 @@ where
                 .saturating_add(candidate_residual.as_nanos()),
         );
 
-        let without = feasible_for(&baseline, expected);
-        let with = feasible_for(&hypothetical, &burdened);
+        let without = projected_finish(&baseline, expected);
+        let with = projected_finish(&hypothetical, &burdened);
 
-        // Nur vetoieren, wenn der Kandidat die Ursache ist.
-        if without && !with {
+        // Zwei Fristen, jede fuer sich geprueft (ADR-0041): die Deadline des
+        // Frames und der Ablauf des vorigen Ergebnisses. Vetoiert wird, wenn
+        // der Kandidat **eine** von beiden reisst, die ohne ihn gehalten
+        // haette — und nur dann, wenn er die Ursache ist.
+        //
+        // Beide zu einem Minimum zu verschmelzen waere falsch: ist die
+        // Versorgung ohnehin verloren, weil das letzte Ergebnis schon
+        // abgelaufen ist, schuetzt der Guard weiter die Deadline. Sonst
+        // faellt der Schutz genau dort aus, wo er am noetigsten ist.
+        let breaks =
+            |limit: Instant| without.is_some_and(|f| f <= limit) && with.is_none_or(|f| f > limit);
+        if breaks(expected.deadline) || expected.supply.is_some_and(breaks) {
             let retry_after = hypothetical
                 .projected_start(candidate_model, now)
                 .map_or(expected.at, |(_, s)| s);
@@ -314,12 +337,15 @@ fn reserve(slots: &mut SlotSet, expected: &ExpectedArrival) {
     }
 }
 
-/// Waere die erwartete Ankunft in diesem Belegungszustand machbar?
-fn feasible_for(slots: &SlotSet, expected: &ExpectedArrival) -> bool {
+/// Wann die erwartete Ankunft in diesem Belegungszustand fertig waere.
+///
+/// `None`, wenn kein Slot sie aufnehmen kann oder die Rechnung ueberlaeuft —
+/// dann ist keine Frist zu halten, und der Aufrufer behandelt sie als nicht
+/// machbar.
+fn projected_finish(slots: &SlotSet, expected: &ExpectedArrival) -> Option<Instant> {
     slots
         .projected_start(expected.model, expected.at)
         .and_then(|(_, start)| start.checked_add(expected.runtime))
-        .is_some_and(|finish| finish <= expected.deadline)
 }
 
 /// Die absolute Deadline eines Requests aus seiner Generation Time.
@@ -360,6 +386,7 @@ mod tests {
             criticality: Criticality::Protected,
             at: at(10),
             deadline: at(43),
+            supply: None,
             runtime: ms(15),
         }
     }
@@ -425,6 +452,97 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// ADR-0041: der Frame haelt seine Deadline, aber das vorige Ergebnis
+    /// laeuft vorher ab. Ohne Versorgungsfrist laesst der Guard den
+    /// Kandidaten starten, mit ihr haelt er ihn zurueck.
+    #[test]
+    fn a_supply_deadline_holds_back_work_the_frame_deadline_would_allow() {
+        let slots = SlotSet::homogeneous(1, 0).unwrap();
+        // Ankunft bei 10 ms, 15 ms Laufzeit, Frist 43 ms: ein Kandidat von
+        // 20 ms laeuft 0..20, der Detektor danach 20..35 und haelt seine
+        // Frist. Ein Kandidat von 10 ms waere bei 10 fertig und verzoegerte
+        // ihn ueberhaupt nicht — der Fall taugt fuer keine der beiden
+        // Fristen als Probe.
+        let candidate = ms(20);
+        let without_supply = guard_protected(
+            &slots,
+            VLM,
+            Criticality::BestEffort,
+            candidate,
+            at(0),
+            [detector_soon()].iter(),
+        );
+        assert_eq!(
+            without_supply,
+            GuardVerdict::Clear,
+            "die Deadline allein laesst ihn starten"
+        );
+
+        // Das letzte brauchbare Ergebnis laeuft bei 20 ms ab. Ohne Kandidat
+        // waere der Detektor um 25 ms fertig — auch das ist zu spaet, also
+        // ist nichts zu retten und es bleibt bei Clear.
+        let hopeless = ExpectedArrival {
+            supply: Some(at(20)),
+            ..detector_soon()
+        };
+        assert_eq!(
+            guard_protected(
+                &slots,
+                VLM,
+                Criticality::BestEffort,
+                candidate,
+                at(0),
+                [hopeless].iter(),
+            ),
+            GuardVerdict::Clear,
+            "eine ohnehin verlorene Versorgung blockiert keine Arbeit"
+        );
+
+        // Laeuft es erst bei 26 ms ab, rettet der Verzicht die Versorgung:
+        // ohne Kandidat 10..25, mit ihm 10..35.
+        let rescuable = ExpectedArrival {
+            supply: Some(at(26)),
+            ..detector_soon()
+        };
+        assert!(matches!(
+            guard_protected(
+                &slots,
+                VLM,
+                Criticality::BestEffort,
+                candidate,
+                at(0),
+                [rescuable].iter(),
+            ),
+            GuardVerdict::WouldEndanger {
+                model: DETECTOR,
+                ..
+            }
+        ));
+    }
+
+    /// Die Versorgungsfrist ersetzt die Deadline nicht, sie tritt daneben:
+    /// eine verlorene Versorgung darf den Deadlineschutz nicht abschalten.
+    #[test]
+    fn a_lost_supply_does_not_disable_the_deadline_guard() {
+        let slots = SlotSet::homogeneous(1, 0).unwrap();
+        let stale = ExpectedArrival {
+            supply: Some(at(12)),
+            ..detector_soon()
+        };
+        let verdict = guard_protected(
+            &slots,
+            VLM,
+            Criticality::BestEffort,
+            ms(90),
+            at(0),
+            [stale].iter(),
+        );
+        assert!(
+            matches!(verdict, GuardVerdict::WouldEndanger { .. }),
+            "der 90-ms-Block reisst weiterhin die Deadline"
+        );
     }
 
     /// Ein unterbrochener Auftrag endet spaeter als geplant; eine Ankunft

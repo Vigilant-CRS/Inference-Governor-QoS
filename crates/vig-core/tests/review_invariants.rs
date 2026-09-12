@@ -359,6 +359,7 @@ fn the_guard_reserves_the_combined_demand_of_expected_requests() {
             criticality: Criticality::Protected,
             at: at(10),
             deadline: at(20),
+            supply: None,
             runtime: ms(5),
         },
         ExpectedArrival {
@@ -366,6 +367,7 @@ fn the_guard_reserves_the_combined_demand_of_expected_requests() {
             criticality: Criticality::Protected,
             at: at(10),
             deadline: at(20),
+            supply: None,
             runtime: ms(5),
         },
     ];

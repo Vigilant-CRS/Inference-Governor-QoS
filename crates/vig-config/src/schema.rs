@@ -364,6 +364,18 @@ pub struct BackendConfig {
     /// erreichbar" sind verschiedene Aussagen.
     #[serde(default)]
     pub miss_aware_policy: bool,
+    /// Ob der Look-ahead auch die Versorgung schuetzt (ADR-0041).
+    ///
+    /// Voreinstellung **aus**. Eingeschaltet haelt der Governor
+    /// Hintergrundarbeit auch dann zurueck, wenn die naechste geschuetzte
+    /// Ankunft ihre Deadline noch haelt, ihr Ergebnis aber erst nach dem
+    /// Ablauf des vorigen kaeme — also genau dann, wenn der Verbraucher
+    /// dazwischen eine Luecke haette (ADR-0005, NV-01).
+    ///
+    /// Der Preis ist Hintergrundfortschritt. Deshalb ist es eine Handlung des
+    /// Betreibers und keine, die die Policy selbst trifft.
+    #[serde(default)]
+    pub protect_supply: bool,
     /// Ob die zustandsabhaengige Prognose entscheidet (NV-06, ADR-0023).
     ///
     /// Voreinstellung `shadow`: sie wird gefuettert und verglichen,
@@ -1559,6 +1571,8 @@ pub struct Resolved {
     pub security: SecurityConfig,
     /// Ob das Missbudget in die Kandidatenwahl eingeht (NV-24).
     pub miss_aware_policy: bool,
+    /// Ob der Look-ahead auch die Versorgung schuetzt (ADR-0041).
+    pub protect_supply: bool,
     /// Ob die zustandsabhaengige Prognose entscheidet (NV-06).
     pub prediction: vig_core::predictor::Mode,
     /// Die Kalibrierung an der Karte, falls eingeschaltet (ADR-0038).
@@ -2138,6 +2152,7 @@ impl Config {
             max_inflight_bytes: self.backend.max_inflight_mib.saturating_mul(1024 * 1024),
             security: self.backend.security.clone(),
             miss_aware_policy: self.backend.miss_aware_policy,
+            protect_supply: self.backend.protect_supply,
             prediction: self.backend.prediction.to_core(),
             margin_learning,
             actuation: self.backend.actuation.clone(),

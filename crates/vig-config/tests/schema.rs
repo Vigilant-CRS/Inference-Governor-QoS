@@ -196,6 +196,26 @@ fn the_prediction_mode_is_an_explicit_operator_step() {
     assert!(Config::from_yaml(&typo).is_err());
 }
 
+/// ADR-0041: der Versorgungsschutz des Look-ahead ist ein Schritt des
+/// Betreibers.
+///
+/// Ohne die Zeile prueft der Guard nur die Deadline jeder erwarteten
+/// Ankunft, wie bisher. Eingeschaltet prueft er zusaetzlich den Ablauf des
+/// vorigen Ergebnisses — und haelt dafuer mehr Hintergrundarbeit zurueck.
+/// Weil das Fortschritt kostet, trifft die Policy diese Wahl nicht selbst.
+#[test]
+fn the_supply_guard_is_an_explicit_operator_step() {
+    let default = Config::from_yaml(EXAMPLE).unwrap().resolve().unwrap();
+    assert!(!default.protect_supply);
+
+    let on = EXAMPLE.replace(
+        "  type: triton\n",
+        "  type: triton\n  protect_supply: true\n",
+    );
+    let resolved = Config::from_yaml(&on).unwrap().resolve().unwrap();
+    assert!(resolved.protect_supply);
+}
+
 /// Ein vertippter Schluessel wuerde sonst ignoriert, und der Nutzer glaubte,
 /// er haette etwas konfiguriert.
 #[test]

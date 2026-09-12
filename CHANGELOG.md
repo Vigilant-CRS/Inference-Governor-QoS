@@ -7,6 +7,23 @@ bedeutet, steht in [docs/releases.md](docs/releases.md).
 
 ### Hinzugefuegt
 
+- **Der Look-ahead schuetzt die Versorgung** (opt-in,
+  [ADR-0041](docs/adr/0041-the-look-ahead-protects-the-supply-not-only-the-deadline.md)).
+  `backend.protect_supply: true` gibt jeder erwarteten geschuetzten Ankunft
+  eine zweite Frist: den Ablauf des letzten brauchbaren Ergebnisses
+  (`Aufnahme + max_age`). Hintergrundarbeit wird dann auch dann
+  zurueckgehalten, wenn der geschuetzte Frame seine Deadline noch haelt, der
+  Verbraucher dazwischen aber eine Luecke haette (ADR-0005). Ausloeser war die
+  Rampe vom 12.09.: mit gelernter Marge verfehlte der Detektor bei 125 % Last
+  205 ‰ der Perioden ohne eine einzige verletzte Deadline — die feste Marge
+  hatte ihn durch Pessimismus geschuetzt, nicht durch Planung. **Der Preis
+  ist hart:** im Simulator schliesst der Schutz die Luecke (13 → 0 ‰ der
+  Abtastungen), und der Hintergrund bekommt bei 25-ms-Auftraegen gar nichts
+  mehr (333 → 0 versorgte Fenster, Vetos 2 → 7 980); bei 20 ms zahlt er 9 %,
+  obwohl es dort nichts zu retten gab. Ob der Verlust unter
+  `minimum_background_progress_pct` gedeckelt werden muss, entscheidet die
+  Messung auf der GPU — bis dahin bleibt es opt-in, und ohne die Zeile
+  aendert sich nichts.
 - **Die Planung kalibriert sich an der Karte** (opt-in,
   [ADR-0038](docs/adr/0038-the-plan-calibrates-to-the-card.md)).
   `backend.margin_learning: {}` laesst den Governor je GPU einen Faktor

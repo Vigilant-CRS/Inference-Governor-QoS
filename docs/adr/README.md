@@ -49,6 +49,7 @@ Spec-Stelle explizit.
 | [0038](0038-the-plan-calibrates-to-the-card.md) | Die Planung kalibriert sich an der Karte | Spec 13.3, ADR-0016, ADR-0023, ADR-0034 | Akzeptiert, opt-in |
 | [0039](0039-a-second-backend-proves-the-seam.md) | Ein zweites Backend beweist die Naht, nicht die Hardware | NV-25, ADR-0003, ADR-0022, ADR-0024, ADR-0033 | Akzeptiert |
 | [0040](0040-a-restart-proves-only-what-died-with-it.md) | Ein Neustart belegt nur, was mit ihm starb | Review 11.09. R01/R02, ADR-0004, ADR-0032 | Akzeptiert |
+| [0041](0041-the-look-ahead-protects-the-supply-not-only-the-deadline.md) | Der Look-ahead schuetzt die Versorgung, nicht nur die Deadline | Spec 10.7, NV-01, ADR-0005, ADR-0036, ADR-0038 | Akzeptiert, opt-in |
 
 ## Format
 

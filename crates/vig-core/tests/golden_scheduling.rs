@@ -364,6 +364,7 @@ fn detector_arrival(arrival_ms: u64, deadline_ms: u64, runtime_ms: u64) -> Expec
         criticality: Criticality::Protected,
         at: at(arrival_ms),
         deadline: at(deadline_ms),
+        supply: None,
         runtime: ms(runtime_ms),
     }
 }

@@ -106,6 +106,22 @@ pub fn vig(scenario: &Scenario, margin: SafetyMargin) -> Governor {
     Governor::Vigilant(Box::new(scheduler))
 }
 
+/// Wie [`vig`], mit dem Versorgungsschutz des Look-ahead (ADR-0041).
+///
+/// # Panics
+///
+/// Wie [`vig`].
+#[must_use]
+pub fn vig_protecting_supply(scenario: &Scenario, margin: SafetyMargin) -> Governor {
+    match vig(scenario, margin) {
+        Governor::Vigilant(mut scheduler) => {
+            scheduler.set_protect_supply(true);
+            Governor::Vigilant(scheduler)
+        }
+        Governor::Baseline(baseline) => Governor::Baseline(baseline),
+    }
+}
+
 /// Baut die Baseline mit einer bestimmten Queue-Tiefe.
 ///
 /// # Panics

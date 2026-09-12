@@ -14,7 +14,7 @@ fortgeschrieben.
 | | |
 |---|---|
 | Rust, ohne Kommentare und Leerzeilen gezählt | ~34 500 Zeilen in 9 Crates |
-| Tests | 795 grün, fünf bewusst ignoriert (die Zeitprüfung der Datenpfadbudgets, das große NV-23-Gitter, zwei Messmatrizen der Margenkalibrierung und die Tabelle der Lastspitzen-Analyse — sie gehören auf die Releasemaschine, nicht auf geteilte CI-Runner) |
+| Tests | 799 grün, sechs bewusst ignoriert (die Zeitprüfung der Datenpfadbudgets, das große NV-23-Gitter, zwei Messmatrizen der Margenkalibrierung, die Tabelle der Lastspitzen-Analyse und die des Versorgungsschutzes — sie gehören auf die Releasemaschine, nicht auf geteilte CI-Runner) |
 | Architekturentscheidungen | 40 ADRs |
 | Gate | fmt, clippy `-D warnings`, test, `cargo deny`, `reuse lint`, aarch64 unter Emulation |
 
@@ -241,6 +241,7 @@ per Voreinstellung nichts. Mit Marge ist `active` sicher, auf Gate M3 aber ohne 
 | Kante bei 100 % | **Ursache belegt**: die Dispatch-Lücke | Ohne Pipelining startet der Governor den nächsten Auftrag erst nach der Antwort auf den vorigen. Mit `pipelining_depth: 1` sinkt der Verlust von 188 auf 17 ‰ bei 100 % Last, der Vorsprung bei Überlast bleibt ([Messung](benchmark/messkette-2026-09-12.md)). Offen: was Pipelining in Gate M3 kostet, und ob es in die empfohlene Konfiguration gehört. |
 | Gelernte Marge auf Hardware | gemessen, bleibt opt-in | Nützt bei falschem Profil bis 110 % (Detektor 15 statt 150 ‰), schadet bei 125 % (479 statt 181 ‰), weil ein knapperer Plan mehr Hintergrundarbeit zulässt. Die Korrektur dafür ist ADR-0041: der Wächter reserviert für die Versorgung, nicht nur für die Frist. |
 | Vig-Edge-Pilot | erster voller Lauf: relativ besser, absolut verfehlt | Alarmzeit und Trefferquote sind in jedem Lastpunkt besser als Triton direkt, verfehlen aber K1 und K4 um ein Vielfaches; die messen Erkennungsqualität mit und gehören getrennt. Der Berichtspfad verhungert (1–2 statt 30 Berichte/min) — Wiederholung mit Präemption ([Messung](benchmark/messkette-2026-09-12.md)). |
+| Versorgungsschutz im Look-ahead | **gebaut, opt-in, auf der GPU ungemessen** ([ADR-0041](adr/0041-the-look-ahead-protects-the-supply-not-only-the-deadline.md)) | Befund der Rampe vom 12.09.: mit gelernter Marge verfehlt der Detektor bei 125 % Last 205 ‰ der Perioden, ohne eine verletzte Deadline — die feste Marge schützte ihn durch Pessimismus, nicht durch Planung. `backend.protect_supply: true` gibt jeder erwarteten Ankunft eine zweite Frist, den Ablauf des vorigen Ergebnisses. Im Simulator schließt das die Lücken und kostet Hintergrundfortschritt. Es fehlt: die Rampe bei 110 und 125 % mit gelernter Marge, mit und ohne Schutz. |
 
 ## Offen für eine Produktionsfreigabe
 
