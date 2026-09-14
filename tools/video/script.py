@@ -24,6 +24,10 @@ SOURCES = {
     "ramp": "docs/benchmark/load-ramp.md",
     "run": "InferenceQoS-runtime/gate-m3-r03/gate-r1.txt",
     "doctor": "InferenceQoS-runtime/measure-nachlauf-2026-09-11e/pre4-doctor.txt",
+    # Gelesen wird die JSON, nicht der Bericht daneben: dessen Urteil steht
+    # heute auf Deutsch, die strukturierten Felder sind englisch. Das Bild
+    # haengt damit nicht daran, wann der deutsche Satz repariert wird.
+    "autotune": "InferenceQoS-runtime/autotune-laptop-2026-09-14/qualification.json",
 }
 
 #: Messdaten fuer Protokolle, deren Pfad kein Datum traegt. Sie stehen im
@@ -185,6 +189,29 @@ SCENES = [
         source="android",
         pause=0.7,
     ),
+    # ------------------------------------------------------------------
+    # Die Szene, die am laengsten gefehlt hat.
+    #
+    # Sie stand lange als Konstante daneben und blieb draussen, weil es den
+    # Befehl nicht gab und ein Video keine Funktion versprechen darf, die
+    # niemand starten kann. Jetzt gibt es ihn.
+    #
+    # Das Bild zeigt einen echten Lauf, verworfene Messreihen eingeschlossen.
+    # Wer nur den gelungenen Teil zeigt, wirbt; wer auch die Verweigerung
+    # zeigt, wird geglaubt.
+    # ------------------------------------------------------------------
+    Scene(
+        key="autotune",
+        narration=(
+            "Start it, and in half an hour it has measured your machine and "
+            "tells you what it can carry. And if it turns out you don't need "
+            "us, it says that too."
+        ),
+        visual="autotune",
+        chapter="Measuring your machine",
+        source="autotune",
+        pause=0.8,
+    ),
     Scene(
         key="try",
         narration=(
@@ -209,28 +236,11 @@ SCENES = [
     ),
 ]
 
-#: Vorbereitet, aber **nicht im Video** — und das ist Absicht.
-#:
-#: Der Abschnitt gehoert kurz vor "try", sobald `vig autotune` existiert. Heute
-#: existiert er nicht: im Quellbaum findet sich kein `autotune`, und `calibrate`
-#: ist eine Funktion in einem Benchmarkbinary, kein Anwenderbefehl. Diesen Text
-#: jetzt zu sprechen hiesse, in einem oeffentlichen Video eine Funktion zu
-#: versprechen, die niemand starten kann — genau der Fehler, den der Rest
-#: dieses Skripts vermeidet.
-#:
-#: Wenn der Befehl da ist: in SCENES vor der "try"-Szene einhaengen, Kapitel
-#: ergaenzen, fertig. Der Wortlaut ist abgestimmt und steht hier bereit.
-AUTOTUNE = Scene(
-    key="autotune",
-    narration=(
-        "Start it, and in half an hour it has measured your machine and tells "
-        "you what it can carry. And if it turns out you don't need us, it says "
-        "that too."
-    ),
-    visual="autotune",
-    chapter="Measuring your machine",
-    pause=0.8,
-)
+#: Die Autotune-Szene stand frueher hier als Konstante und hing bewusst nicht
+#: in SCENES: Es gab den Befehl nicht, und ein Video darf keine Funktion
+#: versprechen, die niemand starten kann. Seit `vig autotune` existiert, steht
+#: sie oben zwischen "limits" und "try" — an der Stelle, die dieser Kommentar
+#: ihr damals zugewiesen hat. Der Wortlaut ist unveraendert uebernommen.
 
 #: Nur fuer den Kurzschnitt: eine stumme Schlusskarte.
 #:

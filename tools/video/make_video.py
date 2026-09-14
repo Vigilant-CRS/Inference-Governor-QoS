@@ -244,7 +244,7 @@ def main() -> int:
     # Belege an die Szenen haengen, die eine Datei zeigen. Die Messprotokolle
     # liegen neben dem Repository, nicht darin.
     for scene in script.SCENES:
-        if scene.source in ("run", "doctor"):
+        if scene.source in ("run", "doctor", "autotune"):
             relative = Path(script.SOURCES[scene.source]).relative_to(runtime.name)
             scene.data["path"] = str(runtime / relative)
             # Manche Protokollverzeichnisse tragen kein Datum im Namen; dann

@@ -19,6 +19,7 @@ dieses Modul tut nicht so, als gaebe es sie.
 """
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -162,3 +163,66 @@ def doctor_lines(path: Path) -> list[str]:
         raise SystemExit(f"{path}: kein FAIL gefunden — das Bild behauptet "
                          "aber, der Lauf sei nicht startbereit gewesen.")
     return picked
+
+
+# -------------------------------------------------------------- vig autotune --
+
+#: Was die vier Schritte tun, in einem Satz. Das steht hier, weil
+#: `qualification.json` nur den Namen des Schritts nennt. Ein unbekannter
+#: Schritt bricht ab statt durchzurutschen: Ein Bild, das einen Schritt
+#: stillschweigend weglaesst, behauptet einen kuerzeren Lauf als den, der
+#: stattgefunden hat.
+_AUTOTUNE_STEPS = {
+    "discover": "read the models from the backend",
+    "measure": "measure runtimes, concurrency, interference",
+    "fit": "is the governor worth it on this load?",
+    "check": "check the resulting configuration",
+}
+
+
+def autotune_lines(path: Path) -> list[str]:
+    """Die Zeilen eines echten `vig autotune`-Laufs, englisch.
+
+    Gelesen wird `qualification.json` und nicht `qualification.md`: Das Urteil
+    steht im Bericht heute auf Deutsch, die strukturierten Felder daneben sind
+    englisch. Das Bild haengt damit nicht daran, wann der deutsche Satz
+    repariert wird — und es zeigt weiterhin, was gemessen wurde, statt dessen,
+    was jemand abgetippt hat.
+
+    Gezeigt wird ausdruecklich auch, was der Lauf *nicht* behauptet: wie viele
+    Messreihen verworfen wurden und ob er eine Freigabe verweigert. Das ist
+    kein Schoenheitsfehler, den man wegschneidet, sondern der Grund, dem
+    Werkzeug ueberhaupt zu glauben.
+    """
+    data = json.loads(path.read_text(encoding="utf-8"))
+
+    lines = []
+    for step in data.get("steps", []):
+        name = step.get("step", "")
+        if name not in _AUTOTUNE_STEPS:
+            raise SystemExit(
+                f"{path}: unbekannter Schritt {name!r} — hat sich das "
+                f"Ausgabeformat von `vig autotune` geaendert? Ergaenze "
+                f"_AUTOTUNE_STEPS in tools/video/report.py.")
+        lines.append(f"{name:<9}{_AUTOTUNE_STEPS[name]:<44}"
+                     f"{step.get('outcome', '?'):<7}{step.get('seconds', 0):>3} s")
+
+    series = data.get("series", {})
+    qualified, discarded = series.get("qualified"), series.get("discarded")
+    if qualified is None or discarded is None:
+        raise SystemExit(f"{path}: series.qualified/series.discarded fehlen — "
+                         "ohne sie verschweigt das Bild, wie viel verworfen wurde.")
+    lines.append(f"SERIES   {qualified} of {qualified + discarded} usable, "
+                 f"{discarded} discarded")
+
+    if "release" not in data:
+        raise SystemExit(f"{path}: kein Feld 'release'. Das Bild soll gerade "
+                         "zeigen, ob eine Freigabe verweigert wurde.")
+    reasons = "; ".join(data.get("release_reasons", []))
+    lines.append(f"RESULT   release {data['release']}"
+                 + (f" — {reasons}" if reasons else ""))
+
+    if data.get("doctor"):
+        lines.append(f"DOCTOR   {data['doctor']}")
+
+    return [assert_english(line, path) for line in lines]

@@ -572,6 +572,57 @@ def short_tail(_scene, progress: float) -> Image.Image:
     return image
 
 
+def autotune(scene, progress: float) -> Image.Image:
+    """Der Lauf, der die Maschine des Anwenders vermisst — mitsamt dem, was er ablehnt.
+
+    Die Zeilen kommen aus `qualification.json` eines echten Laufs. Dass dort
+    heute "release refused" steht, wird nicht weggeschnitten: Ein Werkzeug,
+    das eine Freigabe verweigert, weil es drei von vier Messreihen verworfen
+    hat, ist genau deshalb glaubwuerdig. Faellt spaeter ein sauberer Lauf an,
+    zeigt dasselbe Bild dessen Zahlen — es liest die Datei, es merkt sie sich
+    nicht.
+    """
+    path = Path(scene.data["path"])
+    lines = report.autotune_lines(path)
+    image = base()
+    draw = ImageDraw.Draw(image)
+    kicker(draw, "measure your own machine")
+    headline(draw, "It measures your machine — and says what it will not claim.",
+             y=112, size=46)
+
+    mono = font(MONO, 24)
+    line_h = 34
+    top, left = 228, 130
+    advance = draw.textlength("M", font=mono) or 14.4
+    budget = int((W - 2 * left - 60) / advance)
+    lines = [line if len(line) <= budget else line[:budget - 2].rstrip() + " …"
+             for line in lines]
+    height = 52 + line_h * len(lines) + 26
+    _panel(draw, top, height,
+           f"vig autotune  ·  {report.source_label(path, scene.data.get('date', ''))}")
+
+    shown = int(min(len(lines), 2 + progress * (len(lines) + 4)))
+    y = top + 62
+    for line in lines[:shown]:
+        colour = TEXT
+        if line.startswith("RESULT"):
+            colour = BAD if "refused" in line else OK
+        elif line.startswith("SERIES"):
+            colour = "#d0a215" if " 0 discarded" not in line else OK
+        elif line.startswith("DOCTOR"):
+            colour = OK
+        draw.text((left + 26, y), line, font=mono, fill=colour)
+        y += line_h
+
+    below = top + height + 26
+    draw.text((left, below),
+              "It refuses to certify on data it threw away — and tells you how "
+              "much it threw away.",
+              font=font(SANS, 25), fill=DIM)
+    _source(draw, path, below + 38, scene.data.get("date", ""))
+    return image
+
+
 RENDERERS = {
     "title": title,
     "short_tail": short_tail,
@@ -582,6 +633,7 @@ RENDERERS = {
     "terminal_run": terminal_run,
     "price": price,
     "limits": limits,
+    "autotune": autotune,
     "terminal_doctor": terminal_doctor,
     "close": close,
 }
@@ -589,8 +641,8 @@ RENDERERS = {
 #: Szenen, deren Bild sich bewegt. Alles andere wird einmal gerendert und
 #: stehen gelassen — das spart Platz und Zeit, ohne dass man es sieht.
 ANIMATED = {"title", "timeline_fifo", "stale", "timeline_governor", "usecases",
-            "terminal_run", "price", "limits", "terminal_doctor", "close",
-            "short_tail"}
+            "terminal_run", "price", "limits", "autotune", "terminal_doctor",
+            "close", "short_tail"}
 
 
 def render(scene, progress: float) -> Image.Image:
