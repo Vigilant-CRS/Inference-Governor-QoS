@@ -14,7 +14,7 @@ fortgeschrieben.
 | | |
 |---|---|
 | Rust, ohne Kommentare und Leerzeilen gezählt | ~34 500 Zeilen in 9 Crates |
-| Tests | 808 grün, sechs bewusst ignoriert (die Zeitprüfung der Datenpfadbudgets, das große NV-23-Gitter, zwei Messmatrizen der Margenkalibrierung, die Tabelle der Lastspitzen-Analyse und die des Versorgungsschutzes — sie gehören auf die Releasemaschine, nicht auf geteilte CI-Runner) |
+| Tests | 822 grün, sechs bewusst ignoriert (die Zeitprüfung der Datenpfadbudgets, das große NV-23-Gitter, zwei Messmatrizen der Margenkalibrierung, die Tabelle der Lastspitzen-Analyse und die des Versorgungsschutzes — sie gehören auf die Releasemaschine, nicht auf geteilte CI-Runner) |
 | Architekturentscheidungen | 40 ADRs |
 | Gate | fmt, clippy `-D warnings`, test, `cargo deny`, `reuse lint`, aarch64 unter Emulation |
 
