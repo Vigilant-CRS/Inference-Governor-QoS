@@ -42,7 +42,7 @@ use std::io::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 use vig_bench::shm::Region;
-use vig_bench::workload::{InputSpec, StreamDef, drive};
+use vig_bench::workload::{InputSpec, StreamDef, TextSpec, drive};
 use vig_config::Config;
 use vig_gateway::{GatewayService, MonotonicClock, actor};
 use vig_protocol_oip::inference::grpc_inference_service_server::GrpcInferenceServiceServer;
@@ -67,6 +67,56 @@ const BASE: [(&str, &str, u64, u64); 3] = [
     ("pose", "pose_main", 23, 46),
     ("depth", "depth_main", 46, 92),
 ];
+
+/// Der logische Name des Sprachmodells im Dauerlauf.
+const LLM: &str = "llm";
+/// Abstand zwischen zwei Generierungsauftraegen.
+///
+/// Reichlich bemessen: Ein Auftrag ueber 64 Token dauert rund eine Sekunde,
+/// und der Dauerlauf soll das Sprachmodell **beschaeftigen**, nicht die
+/// Warteschlange fluten. Was hier gemessen wird, ist die Frage, ob der
+/// getaktete Strom neben einem langen, nicht unterbrechbaren Auftrag
+/// durchkommt — nicht, wie viele davon hineinpassen.
+const LLM_PERIOD_MS: u64 = 4_000;
+/// Fachliches Hoechstalter des Generierungsstroms.
+const LLM_MAX_AGE_MS: u64 = 60_000;
+/// Token je Auftrag — die Groesse, die die Auftragsdauer bestimmt.
+const LLM_MAX_TOKENS: u32 = 64;
+
+/// Faehrt der Dauerlauf ein Sprachmodell als Hintergrundlast mit?
+///
+/// **Voreingestellt aus, und das mit Absicht.** Der Dauerlauf vom 02.09.
+/// (`docs/benchmark/soak.md`) lief mit drei Detektorstroemen. Haette dieser
+/// Umbau das stillschweigend geaendert, waere die naechste Nacht mit der
+/// vorigen nicht mehr vergleichbar — und eine Stabilitaetsaussage, die man
+/// gegen nichts halten kann, ist keine.
+fn with_llm() -> bool {
+    std::env::var_os("SOAK_WITH_LLM").is_some_and(|v| v == "1")
+}
+
+/// Der Triton mit dem Sprachmodell — ein eigener Prozess.
+///
+/// Dieselbe Trennung wie in `wp26`: Das vLLM-Backend und das
+/// onnxruntime-Backend brauchen verschiedene Bibliotheksstaende und lassen
+/// sich nicht in einen Prozess legen. Die Slots modellieren trotzdem die
+/// **GPU**, nicht den Prozess.
+fn llm_endpoint() -> String {
+    std::env::var("SOAK_LLM_ENDPOINT").unwrap_or_else(|_| "127.0.0.1:8011".to_owned())
+}
+
+fn llm_model() -> String {
+    std::env::var("SOAK_LLM_MODEL").unwrap_or_else(|_| "qwen".to_owned())
+}
+
+/// Die Prompts, reihum. Kurz gehalten: gemessen wird die Belegung der GPU,
+/// nicht die Sprachguete.
+fn llm_prompts() -> Vec<String> {
+    vec![
+        "Summarise what a robot should do when its camera view is blocked.".to_owned(),
+        "List three reasons a control loop can miss its deadline.".to_owned(),
+        "Explain in two sentences why stale sensor data is worse than none.".to_owned(),
+    ]
+}
 
 fn scaled_period(base_ms: u64, load_percent: u64) -> u64 {
     // Höhere Last bedeutet kürzere Periode.
@@ -103,14 +153,43 @@ fn config_yaml(load: u64, endpoint: &str) -> String {
             period.saturating_mul(3).checked_div(2).unwrap_or(period),
         );
     }
+    // Das Sprachmodell als nachrangige Last, wortgleich zu `wp26`: eigener
+    // Server, `decoupled`, Fifo mit Rueckstau statt Verwerfen. Es ist die
+    // Arbeit, gegen die der getaktete Strom verteidigt wird — es darf warten,
+    // es darf nur nicht verschwinden.
+    if with_llm() {
+        let _ = write!(
+            models,
+            "\n  {LLM}:\n    decoupled: true\n    backend_endpoint: \"{}\"\n    \
+             class: best_effort\n    \
+             queue: {{ policy: fifo, capacity: 2, overflow: backpressure_client }}\n    \
+             contract: {{ deadline_ms: 20000, max_age_ms: {LLM_MAX_AGE_MS} }}\n    \
+             variants:\n      - id: main\n        backend_model: {}\n        \
+             quality: {{ value: 1.0, source: user_declared }}\n        \
+             profile: {{ p50_us: 1100000, p95_us: 1400000, p99_us: 1600000, samples: 100 }}",
+            llm_endpoint(),
+            llm_model(),
+        );
+    }
     format!(
         "version: 1\nbackend:\n  type: triton\n  grpc_endpoint: {endpoint}\n  \
          slots: 1\n  pipelining_depth: 0\n  safety_margin_percent: 110\nmodels:{models}\n"
     )
 }
 
+/// Ist dieser Strom ein Generierungsauftrag statt eines Sensortakts?
+///
+/// Die Abdeckungsrechnung bewertet periodische Abtastung. Ein Auftrag ueber
+/// mehrere Sekunden ist keine — seine Abdeckungszahl haette keinen
+/// Gegenstand. Deshalb wird sie fuer diesen Strom nicht als Zahl gefuehrt,
+/// sondern als `-`.
+fn is_generative(name: &str) -> bool {
+    name == LLM
+}
+
 fn streams(load: u64, specs: &HashMap<String, InputSpec>) -> Vec<StreamDef> {
-    BASE.iter()
+    let mut out: Vec<StreamDef> = BASE
+        .iter()
         .map(|(name, _physical, base_period, base_age)| StreamDef {
             name,
             model: name,
@@ -118,10 +197,30 @@ fn streams(load: u64, specs: &HashMap<String, InputSpec>) -> Vec<StreamDef> {
             max_age: Duration::from_millis(scaled_period(*base_age, load)),
             in_flight_cap: 8,
             input: specs.get(*name).cloned(),
+            text: None,
             pump: false,
             burst: None,
         })
-        .collect()
+        .collect();
+    if with_llm() {
+        out.push(StreamDef {
+            name: LLM,
+            model: LLM,
+            period: Duration::from_millis(LLM_PERIOD_MS),
+            max_age: Duration::from_millis(LLM_MAX_AGE_MS),
+            // Einer zur Zeit: ein zweiter Generierungsauftrag nebenher wuerde
+            // die Frage verschieben, um die es geht.
+            in_flight_cap: 1,
+            input: None,
+            text: Some(TextSpec {
+                prompts: llm_prompts(),
+                max_tokens: LLM_MAX_TOKENS,
+            }),
+            pump: false,
+            burst: None,
+        });
+    }
+    out
 }
 
 fn load_average() -> String {
@@ -320,7 +419,7 @@ async fn run() {
         std::fs::File::create(format!("{out_dir}/metrics.log")).expect("metrics.log");
     let _ = writeln!(
         streams_csv,
-        "window,elapsed_s,load,stream,uncovered_permille,response_age_p95_ms,\
+        "window,elapsed_s,load,stream,kind,uncovered_permille,response_age_p95_ms,\
          consumer_uncovered_permille,longest_gap_ms,mean_aoi_ms,longest_miss_run,\
          emitted,sent,client_dropped,delivered,rejected,rss_kb,loadavg"
     );
@@ -331,6 +430,18 @@ async fn run() {
         "Zyklus: {} x {BASE_LOAD} % Grundlast, 1 x {BURST_LOAD} % Spitze",
         CYCLE - 1
     );
+    if with_llm() {
+        println!(
+            "Sprachmodell: {} auf {} · {LLM_MAX_TOKENS} Token je Auftrag, alle {LLM_PERIOD_MS} ms",
+            llm_model(),
+            llm_endpoint()
+        );
+    } else {
+        println!(
+            "Sprachmodell: aus (SOAK_WITH_LLM=1 schaltet es zu; ohne es ist dieser Lauf mit \
+             dem vom 02.09. vergleichbar)"
+        );
+    }
     println!("Ausgabe: {out_dir}/streams.csv und metrics.log\n");
 
     // Ein Gateway fuer den ganzen Lauf. Genau das ist der Punkt: es soll
@@ -353,21 +464,28 @@ async fn run() {
         let mut delivered_total = 0_u64;
         for r in &reports {
             delivered_total += r.delivered;
+            // Ein Generierungsauftrag hat keine Abdeckung: Der Zaehler bewertet
+            // periodische Abtastung, und ein Auftrag ueber Sekunden ist keine.
+            // Dort steht deshalb `-` und keine Null — eine Null waere eine
+            // Messung, der Strich sagt, dass es hier nichts zu messen gibt.
+            let generative = is_generative(r.name);
+            let kind = if generative { "generative" } else { "periodic" };
+            let cell = |value: String| if generative { "-".to_owned() } else { value };
             let _ = writeln!(
                 streams_csv,
-                "{window},{elapsed},{load},{},{},{},{},{},{},{},{},{},{},{},{},{rss},{avg}",
+                "{window},{elapsed},{load},{},{kind},{},{},{},{},{},{},{},{},{},{},{},{rss},{avg}",
                 r.name,
-                r.coverage.uncovered_permille(),
-                r.coverage.response_age_p95_ns / 1_000_000,
+                cell(r.coverage.uncovered_permille().to_string()),
+                cell((r.coverage.response_age_p95_ns / 1_000_000).to_string()),
                 // Verbrauchersicht: was der Regler vorliegen hatte, wie lange
                 // er am Stueck nichts Brauchbares hatte, und das
                 // zeitgewichtete Alter. Ueber acht Stunden ist gerade die
                 // laengste Luecke die Zahl, die einen Ausreisser sichtbar
                 // macht, den ein Mittelwert verschluckt.
-                consumer_uncovered_permille(&r.coverage),
-                r.coverage.longest_gap_ns / 1_000_000,
-                r.coverage.mean_aoi_ns / 1_000_000,
-                r.coverage.longest_miss_run,
+                cell(consumer_uncovered_permille(&r.coverage).to_string()),
+                cell((r.coverage.longest_gap_ns / 1_000_000).to_string()),
+                cell((r.coverage.mean_aoi_ns / 1_000_000).to_string()),
+                cell(r.coverage.longest_miss_run.to_string()),
                 r.emitted,
                 r.sent,
                 r.client_dropped,
@@ -391,8 +509,12 @@ async fn run() {
                  Lauf geht weiter."
             );
         } else if window % 30 == 0 {
+            // Nur die getakteten Stroeme: Den Generierungsauftrag in ein
+            // Schlechtestenmass aufzunehmen hiesse, ihn an einer Groesse zu
+            // messen, die fuer ihn nicht definiert ist.
             let worst = reports
                 .iter()
+                .filter(|r| !is_generative(r.name))
                 .map(|r| r.coverage.uncovered_permille())
                 .max()
                 .unwrap_or(0);

@@ -125,6 +125,7 @@ fn streams(load: u64, arm: Arm, specs: &HashMap<String, InputSpec>) -> Vec<Strea
             // anderen Arme der Puffer aus `load-ramp`.
             in_flight_cap: if arm == Arm::Eigenbau { 1 } else { 8 },
             input: specs.get(*name).cloned(),
+            text: None,
             pump: arm == Arm::Eigenbau,
             burst: None,
         })

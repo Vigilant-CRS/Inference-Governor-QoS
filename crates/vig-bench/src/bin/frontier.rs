@@ -285,6 +285,7 @@ fn stream(period: u64, input: &InputSpec) -> StreamDef {
         max_age: Duration::from_millis(period.saturating_mul(2)),
         in_flight_cap: CAP,
         input: Some(input.clone()),
+        text: None,
         pump: false,
         burst: None,
     }

@@ -284,6 +284,21 @@ fn text_tensor(name: &str, _value: &str) -> InferInputTensor {
 }
 
 /// Ein String im laengenpraefigierten BYTES-Format des Protokolls.
+/// Schreibt einen laengenpraefigierten String, wie das vLLM-Backend ihn
+/// erwartet: vier Bytes Laenge, little endian, dann die Nutzbytes.
+///
+/// Oeffentlich, weil dasselbe Format im Baum bereits mehrfach getrennt
+/// geschrieben wird (`vig-backend-triton/src/request.rs`,
+/// `vig-bench/src/pilot.rs`, `vig-bench/src/bin/wp26.rs`) — und die Kopien
+/// laufen schon auseinander: Zwei saettigen bei `u32::MAX`, zwei fallen auf
+/// `0` zurueck. Ein Drahtformat, das viermal beschrieben wird, hat keinen
+/// Besitzer. Der Lasttreiber nimmt deshalb diese Fassung, statt eine fuenfte
+/// anzulegen; die drei uebrigen zusammenzufuehren ist eine eigene Aufgabe.
+#[must_use]
+pub fn write_length_prefixed(value: &str) -> Vec<u8> {
+    length_prefixed(value)
+}
+
 fn length_prefixed(value: &str) -> Vec<u8> {
     let bytes = value.as_bytes();
     let mut out = Vec::with_capacity(bytes.len().saturating_add(4));

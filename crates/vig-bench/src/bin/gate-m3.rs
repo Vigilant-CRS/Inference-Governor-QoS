@@ -359,6 +359,7 @@ async fn run() {
             .iter()
             .filter(|p| only.is_none_or(|endpoint| p.endpoint == endpoint))
             .map(|p| StreamDef {
+                text: None,
                 name: Box::leak(p.name.clone().into_boxed_str()),
                 model: Box::leak(
                     if use_logical {

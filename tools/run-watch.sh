@@ -46,16 +46,32 @@ INTERVAL=${5:-30}
 CSV="$OUT/streams.csv"
 LOG="$OUT/console.log"
 
+# Je Fenster eine Zeile pro Strom. Wie viele Stroeme es sind, steht nicht
+# fest: Seit `SOAK_WITH_LLM=1` koennen es vier statt drei sein. Die Zahl wird
+# deshalb aus den Daten abgeleitet — aus der Zahl verschiedener Stromnamen im
+# ersten Fenster — statt angenommen. Vorher stand hier `/ 3`, und mit dem
+# vierten Strom war die Fensterzahl still um ein Drittel zu hoch.
 windows() {
   [ -r "$CSV" ] || { echo 0; return; }
-  local lines
-  lines=$(wc -l < "$CSV")
-  # Kopfzeile abziehen, drei Zeilen je Fenster (ein Strom je Zeile).
-  echo $(( (lines - 1) / 3 ))
+  awk -F, '
+    NR == 1 { for (i = 1; i <= NF; i++) if ($i == "window") w = i; next }
+    { rows++; if ($w == first || NR == 2) { first = $w; per++ } }
+    END { print (per > 0 ? int(rows / per) : 0) }
+  ' "$CSV" 2>/dev/null || echo 0
 }
 
+# Der Speicherverbrauch, ueber den **Spaltennamen** gesucht statt ueber die
+# Position. Vorher stand hier `$16`; das war `rss_kb`, bis die Spalte `kind`
+# dazwischenkam — danach haette der Watcher `rejected` als Speicher gemeldet,
+# ohne zu murren. Eine Auswertung, die an einer Feldnummer haengt, ist eine
+# Auswertung mit Verfallsdatum.
 rss() {
-  awk -F, 'END{print ($16 == "" ? "?" : $16)}' "$CSV" 2>/dev/null || echo "?"
+  [ -r "$CSV" ] || { echo "?"; return; }
+  awk -F, '
+    NR == 1 { for (i = 1; i <= NF; i++) if ($i == "rss_kb") c = i; next }
+    { last = (c > 0 ? $c : "") }
+    END { print (last == "" ? "?" : last) }
+  ' "$CSV" 2>/dev/null || echo "?"
 }
 
 # `grep -c` gibt bei null Treffern 0 aus **und** beendet mit 1. Ein

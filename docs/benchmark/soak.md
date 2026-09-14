@@ -31,6 +31,29 @@ unangekündigt, so wie eine Kamera ihre Bildrate nicht mit dem Scheduler
 aushandelt. Das unterscheidet diesen Lauf von der Rampe, wo zu jedem Lastpunkt
 die passenden Verträge galten.
 
+### Ein Sprachmodell als vierter Strom (opt-in, seit 14.09.2026)
+
+`SOAK_WITH_LLM=1` hängt ein lokales Sprachmodell als nachrangige Last daneben:
+eigener Triton-Prozess (`SOAK_LLM_ENDPOINT`, Vorgabe `127.0.0.1:8011`), ein
+Generierungsauftrag über 64 Token alle vier Sekunden, einer zur Zeit. Damit
+beantwortet der Dauerlauf die Frage, für die der Governor gebaut ist: Kommt
+der getaktete Strom über Stunden neben einem **langen, nicht unterbrechbaren**
+Auftrag durch?
+
+**Voreingestellt bleibt es aus, und das ist Absicht.** Die Läufe vom 02.09.
+und 11./12.09. hatten drei Detektorströme. Hätte dieser Umbau den Aufbau
+stillschweigend geändert, wäre die nächste Nacht mit den beiden vorigen nicht
+mehr vergleichbar — und eine Stabilitätsaussage, die man gegen nichts halten
+kann, ist keine.
+
+**Die Abdeckung dieses Stroms wird nicht berechnet.** Der Zähler bewertet
+periodische Abtastung; ein Auftrag über mehrere Sekunden ist keine. In
+`streams.csv` steht für ihn deshalb `-` und keine Null — eine Null wäre eine
+Messung, der Strich sagt, dass es dort nichts zu messen gibt. Die Zählspalten
+bleiben echt: `delivered` ist für diesen Strom die Zahl **abgeschlossener
+Generierungen**, dieselbe Größe, die [wp26](wp26.md) auswertet. Aus demselben
+Grund geht er nicht in die Konsolenzeile „schlechtester Strom" ein.
+
 ## Stabilität: bestanden
 
 | | erste Stunde | letzte Stunde |
@@ -151,6 +174,18 @@ konfigurierten Governor 67 %.**
 SOAK_HOURS=8 SOAK_OUT=<verzeichnis> taskset -c 8-15 target/release/soak
 python3 tools/soak-report.py <verzeichnis>
 ```
+
+Mit Sprachmodell daneben, gegen einen zweiten Triton mit vLLM-Backend:
+
+```bash
+SOAK_WITH_LLM=1 SOAK_LLM_ENDPOINT=127.0.0.1:8011 SOAK_LLM_MODEL=qwen \
+  SOAK_HOURS=8 SOAK_OUT=<verzeichnis> taskset -c 8-15 target/release/soak
+```
+
+`streams.csv` trägt seit dem 14.09.2026 eine Spalte `kind` (`periodic` oder
+`generative`) direkt hinter `stream`. Wer ältere Protokolle auswertet, findet
+sie dort nicht — die Spaltenzahl hat sich geändert, und ein Auswertungsskript,
+das stur nach Position liest, bekommt sonst verschobene Werte.
 
 Das Ausgabeverzeichnis gehört auf ein **fest eingebautes** Laufwerk. Ein per
 USB angebundener Datenträger, in den acht Stunden lang jede Minute ein paar

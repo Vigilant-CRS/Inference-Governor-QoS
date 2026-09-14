@@ -53,6 +53,23 @@ pub struct InputSpec {
     pub payload: Option<Arc<Vec<Vec<u8>>>>,
 }
 
+/// Ein generativer Auftrag: Prompt und Samplingparameter.
+///
+/// Absichtlich schlicht gehalten. Der Lasttreiber soll ein Sprachmodell
+/// **beschaeftigen**, nicht seine Ausgabe bewerten — die Frage des Dauerlaufs
+/// ist, ob der Governor den getakteten Strom neben einem langen,
+/// nicht unterbrechbaren Auftrag noch durchbringt.
+#[derive(Debug, Clone)]
+pub struct TextSpec {
+    /// Der Prompt. Reihum nach Frame-Nummer, wenn mehrere angegeben sind.
+    pub prompts: Vec<String>,
+    /// Wie viele Token je Auftrag erzeugt werden.
+    ///
+    /// Die Groesse, die die Auftragsdauer bestimmt — und damit, wie lange der
+    /// geschuetzte Strom im schlechtesten Fall warten muss.
+    pub max_tokens: u32,
+}
+
 /// Ein Sensorstrom im Lastmodell.
 #[derive(Debug, Clone)]
 pub struct StreamDef {
@@ -76,6 +93,18 @@ pub struct StreamDef {
     ///
     /// `None` fuer das Mock-Backend, das keine Tensoren auswertet.
     pub input: Option<InputSpec>,
+    /// Ein generativer Auftrag statt eines Tensors.
+    ///
+    /// Gesetzt, wenn dieser Strom ein Sprachmodell fuettert. Dann reisen zwei
+    /// BYTES-Tensoren (`text_input`, `sampling_parameters`) laengenpraefigiert
+    /// im Request, und `input` bleibt ungenutzt.
+    ///
+    /// **Die Abdeckung dieses Stroms bedeutet nichts.** Der Zaehler bewertet
+    /// periodische Abtastung; ein Auftrag ueber mehrere Sekunden ist keine.
+    /// Was hier zaehlt, sind abgeschlossene Generierungen — `delivered` —,
+    /// so wie `wp26` es auswertet. Wer die Abdeckungsspalte dieses Stroms
+    /// liest, liest eine Zahl ohne Gegenstand.
+    pub text: Option<TextSpec>,
     /// Verwirft der Client selbst veraltete Frames?
     ///
     /// Das ist der naheliegende Eigenbau: nur der neueste Frame zaehlt, es ist
@@ -282,10 +311,19 @@ async fn run_stream(
         let id = format!("{}:{frame}", stream.name);
         let model = stream.model;
         let input = stream.input.clone();
+        let text = stream.text.clone();
         tokio::spawn(async move {
             let _permit = permit;
             let age = capture.elapsed();
-            let request = build_request(model, &id, frame, via_governor, age, input.as_ref());
+            let request = build_request(
+                model,
+                &id,
+                frame,
+                via_governor,
+                age,
+                input.as_ref(),
+                text.as_ref(),
+            );
             state.sent.fetch_add(1, Ordering::Relaxed);
 
             match client.model_infer(request).await {
@@ -383,6 +421,7 @@ async fn run_stream_pump(
             via_governor,
             age,
             stream.input.as_ref(),
+            stream.text.as_ref(),
         );
         state.sent.fetch_add(1, Ordering::Relaxed);
 
@@ -417,7 +456,11 @@ fn build_request(
     via_governor: bool,
     age: Duration,
     input: Option<&InputSpec>,
+    text: Option<&TextSpec>,
 ) -> ModelInferRequest {
+    if let Some(spec) = text {
+        return build_text_request(model, id, frame, spec);
+    }
     let mut parameters = HashMap::new();
     if via_governor {
         // ADR-0011: der hosttopologieunabhaengige Weg. Der Client sagt, wie alt
@@ -494,6 +537,55 @@ fn build_request(
     }
 }
 
+/// Ein generativer Auftrag an das vLLM-Backend.
+///
+/// Dieselbe Form wie im Kopierpfad oben: Die Tensoren tragen `contents: None`,
+/// die Nutzbytes reisen in `raw_input_contents`. Neu ist nur, dass es **zwei**
+/// sind und dass sie laengenpraefigiert werden.
+///
+/// **Ohne Altersangabe.** Der Governor bekommt hier bewusst kein `P_AGE_US`:
+/// Ein Generierungsauftrag hat kein Aufnahmealter, das abliefe — er ist die
+/// Hintergrundarbeit, gegen die der getaktete Strom verteidigt wird, und
+/// nicht selbst ein Sensordatum. Ihn mit einem Alter zu versehen hiesse, ihn
+/// verwerfbar zu machen, und genau das soll er nicht sein.
+fn build_text_request(model: &str, id: &str, frame: u64, spec: &TextSpec) -> ModelInferRequest {
+    let prompt = if spec.prompts.is_empty() {
+        ""
+    } else {
+        let index = usize::try_from(frame)
+            .unwrap_or(0)
+            .checked_rem(spec.prompts.len())
+            .unwrap_or(0);
+        spec.prompts.get(index).map_or("", String::as_str)
+    };
+    let sampling = format!(
+        "{{\"max_tokens\": {}, \"temperature\": 0.0}}",
+        spec.max_tokens
+    );
+    let tensor = |name: &str| InferInputTensor {
+        name: name.to_owned(),
+        datatype: "BYTES".to_owned(),
+        shape: vec![1],
+        parameters: HashMap::new(),
+        contents: None,
+    };
+    ModelInferRequest {
+        model_name: model.to_owned(),
+        model_version: String::new(),
+        id: id.to_owned(),
+        parameters: HashMap::new(),
+        inputs: vec![
+            tensor(vig_gateway::cooperative::TEXT_INPUT),
+            tensor(vig_gateway::cooperative::SAMPLING_PARAMETERS),
+        ],
+        outputs: Vec::new(),
+        raw_input_contents: vec![
+            vig_gateway::cooperative::write_length_prefixed(prompt),
+            vig_gateway::cooperative::write_length_prefixed(&sampling),
+        ],
+    }
+}
+
 fn to_core(d: Duration) -> vig_core::Duration {
     vig_core::Duration::from_nanos_unbounded(u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
 }
@@ -560,14 +652,14 @@ mod tests {
         let spec = copy_spec(Some(vec![vec![1, 1], vec![2, 2], vec![3, 3]]));
         let sent: Vec<Vec<u8>> = (0..4)
             .map(|frame| {
-                build_request("m", "s:0", frame, false, ms(0), Some(&spec))
+                build_request("m", "s:0", frame, false, ms(0), Some(&spec), None)
                     .raw_input_contents
                     .concat()
             })
             .collect();
         assert_eq!(sent, vec![vec![1, 1], vec![2, 2], vec![3, 3], vec![1, 1]]);
 
-        let zeros = build_request("m", "s:0", 7, false, ms(0), Some(&copy_spec(None)));
+        let zeros = build_request("m", "s:0", 7, false, ms(0), Some(&copy_spec(None)), None);
         assert_eq!(zeros.raw_input_contents, vec![vec![0, 0]]);
     }
 

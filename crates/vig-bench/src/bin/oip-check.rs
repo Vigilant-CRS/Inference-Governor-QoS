@@ -76,6 +76,7 @@ async fn build_streams(resolved: &vig_config::schema::Resolved) -> Vec<StreamDef
 
         let name: &'static str = Box::leak(logical.clone().into_boxed_str());
         streams.push(StreamDef {
+            text: None,
             name,
             model: name,
             period: Duration::from_nanos(period.as_nanos()),

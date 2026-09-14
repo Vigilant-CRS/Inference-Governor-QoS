@@ -281,6 +281,7 @@ fn streams(
             max_age: Duration::from_millis(scaled_period(*base_age, load)),
             in_flight_cap: cap,
             input: specs.get(*name).cloned(),
+            text: None,
             pump: false,
             burst: peak.map(|(peak_load, length, every)| Burst {
                 every,

@@ -130,6 +130,7 @@ impl Scenario {
         self.streams
             .iter()
             .map(|(name, model, period, max_age)| StreamDef {
+                text: None,
                 name,
                 model,
                 period: Duration::from_millis(*period),
@@ -146,6 +147,7 @@ impl Scenario {
         self.streams
             .iter()
             .map(|(name, _, period, max_age)| StreamDef {
+                text: None,
                 name,
                 model: name,
                 period: Duration::from_millis(*period),

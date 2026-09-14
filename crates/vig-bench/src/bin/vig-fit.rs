@@ -209,6 +209,7 @@ async fn run() {
                 .filter_map(|(index, logical)| {
                     let contract = resolved.contracts.get(index)?;
                     Some(StreamDef {
+                        text: None,
                         name: Box::leak(logical.clone().into_boxed_str()),
                         model: Box::leak(
                             if use_logical {
