@@ -1,0 +1,101 @@
+{
+  "review_date": "2026-09-14",
+  "recorded_at": "2026-09-14T12:59:53.211208+00:00",
+  "base_commit": "311f1c7e02b433e2c62035d5adcb7443b53ec058",
+  "tested_tree": "base_commit plus scheduler-fixes.patch; uncommitted",
+  "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+  "tests_before": {
+    "exit_code": 0,
+    "passed": 803,
+    "failed": 0,
+    "ignored": 6,
+    "log": "tests-before.log"
+  },
+  "tests_after": {
+    "command": "cargo test --workspace --all-features --locked --offline",
+    "exit_code": 0,
+    "passed": 807,
+    "failed": 0,
+    "ignored": 6,
+    "log": "tests-after.log"
+  },
+  "clippy": {
+    "command": "cargo clippy --workspace --all-targets --all-features --locked --offline -- -D warnings",
+    "exit_code": 0,
+    "log": "clippy.log"
+  },
+  "fmt": {
+    "command": "cargo fmt --all --check",
+    "exit_code": 0,
+    "log": "fmt.log"
+  },
+  "gate_s": {
+    "command": "cargo run --manifest-path <root>/Cargo.toml --release -p vig-sim --bin gate-s --locked --offline",
+    "cwd": "/tmp/inferenceqos-review-2026-09-14-gate-s",
+    "exit_code": 0,
+    "passed_marker_present": true,
+    "log": "gate-s.log",
+    "report": "gate-s-report.md"
+  },
+  "tflite": {
+    "command": "cargo test --manifest-path backends/android-tflite/Cargo.toml --locked --offline",
+    "exit_code": 0,
+    "passed": 20,
+    "failed": 0,
+    "ignored": 0,
+    "log": "tflite.log",
+    "scope": "host tests; no Android device or real delegate qualification"
+  },
+  "repros_before": {
+    "exit_code": 101,
+    "passed": 0,
+    "failed": 5,
+    "ignored": 0,
+    "log": "repros-before.log"
+  },
+  "repros_after": {
+    "command": "cargo test --manifest-path docs/reviews/2026-09-14/repros/Cargo.toml --offline --target-dir target -- --nocapture",
+    "exit_code": 101,
+    "passed": 2,
+    "failed": 3,
+    "ignored": 0,
+    "log": "repros-after.log",
+    "outside_root_workspace": true,
+    "remaining_failures": [
+      "a_new_measurement_arm_must_not_forget_quarantined_regions",
+      "a_finished_arm_must_not_leave_an_inference_running",
+      "a_delayed_reset_must_not_release_a_new_aborted_call"
+    ]
+  },
+  "cargo_deny": {
+    "command": "cargo deny --offline check licenses bans advisories sources",
+    "exit_code": 0,
+    "log": "cargo-deny.log",
+    "advisory_db_commit": "b50980aad8b8f14f77e25a97b32dd94bf008b0af",
+    "advisory_db_commit_date": "2026-09-09T12:49:52+02:00",
+    "fresh_network_update": false,
+    "warnings": "duplicate dependencies and unused license allowlist entry"
+  },
+  "not_completed": {
+    "ros2_tests": "System Python lacks pytest/numpy; available review venv also lacks numpy. unittest discovery was not a successful pytest/ROS test run. See ros2-attempt.log.",
+    "reuse_lint": "reuse is not installed in checked interpreters; not run",
+    "aarch64_emulation": "not rerun",
+    "gpu_and_jetson_qualification": "not rerun; existing measurements read only",
+    "remote_state": "connector returned 404 for both names; privacy and remote HEAD unverified"
+  },
+  "source_sha256": {
+    "crates/vig-core/src/scheduler.rs": "043cfa29896df1644eb3f98197d323802d8c3822527153dc3d51f12f51eea246",
+    "crates/vig-core/src/variant.rs": "8bd402627a491f1c2174b3f99781dcddc8b665b91029276e82535492b77f5d3d",
+    "crates/vig-core/tests/scheduler_flow.rs": "571118e548beeacf32285e89e6db4f007fefc56b8f67c6dc94be0427deb0b095",
+    "crates/vig-core/tests/variant_supply.rs": "bf654b2f138efe7c45bf8825363a0b50ae8b27efd206060b166bea0fca2b94e7"
+  },
+  "patch_sha256": "97744b9607994f04e5867a05bba5b09066145f9c578fff1af1068b6f291b28dc",
+  "reviewed_measurement_sha256": {
+    "/run/media/dd/USB_4028/Projekte/InferenceQoS/docs/benchmark/abnahme-2026-09-12.md": "22bed6e8fc36fa337ca5f8781f6ddd6abde127e5d4e5726d4df8515001d4549f",
+    "/run/media/dd/USB_4028/Projekte/InferenceQoS/docs/benchmark/pilot-praemption-2026-09-12.md": "de131b36b4e7fbccfab5d2de641a7f8418898051a9d1a3b29aa6764eae1f04c3",
+    "/run/media/dd/USB_4028/Projekte/InferenceQoS-runtime/measure-abnahme-2026-09-12/c-ramp-supply.txt": "7ce0d570b14ecea5c4ab6568fedede29773b7be395330960adf4a9573d5b2c68",
+    "/run/media/dd/USB_4028/Projekte/InferenceQoS-runtime/measure-abnahme-2026-09-12/manifest-neu.txt": "eb7e6e022952fffb372906e4ed981b091681c4f9eb02ac655842bb157ee9e74a",
+    "/run/media/dd/USB_4028/Projekte/InferenceQoS-runtime/measure-pilot-praemption-2026-09-12/plain/summary.json": "cfa7fcc22da0a51ca19649e9d21a35e56e1776f5db690ffc81015c55b8262e25"
+  },
+  "missing_measurement_paths": []
+}

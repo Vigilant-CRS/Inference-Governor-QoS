@@ -1,0 +1,396 @@
+warning[duplicate]: found 2 duplicate entries for crate 'getrandom'
+   ┌─ /run/media/dd/USB_4028/Projekte/InferenceQoS/Cargo.lock:40:1
+   │  
+40 │ ╭ getrandom 0.2.17 registry+https://github.com/rust-lang/crates.io-index
+41 │ │ getrandom 0.4.3 registry+https://github.com/rust-lang/crates.io-index
+   │ ╰─────────────────────────────────────────────────────────────────────┘ lock entries
+   │  
+   ├ getrandom v0.2.17
+     └── ring v0.17.14
+         ├── rustls v0.23.43
+         │   └── tokio-rustls v0.26.5
+         │       └── tonic v0.14.6
+         │           ├── tonic-prost v0.14.6
+         │           │   └── vig-protocol-oip v0.2.0
+         │           │       ├── vig-backend-triton v0.2.0
+         │           │       │   ├── vig-bench v0.2.0
+         │           │       │   ├── vig-cli v0.2.0
+         │           │       │   └── vig-gateway v0.2.0
+         │           │       │       ├── vig-bench v0.2.0 (*)
+         │           │       │       ├── vig-cli v0.2.0 (*)
+         │           │       │       └── (dev) vig-gateway v0.2.0 (*)
+         │           │       ├── vig-bench v0.2.0 (*)
+         │           │       ├── vig-cli v0.2.0 (*)
+         │           │       └── vig-gateway v0.2.0 (*)
+         │           ├── vig-backend-triton v0.2.0 (*)
+         │           ├── vig-bench v0.2.0 (*)
+         │           ├── vig-cli v0.2.0 (*)
+         │           ├── vig-gateway v0.2.0 (*)
+         │           └── vig-protocol-oip v0.2.0 (*)
+         └── rustls-webpki v0.103.15
+             └── rustls v0.23.43 (*)
+   ├ getrandom v0.4.3
+     └── tempfile v3.27.0
+         ├── prost-build v0.14.4
+         │   ├── tonic-prost-build v0.14.6
+         │   │   └── (build) vig-protocol-oip v0.2.0
+         │   │       ├── vig-backend-triton v0.2.0
+         │   │       │   ├── vig-bench v0.2.0
+         │   │       │   ├── vig-cli v0.2.0
+         │   │       │   └── vig-gateway v0.2.0
+         │   │       │       ├── vig-bench v0.2.0 (*)
+         │   │       │       ├── vig-cli v0.2.0 (*)
+         │   │       │       └── (dev) vig-gateway v0.2.0 (*)
+         │   │       ├── vig-bench v0.2.0 (*)
+         │   │       ├── vig-cli v0.2.0 (*)
+         │   │       └── vig-gateway v0.2.0 (*)
+         │   └── (build) vig-protocol-oip v0.2.0 (*)
+         ├── tonic-prost-build v0.14.6 (*)
+         └── (dev) vig-gateway v0.2.0 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'hashbrown'
+   ┌─ /run/media/dd/USB_4028/Projekte/InferenceQoS/Cargo.lock:43:1
+   │  
+43 │ ╭ hashbrown 0.15.5 registry+https://github.com/rust-lang/crates.io-index
+44 │ │ hashbrown 0.17.1 registry+https://github.com/rust-lang/crates.io-index
+   │ ╰──────────────────────────────────────────────────────────────────────┘ lock entries
+   │  
+   ├ hashbrown v0.15.5
+     └── petgraph v0.8.3
+         └── prost-build v0.14.4
+             ├── tonic-prost-build v0.14.6
+             │   └── (build) vig-protocol-oip v0.2.0
+             │       ├── vig-backend-triton v0.2.0
+             │       │   ├── vig-bench v0.2.0
+             │       │   ├── vig-cli v0.2.0
+             │       │   └── vig-gateway v0.2.0
+             │       │       ├── vig-bench v0.2.0 (*)
+             │       │       ├── vig-cli v0.2.0 (*)
+             │       │       └── (dev) vig-gateway v0.2.0 (*)
+             │       ├── vig-bench v0.2.0 (*)
+             │       ├── vig-cli v0.2.0 (*)
+             │       └── vig-gateway v0.2.0 (*)
+             └── (build) vig-protocol-oip v0.2.0 (*)
+   ├ hashbrown v0.17.1
+     └── indexmap v2.14.1
+         ├── h2 v0.4.19
+         │   ├── hyper v1.11.1
+         │   │   ├── axum v0.8.9
+         │   │   │   ├── tonic v0.14.6
+         │   │   │   │   ├── tonic-prost v0.14.6
+         │   │   │   │   │   └── vig-protocol-oip v0.2.0
+         │   │   │   │   │       ├── vig-backend-triton v0.2.0
+         │   │   │   │   │       │   ├── vig-bench v0.2.0
+         │   │   │   │   │       │   ├── vig-cli v0.2.0
+         │   │   │   │   │       │   └── vig-gateway v0.2.0
+         │   │   │   │   │       │       ├── vig-bench v0.2.0 (*)
+         │   │   │   │   │       │       ├── vig-cli v0.2.0 (*)
+         │   │   │   │   │       │       └── (dev) vig-gateway v0.2.0 (*)
+         │   │   │   │   │       ├── vig-bench v0.2.0 (*)
+         │   │   │   │   │       ├── vig-cli v0.2.0 (*)
+         │   │   │   │   │       └── vig-gateway v0.2.0 (*)
+         │   │   │   │   ├── vig-backend-triton v0.2.0 (*)
+         │   │   │   │   ├── vig-bench v0.2.0 (*)
+         │   │   │   │   ├── vig-cli v0.2.0 (*)
+         │   │   │   │   ├── vig-gateway v0.2.0 (*)
+         │   │   │   │   └── vig-protocol-oip v0.2.0 (*)
+         │   │   │   └── vig-gateway v0.2.0 (*)
+         │   │   ├── hyper-timeout v0.5.2
+         │   │   │   └── tonic v0.14.6 (*)
+         │   │   ├── hyper-util v0.1.20
+         │   │   │   ├── axum v0.8.9 (*)
+         │   │   │   ├── hyper-timeout v0.5.2 (*)
+         │   │   │   └── tonic v0.14.6 (*)
+         │   │   └── tonic v0.14.6 (*)
+         │   └── tonic v0.14.6 (*)
+         ├── petgraph v0.8.3
+         │   └── prost-build v0.14.4
+         │       ├── tonic-prost-build v0.14.6
+         │       │   └── (build) vig-protocol-oip v0.2.0 (*)
+         │       └── (build) vig-protocol-oip v0.2.0 (*)
+         ├── serde_norway v0.9.42
+         │   ├── vig-config v0.2.0
+         │   │   ├── vig-bench v0.2.0 (*)
+         │   │   ├── vig-cli v0.2.0 (*)
+         │   │   └── vig-gateway v0.2.0 (*)
+         │   └── vig-platform v0.2.0
+         │       ├── vig-cli v0.2.0 (*)
+         │       └── vig-gateway v0.2.0 (*)
+         └── tower v0.5.3
+             ├── axum v0.8.9 (*)
+             └── tonic v0.14.6 (*)
+
+warning[license-not-encountered]: license was not encountered
+   ┌─ /run/media/dd/USB_4028/Projekte/InferenceQoS/deny.toml:24:6
+   │
+24 │     "BSD-2-Clause",
+   │      ━━━━━━━━━━━━ unmatched license allowance
+
+warning[duplicate]: found 2 duplicate entries for crate 'syn'
+    ┌─ /run/media/dd/USB_4028/Projekte/InferenceQoS/Cargo.lock:120:1
+    │  
+120 │ ╭ syn 2.0.119 registry+https://github.com/rust-lang/crates.io-index
+121 │ │ syn 3.0.4 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰───────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ syn v2.0.119
+      ├── pin-project-internal v1.1.13
+      │   └── pin-project v1.1.13
+      │       └── tonic v0.14.6
+      │           ├── tonic-prost v0.14.6
+      │           │   └── vig-protocol-oip v0.2.0
+      │           │       ├── vig-backend-triton v0.2.0
+      │           │       │   ├── vig-bench v0.2.0
+      │           │       │   ├── vig-cli v0.2.0
+      │           │       │   └── vig-gateway v0.2.0
+      │           │       │       ├── vig-bench v0.2.0 (*)
+      │           │       │       ├── vig-cli v0.2.0 (*)
+      │           │       │       └── (dev) vig-gateway v0.2.0 (*)
+      │           │       ├── vig-bench v0.2.0 (*)
+      │           │       ├── vig-cli v0.2.0 (*)
+      │           │       └── vig-gateway v0.2.0 (*)
+      │           ├── vig-backend-triton v0.2.0 (*)
+      │           ├── vig-bench v0.2.0 (*)
+      │           ├── vig-cli v0.2.0 (*)
+      │           ├── vig-gateway v0.2.0 (*)
+      │           └── vig-protocol-oip v0.2.0 (*)
+      ├── prettyplease v0.2.37
+      │   ├── prost-build v0.14.4
+      │   │   ├── tonic-prost-build v0.14.6
+      │   │   │   └── (build) vig-protocol-oip v0.2.0 (*)
+      │   │   └── (build) vig-protocol-oip v0.2.0 (*)
+      │   ├── tonic-build v0.14.6
+      │   │   └── tonic-prost-build v0.14.6 (*)
+      │   └── tonic-prost-build v0.14.6 (*)
+      ├── prost-build v0.14.4 (*)
+      ├── prost-derive v0.14.4
+      │   └── prost v0.14.4
+      │       ├── prost-build v0.14.4 (*)
+      │       ├── prost-types v0.14.4
+      │       │   ├── prost-build v0.14.4 (*)
+      │       │   └── tonic-prost-build v0.14.6 (*)
+      │       ├── tonic-prost v0.14.6 (*)
+      │       └── vig-protocol-oip v0.2.0 (*)
+      ├── tonic-build v0.14.6 (*)
+      ├── tonic-prost-build v0.14.6 (*)
+      └── tracing-attributes v0.1.31
+          └── tracing v0.1.44
+              ├── axum v0.8.9
+              │   ├── tonic v0.14.6 (*)
+              │   └── vig-gateway v0.2.0 (*)
+              ├── axum-core v0.5.6
+              │   └── axum v0.8.9 (*)
+              ├── h2 v0.4.19
+              │   ├── hyper v1.11.1
+              │   │   ├── axum v0.8.9 (*)
+              │   │   ├── hyper-timeout v0.5.2
+              │   │   │   └── tonic v0.14.6 (*)
+              │   │   ├── hyper-util v0.1.20
+              │   │   │   ├── axum v0.8.9 (*)
+              │   │   │   ├── hyper-timeout v0.5.2 (*)
+              │   │   │   └── tonic v0.14.6 (*)
+              │   │   └── tonic v0.14.6 (*)
+              │   └── tonic v0.14.6 (*)
+              ├── hyper-util v0.1.20 (*)
+              ├── tonic v0.14.6 (*)
+              ├── tower v0.5.3
+              │   ├── axum v0.8.9 (*)
+              │   └── tonic v0.14.6 (*)
+              ├── tracing-subscriber v0.3.23
+              │   ├── vig-bench v0.2.0 (*)
+              │   └── vig-cli v0.2.0 (*)
+              ├── vig-backend-triton v0.2.0 (*)
+              ├── vig-cli v0.2.0 (*)
+              └── vig-gateway v0.2.0 (*)
+    ├ syn v3.0.4
+      ├── async-trait v0.1.92
+      │   └── tonic v0.14.6
+      │       ├── tonic-prost v0.14.6
+      │       │   └── vig-protocol-oip v0.2.0
+      │       │       ├── vig-backend-triton v0.2.0
+      │       │       │   ├── vig-bench v0.2.0
+      │       │       │   ├── vig-cli v0.2.0
+      │       │       │   └── vig-gateway v0.2.0
+      │       │       │       ├── vig-bench v0.2.0 (*)
+      │       │       │       ├── vig-cli v0.2.0 (*)
+      │       │       │       └── (dev) vig-gateway v0.2.0 (*)
+      │       │       ├── vig-bench v0.2.0 (*)
+      │       │       ├── vig-cli v0.2.0 (*)
+      │       │       └── vig-gateway v0.2.0 (*)
+      │       ├── vig-backend-triton v0.2.0 (*)
+      │       ├── vig-bench v0.2.0 (*)
+      │       ├── vig-cli v0.2.0 (*)
+      │       ├── vig-gateway v0.2.0 (*)
+      │       └── vig-protocol-oip v0.2.0 (*)
+      ├── clap_derive v4.6.4
+      │   └── clap v4.6.6
+      │       └── vig-cli v0.2.0 (*)
+      ├── serde_derive v1.0.229
+      │   └── serde v1.0.229
+      │       ├── serde_norway v0.9.42
+      │       │   ├── vig-config v0.2.0
+      │       │   │   ├── vig-bench v0.2.0 (*)
+      │       │   │   ├── vig-cli v0.2.0 (*)
+      │       │   │   └── vig-gateway v0.2.0 (*)
+      │       │   └── vig-platform v0.2.0
+      │       │       ├── vig-cli v0.2.0 (*)
+      │       │       └── vig-gateway v0.2.0 (*)
+      │       ├── serde_urlencoded v0.7.1
+      │       │   └── axum v0.8.9
+      │       │       ├── tonic v0.14.6 (*)
+      │       │       └── vig-gateway v0.2.0 (*)
+      │       ├── vig-config v0.2.0 (*)
+      │       └── vig-platform v0.2.0 (*)
+      └── tokio-macros v2.7.2
+          └── tokio v1.53.1
+              ├── axum v0.8.9 (*)
+              ├── h2 v0.4.19
+              │   ├── hyper v1.11.1
+              │   │   ├── axum v0.8.9 (*)
+              │   │   ├── hyper-timeout v0.5.2
+              │   │   │   └── tonic v0.14.6 (*)
+              │   │   ├── hyper-util v0.1.20
+              │   │   │   ├── axum v0.8.9 (*)
+              │   │   │   ├── hyper-timeout v0.5.2 (*)
+              │   │   │   └── tonic v0.14.6 (*)
+              │   │   └── tonic v0.14.6 (*)
+              │   └── tonic v0.14.6 (*)
+              ├── hyper v1.11.1 (*)
+              ├── hyper-timeout v0.5.2 (*)
+              ├── hyper-util v0.1.20 (*)
+              ├── tokio-rustls v0.26.5
+              │   └── tonic v0.14.6 (*)
+              ├── tokio-stream v0.1.19
+              │   ├── tonic v0.14.6 (*)
+              │   ├── vig-backend-triton v0.2.0 (*)
+              │   ├── vig-bench v0.2.0 (*)
+              │   └── (dev) vig-gateway v0.2.0 (*)
+              ├── tokio-util v0.7.19
+              │   ├── h2 v0.4.19 (*)
+              │   └── tower v0.5.3
+              │       ├── axum v0.8.9 (*)
+              │       └── tonic v0.14.6 (*)
+              ├── tonic v0.14.6 (*)
+              ├── tower v0.5.3 (*)
+              ├── vig-backend-triton v0.2.0 (*)
+              ├── vig-bench v0.2.0 (*)
+              ├── vig-cli v0.2.0 (*)
+              └── (dev) vig-gateway v0.2.0 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'windows-sys'
+    ┌─ /run/media/dd/USB_4028/Projekte/InferenceQoS/Cargo.lock:162:1
+    │  
+162 │ ╭ windows-sys 0.52.0 registry+https://github.com/rust-lang/crates.io-index
+163 │ │ windows-sys 0.61.2 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰────────────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ windows-sys v0.52.0
+      └── ring v0.17.14
+          ├── rustls v0.23.43
+          │   └── tokio-rustls v0.26.5
+          │       └── tonic v0.14.6
+          │           ├── tonic-prost v0.14.6
+          │           │   └── vig-protocol-oip v0.2.0
+          │           │       ├── vig-backend-triton v0.2.0
+          │           │       │   ├── vig-bench v0.2.0
+          │           │       │   ├── vig-cli v0.2.0
+          │           │       │   └── vig-gateway v0.2.0
+          │           │       │       ├── vig-bench v0.2.0 (*)
+          │           │       │       ├── vig-cli v0.2.0 (*)
+          │           │       │       └── (dev) vig-gateway v0.2.0 (*)
+          │           │       ├── vig-bench v0.2.0 (*)
+          │           │       ├── vig-cli v0.2.0 (*)
+          │           │       └── vig-gateway v0.2.0 (*)
+          │           ├── vig-backend-triton v0.2.0 (*)
+          │           ├── vig-bench v0.2.0 (*)
+          │           ├── vig-cli v0.2.0 (*)
+          │           ├── vig-gateway v0.2.0 (*)
+          │           └── vig-protocol-oip v0.2.0 (*)
+          └── rustls-webpki v0.103.15
+              └── rustls v0.23.43 (*)
+    ├ windows-sys v0.61.2
+      ├── anstyle-query v1.1.5
+      │   └── anstream v1.0.0
+      │       └── clap_builder v4.6.6
+      │           └── clap v4.6.6
+      │               └── vig-cli v0.2.0
+      ├── anstyle-wincon v3.0.11
+      │   └── anstream v1.0.0 (*)
+      ├── errno v0.3.14
+      │   ├── rustix v1.1.4
+      │   │   └── tempfile v3.27.0
+      │   │       ├── prost-build v0.14.4
+      │   │       │   ├── tonic-prost-build v0.14.6
+      │   │       │   │   └── (build) vig-protocol-oip v0.2.0
+      │   │       │   │       ├── vig-backend-triton v0.2.0
+      │   │       │   │       │   ├── vig-bench v0.2.0
+      │   │       │   │       │   ├── vig-cli v0.2.0 (*)
+      │   │       │   │       │   └── vig-gateway v0.2.0
+      │   │       │   │       │       ├── vig-bench v0.2.0 (*)
+      │   │       │   │       │       ├── vig-cli v0.2.0 (*)
+      │   │       │   │       │       └── (dev) vig-gateway v0.2.0 (*)
+      │   │       │   │       ├── vig-bench v0.2.0 (*)
+      │   │       │   │       ├── vig-cli v0.2.0 (*)
+      │   │       │   │       └── vig-gateway v0.2.0 (*)
+      │   │       │   └── (build) vig-protocol-oip v0.2.0 (*)
+      │   │       ├── tonic-prost-build v0.14.6 (*)
+      │   │       └── (dev) vig-gateway v0.2.0 (*)
+      │   └── signal-hook-registry v1.4.8
+      │       └── tokio v1.53.1
+      │           ├── axum v0.8.9
+      │           │   ├── tonic v0.14.6
+      │           │   │   ├── tonic-prost v0.14.6
+      │           │   │   │   └── vig-protocol-oip v0.2.0 (*)
+      │           │   │   ├── vig-backend-triton v0.2.0 (*)
+      │           │   │   ├── vig-bench v0.2.0 (*)
+      │           │   │   ├── vig-cli v0.2.0 (*)
+      │           │   │   ├── vig-gateway v0.2.0 (*)
+      │           │   │   └── vig-protocol-oip v0.2.0 (*)
+      │           │   └── vig-gateway v0.2.0 (*)
+      │           ├── h2 v0.4.19
+      │           │   ├── hyper v1.11.1
+      │           │   │   ├── axum v0.8.9 (*)
+      │           │   │   ├── hyper-timeout v0.5.2
+      │           │   │   │   └── tonic v0.14.6 (*)
+      │           │   │   ├── hyper-util v0.1.20
+      │           │   │   │   ├── axum v0.8.9 (*)
+      │           │   │   │   ├── hyper-timeout v0.5.2 (*)
+      │           │   │   │   └── tonic v0.14.6 (*)
+      │           │   │   └── tonic v0.14.6 (*)
+      │           │   └── tonic v0.14.6 (*)
+      │           ├── hyper v1.11.1 (*)
+      │           ├── hyper-timeout v0.5.2 (*)
+      │           ├── hyper-util v0.1.20 (*)
+      │           ├── tokio-rustls v0.26.5
+      │           │   └── tonic v0.14.6 (*)
+      │           ├── tokio-stream v0.1.19
+      │           │   ├── tonic v0.14.6 (*)
+      │           │   ├── vig-backend-triton v0.2.0 (*)
+      │           │   ├── vig-bench v0.2.0 (*)
+      │           │   └── (dev) vig-gateway v0.2.0 (*)
+      │           ├── tokio-util v0.7.19
+      │           │   ├── h2 v0.4.19 (*)
+      │           │   └── tower v0.5.3
+      │           │       ├── axum v0.8.9 (*)
+      │           │       └── tonic v0.14.6 (*)
+      │           ├── tonic v0.14.6 (*)
+      │           ├── tower v0.5.3 (*)
+      │           ├── vig-backend-triton v0.2.0 (*)
+      │           ├── vig-bench v0.2.0 (*)
+      │           ├── vig-cli v0.2.0 (*)
+      │           └── (dev) vig-gateway v0.2.0 (*)
+      ├── mio v1.2.2
+      │   └── tokio v1.53.1 (*)
+      ├── nu-ansi-term v0.50.3
+      │   └── tracing-subscriber v0.3.23
+      │       ├── vig-bench v0.2.0 (*)
+      │       └── vig-cli v0.2.0 (*)
+      ├── rustix v1.1.4 (*)
+      ├── socket2 v0.6.5
+      │   ├── hyper-util v0.1.20 (*)
+      │   ├── tokio v1.53.1 (*)
+      │   └── tonic v0.14.6 (*)
+      ├── tempfile v3.27.0 (*)
+      └── tokio v1.53.1 (*)
+
+advisories ok, bans ok, licenses ok, sources ok

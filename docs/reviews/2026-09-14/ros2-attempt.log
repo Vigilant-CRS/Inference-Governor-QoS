@@ -1,0 +1,53 @@
+test_bridge_ros (unittest.loader._FailedTest.test_bridge_ros) ... ERROR
+test_core (unittest.loader._FailedTest.test_core) ... ERROR
+test_oip (unittest.loader._FailedTest.test_oip) ... ERROR
+
+======================================================================
+ERROR: test_bridge_ros (unittest.loader._FailedTest.test_bridge_ros)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_bridge_ros
+Traceback (most recent call last):
+  File "/usr/lib/python3.14/unittest/loader.py", line 426, in _find_test_path
+    module = self._get_module_from_name(name)
+  File "/usr/lib/python3.14/unittest/loader.py", line 367, in _get_module_from_name
+    __import__(name)
+    ~~~~~~~~~~^^^^^^
+  File "/run/media/dd/USB_4028/Projekte/InferenceQoS/integrations/ros2/vig_bridge/test/test_bridge_ros.py", line 16, in <module>
+    import pytest
+ModuleNotFoundError: No module named 'pytest'
+
+
+======================================================================
+ERROR: test_core (unittest.loader._FailedTest.test_core)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_core
+Traceback (most recent call last):
+  File "/usr/lib/python3.14/unittest/loader.py", line 426, in _find_test_path
+    module = self._get_module_from_name(name)
+  File "/usr/lib/python3.14/unittest/loader.py", line 367, in _get_module_from_name
+    __import__(name)
+    ~~~~~~~~~~^^^^^^
+  File "/run/media/dd/USB_4028/Projekte/InferenceQoS/integrations/ros2/vig_bridge/test/test_core.py", line 5, in <module>
+    import pytest
+ModuleNotFoundError: No module named 'pytest'
+
+
+======================================================================
+ERROR: test_oip (unittest.loader._FailedTest.test_oip)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_oip
+Traceback (most recent call last):
+  File "/usr/lib/python3.14/unittest/loader.py", line 426, in _find_test_path
+    module = self._get_module_from_name(name)
+  File "/usr/lib/python3.14/unittest/loader.py", line 367, in _get_module_from_name
+    __import__(name)
+    ~~~~~~~~~~^^^^^^
+  File "/run/media/dd/USB_4028/Projekte/InferenceQoS/integrations/ros2/vig_bridge/test/test_oip.py", line 6, in <module>
+    import numpy as np
+ModuleNotFoundError: No module named 'numpy'
+
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.000s
+
+FAILED (errors=3)

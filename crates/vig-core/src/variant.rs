@@ -171,14 +171,12 @@ pub fn resolve(
     else {
         return Resolution::NoVariant;
     };
-    let start = first.get();
-
     // Ohne automatische Variantenwahl bleibt es bei dieser einen; sie wird
     // nur noch auf Machbarkeit geprueft (ADR-0007).
     let end = if contract.auto_variant_selection() {
         contract.variants.len()
     } else {
-        start.saturating_add(1)
+        first.get().saturating_add(1)
     };
 
     let supply = supply_deadline(contract, deadline);
@@ -189,7 +187,7 @@ pub fn resolve(
     let mut any_variant_considered = false;
     let mut any_slot_available = false;
 
-    for i in start..end {
+    for i in first.get()..end {
         let idx = VariantIdx(u16::try_from(i).unwrap_or(u16::MAX));
         // Qualitaet **und** Freigabe, in einer Frage: die Reihenfolge zweier
         // Bedingungen zu vergessen ist der billigste Weg zu einer
@@ -291,10 +289,10 @@ pub fn resolve(
     } else {
         best_supplied
     };
-    let chosen = preferred.or(best_feasible);
-
-    match (chosen, fastest) {
-        (Some(best), _) => Resolution::Feasible(apply_hysteresis(contract, state, now, best, held)),
+    match (preferred.or(best_feasible), fastest) {
+        (Some(best), _) => {
+            Resolution::Feasible(apply_hysteresis(contract, state, now, best, held, supply))
+        }
         (None, Some((fastest, _))) => Resolution::Infeasible { fastest },
         (None, None) if any_variant_considered && !any_slot_available => Resolution::NoSlot,
         (None, None) => Resolution::NoVariant,
@@ -350,6 +348,7 @@ fn apply_hysteresis(
     now: Instant,
     proposed: VariantSelection,
     held: Option<VariantSelection>,
+    supply: Option<Instant>,
 ) -> VariantSelection {
     let Some(current) = state.current() else {
         return proposed;
@@ -361,11 +360,21 @@ fn apply_hysteresis(
     if state.dwelled(now) >= contract.variant_dwell {
         return proposed;
     }
-    // Aufwertung zu frueh. Bei der bisherigen Variante bleiben, solange sie
-    // ihre Deadline noch haelt; sonst greift die Aufwertung trotzdem, denn
-    // eine verletzte Deadline waegt schwerer als ein stabiles Qualitaetsbild.
+    // Aufwertung zu frueh. Die bisherige Variante darf bleiben, wenn sie
+    // die Deadline und eine durch den Wechsel rettbare Versorgung haelt.
+    // Eine qualitativ bessere Variante kann auch schneller sein: dann darf
+    // die Verweildauer keine vermeidbare Versorgungsluecke erzwingen.
+    // Rettet auch der Vorschlag die Versorgung nicht, bleibt die Hysterese.
     match held {
-        Some(current_selection) if current_selection.feasibility.is_feasible() => current_selection,
+        Some(current_selection)
+            if current_selection.feasibility.is_feasible()
+                && supply.is_none_or(|limit| {
+                    proposed.feasibility.finish > limit
+                        || current_selection.feasibility.finish <= limit
+                }) =>
+        {
+            current_selection
+        }
         _ => proposed,
     }
 }

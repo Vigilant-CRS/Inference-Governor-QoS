@@ -1,0 +1,43 @@
+    Blocking waiting for file lock on build directory
+   Compiling vig-core v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-core)
+   Compiling vig-protocol-oip v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-protocol-oip)
+   Compiling vig-config v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-config)
+   Compiling vig-sim v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-sim)
+   Compiling vig-backend-triton v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-backend-triton)
+   Compiling vig-gateway v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-gateway)
+   Compiling vig-bench v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-bench)
+   Compiling vig-review-20260914 v0.0.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/docs/reviews/2026-09-14/repros)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 48s
+     Running tests/review.rs (target/debug/deps/review-cd511dfd17948ab3)
+
+running 5 tests
+
+thread 'a_new_measurement_arm_must_not_forget_quarantined_regions' (1191771) panicked at tests/review.rs:178:5:
+Die alte Quarantaene verschwindet am Armwechsel
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test a_new_measurement_arm_must_not_forget_quarantined_regions ... FAILED
+test lookahead_must_use_an_approved_variant ... ok
+test hysteresis_must_not_hold_a_variant_that_breaks_supply ... ok
+
+thread 'a_delayed_reset_must_not_release_a_new_aborted_call' (1191769) panicked at tests/review.rs:310:5:
+assertion `left == right` failed: Zaehler 100 -> 0 beendet einen neuen abgebrochenen Aufruf ohne Endnachweis; reconciled=1
+  left: 0
+ right: 1
+test a_delayed_reset_must_not_release_a_new_aborted_call ... FAILED
+
+thread 'a_finished_arm_must_not_leave_an_inference_running' (1191770) panicked at tests/review.rs:224:5:
+assertion `left == right` failed: run_arm lieferte schon ein Ergebnis, obwohl sein Backend noch rechnet: ArmReport { cameras: [CameraReport { name: "cam0", alarm: AlarmSummary { events: 0, missed: 0, latencies_ms: [] }, recall: TickRecall { total: 0, hits: 0, ideal: 0 }, coverage: Coverage { covered: 0, total: 1, response_age_p50_ns: 0, response_age_p95_ns: 0, response_age_p99_ns: 0, peak_aoi_ns: 100000000, delivered: 0, consumer_covered: 0, no_result: 1, longest_miss_run: 1, longest_gap_ns: 100000000, mean_aoi_ns: 50000000 }, sent: 1, delivered: 0, rejected: 0, negative_deliveries: 0, false_alarms: 0, buffers_exhausted: 0, buffers_quarantined: 0 }], llm: LlmReport { reports: 0, failed: 0, latencies_ms: [], basis_age_ms: [] } }
+  left: 0
+ right: 1
+test a_finished_arm_must_not_leave_an_inference_running ... FAILED
+
+failures:
+
+failures:
+    a_delayed_reset_must_not_release_a_new_aborted_call
+    a_finished_arm_must_not_leave_an_inference_running
+    a_new_measurement_arm_must_not_forget_quarantined_regions
+
+test result: FAILED. 2 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.69s
+
+error: test failed, to rerun pass `--test review`

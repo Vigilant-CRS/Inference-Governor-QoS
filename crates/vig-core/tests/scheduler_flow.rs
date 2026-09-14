@@ -616,6 +616,92 @@ fn with_approved(mut contract: ModelContract, approved: &[u16]) -> ModelContract
     contract
 }
 
+/// Hintergrund 25..45 wuerde den naechsten Frame bei 30 erst um 65 liefern,
+/// obwohl er ohne ihn seine Frist 50 haelt. Der Look-ahead muss dieselbe
+/// freigegebene Laufzeit sehen wie der Dispatch (Review 14.09.).
+fn assert_twenty_ms_forecast_is_protected(detector: &ModelContract) {
+    let background = contract(
+        Criticality::BestEffort,
+        QueuePolicy::Latest,
+        Some(100),
+        100,
+        200,
+        &[20],
+    );
+    let mut scheduler = build(vec![detector.clone(), background.clone()], 1);
+    let mut actions = Vec::new();
+    scheduler.on_event(at(0), Event::Arrival(frame(1, 0, 0, detector)), &mut |a| {
+        actions.push(a);
+    });
+    let slot = actions
+        .iter()
+        .find_map(|a| match a {
+            Action::Dispatch {
+                slot,
+                predicted_runtime,
+                ..
+            } => {
+                assert_eq!(*predicted_runtime, ms(20));
+                Some(*slot)
+            }
+            _ => None,
+        })
+        .unwrap();
+    scheduler.on_event(
+        at(20),
+        Event::Completion {
+            request: RequestId(1),
+            slot,
+        },
+        &mut |_| {},
+    );
+    actions.clear();
+    scheduler.on_event(
+        at(25),
+        Event::Arrival(frame(2, 1, 25, &background)),
+        &mut |a| actions.push(a),
+    );
+    assert!(
+        !actions.iter().any(|a| matches!(
+            a,
+            Action::Dispatch {
+                request: RequestId(2),
+                ..
+            }
+        )),
+        "der Hintergrund gefaehrdet die naechste geschuetzte Ankunft: {actions:?}"
+    );
+}
+
+#[test]
+fn lookahead_observes_the_variant_approval() {
+    assert_twenty_ms_forecast_is_protected(&with_approved(
+        contract(
+            Criticality::Protected,
+            QueuePolicy::Latest,
+            Some(30),
+            20,
+            60,
+            &[5, 20],
+        ),
+        &[1],
+    ));
+}
+
+#[test]
+fn lookahead_includes_the_variants_preprocessing() {
+    let mut detector = contract(
+        Criticality::Protected,
+        QueuePolicy::Latest,
+        Some(30),
+        20,
+        60,
+        &[5],
+    );
+    detector.variants.get_mut(0).unwrap().preprocess = ms(15);
+    assert_twenty_ms_forecast_is_protected(&detector);
+}
+
 #[test]
 fn an_unapproved_variant_is_never_dispatched() {
     // Drei Varianten, aber nur die langsame mittlere ist freigegeben. Die

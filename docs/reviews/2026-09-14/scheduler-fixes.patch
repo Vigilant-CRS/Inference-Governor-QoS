@@ -1,0 +1,317 @@
+diff --git a/crates/vig-core/src/scheduler.rs b/crates/vig-core/src/scheduler.rs
+index 545c20d..c98e4d1 100644
+--- a/crates/vig-core/src/scheduler.rs
++++ b/crates/vig-core/src/scheduler.rs
+@@ -2003,49 +2003,10 @@ impl Scheduler {
+             let Some(Some(expected_capture)) = self.next_capture.get(i).copied() else {
+                 continue;
+             };
+-            // Die beste Variante ist die konservative Annahme: sie ist die
+-            // langsamste, und der Look-ahead soll nicht optimistisch sein.
+-            let Some(best) = contract.variants.get(0) else {
+-                continue;
+-            };
+             let model = ModelIdx(u16::try_from(i).unwrap_or(u16::MAX));
+-            // Dieselbe Laufzeitschaetzung, die auch der Dispatch benutzt:
+-            // Online-Beobachtung ueber Offline-Profil, mit der **gelernten**
+-            // Marge dieses Modells. Rechnet der Schutz stattdessen mit dem
+-            // reinen Profil und der globalen Startmarge, plant er die
+-            // geschuetzte Ankunft weiterhin mit einer Laufzeit, von der
+-            // laengst gemessen ist, dass sie zu kurz war — und laesst Arbeit
+-            // starten, die genau diese Ankunft verspaetet. Der Look-ahead darf
+-            // nicht weniger wissen als der Dispatch.
+-            let Some(runtime) = self.estimator.conservative(
+-                model,
+-                VariantIdx(0),
+-                self.slots.occupancy(),
+-                &best.profile,
+-                self.margin_of(model),
+-            ) else {
++            let Some(runtime) = self.forecast_runtime(model, contract) else {
+                 continue;
+             };
+-            // ADR-0035: laeuft gerade praemptierbare Arbeit, traegt die
+-            // erwartete Ankunft deren Restblockierung — als Untergrenze ueber
+-            // dem Alleinwert, nicht zusaetzlich zu einer Beobachtung, die sie
+-            // schon enthaelt. Ohne Praemption ist das Maximum null, und die
+-            // Prognose bleibt bitgleich.
+-            let residual = self.active_residual();
+-            let runtime = if residual > Duration::ZERO {
+-                self.estimator
+-                    .conservative(
+-                        model,
+-                        VariantIdx(0),
+-                        0,
+-                        &best.profile,
+-                        self.margin_of(model),
+-                    )
+-                    .and_then(|solo| solo.checked_add(residual))
+-                    .map_or(runtime, |floor| runtime.max(floor))
+-            } else {
+-                runtime
+-            };
+             let Some(deadline) = forecast_deadline(
+                 now,
+                 expected_at,
+@@ -2085,6 +2046,53 @@ impl Scheduler {
+         out
+     }
+ 
++    /// Konservative Laufzeit einer erwarteten Ankunft, innerhalb ihrer Freigabe.
++    ///
++    /// Qualitaetsreihenfolge ist keine Laufzeitreihenfolge. Variante 0 kann
++    /// ausserdem gesperrt sein. Die Prognose muss jede Variante abdecken,
++    /// die der Dispatch waehlen darf; ohne automatische Wahl nur die erste
++    /// freigegebene. Vorverarbeitung und Restblockierung zaehlen wie beim
++    /// Dispatch mit. Der Einvariantenfall ohne Vorverarbeitung bleibt gleich.
++    fn forecast_runtime(&self, model: ModelIdx, contract: &ModelContract) -> Option<Duration> {
++        let first = (0..contract.variants.len())
++            .map(|i| VariantIdx(u16::try_from(i).unwrap_or(u16::MAX)))
++            .find(|idx| contract.variant_approved(*idx))?;
++        let end = if contract.auto_variant_selection() {
++            contract.variants.len()
++        } else {
++            first.get().saturating_add(1)
++        };
++        let residual = self.active_residual();
++        let mut longest: Option<Duration> = None;
++        for i in first.get()..end {
++            let idx = VariantIdx(u16::try_from(i).unwrap_or(u16::MAX));
++            if !contract.variant_usable(idx) {
++                continue;
++            }
++            let variant = contract.variant(idx)?;
++            let Some(mut runtime) = self.estimator.conservative(
++                model,
++                idx,
++                self.slots.occupancy(),
++                &variant.profile,
++                self.margin_of(model),
++            ) else {
++                continue;
++            };
++            if residual > Duration::ZERO {
++                runtime = self
++                    .estimator
++                    .conservative(model, idx, 0, &variant.profile, self.margin_of(model))
++                    .and_then(|solo| solo.checked_add(residual))
++                    .map_or(runtime, |floor| runtime.max(floor));
++            }
++            if let Some(runtime) = runtime.checked_add(variant.preprocess) {
++                longest = Some(longest.map_or(runtime, |previous| previous.max(runtime)));
++            }
++        }
++        longest
++    }
++
+     /// Der naechste Zeitpunkt, zu dem der Scheduler ohnehin nachsehen sollte.
+     fn next_wakeup(&self, now: Instant) -> Option<Instant> {
+         let mut earliest: Option<Instant> = None;
+diff --git a/crates/vig-core/src/variant.rs b/crates/vig-core/src/variant.rs
+index 3798318..33f6064 100644
+--- a/crates/vig-core/src/variant.rs
++++ b/crates/vig-core/src/variant.rs
+@@ -171,14 +171,12 @@ pub fn resolve(
+     else {
+         return Resolution::NoVariant;
+     };
+-    let start = first.get();
+-
+     // Ohne automatische Variantenwahl bleibt es bei dieser einen; sie wird
+     // nur noch auf Machbarkeit geprueft (ADR-0007).
+     let end = if contract.auto_variant_selection() {
+         contract.variants.len()
+     } else {
+-        start.saturating_add(1)
++        first.get().saturating_add(1)
+     };
+ 
+     let supply = supply_deadline(contract, deadline);
+@@ -189,7 +187,7 @@ pub fn resolve(
+     let mut any_variant_considered = false;
+     let mut any_slot_available = false;
+ 
+-    for i in start..end {
++    for i in first.get()..end {
+         let idx = VariantIdx(u16::try_from(i).unwrap_or(u16::MAX));
+         // Qualitaet **und** Freigabe, in einer Frage: die Reihenfolge zweier
+         // Bedingungen zu vergessen ist der billigste Weg zu einer
+@@ -291,10 +289,10 @@ pub fn resolve(
+     } else {
+         best_supplied
+     };
+-    let chosen = preferred.or(best_feasible);
+-
+-    match (chosen, fastest) {
+-        (Some(best), _) => Resolution::Feasible(apply_hysteresis(contract, state, now, best, held)),
++    match (preferred.or(best_feasible), fastest) {
++        (Some(best), _) => {
++            Resolution::Feasible(apply_hysteresis(contract, state, now, best, held, supply))
++        }
+         (None, Some((fastest, _))) => Resolution::Infeasible { fastest },
+         (None, None) if any_variant_considered && !any_slot_available => Resolution::NoSlot,
+         (None, None) => Resolution::NoVariant,
+@@ -350,6 +348,7 @@ fn apply_hysteresis(
+     now: Instant,
+     proposed: VariantSelection,
+     held: Option<VariantSelection>,
++    supply: Option<Instant>,
+ ) -> VariantSelection {
+     let Some(current) = state.current() else {
+         return proposed;
+@@ -361,11 +360,21 @@ fn apply_hysteresis(
+     if state.dwelled(now) >= contract.variant_dwell {
+         return proposed;
+     }
+-    // Aufwertung zu frueh. Bei der bisherigen Variante bleiben, solange sie
+-    // ihre Deadline noch haelt; sonst greift die Aufwertung trotzdem, denn
+-    // eine verletzte Deadline waegt schwerer als ein stabiles Qualitaetsbild.
++    // Aufwertung zu frueh. Die bisherige Variante darf bleiben, wenn sie
++    // die Deadline und eine durch den Wechsel rettbare Versorgung haelt.
++    // Eine qualitativ bessere Variante kann auch schneller sein: dann darf
++    // die Verweildauer keine vermeidbare Versorgungsluecke erzwingen.
++    // Rettet auch der Vorschlag die Versorgung nicht, bleibt die Hysterese.
+     match held {
+-        Some(current_selection) if current_selection.feasibility.is_feasible() => current_selection,
++        Some(current_selection)
++            if current_selection.feasibility.is_feasible()
++                && supply.is_none_or(|limit| {
++                    proposed.feasibility.finish > limit
++                        || current_selection.feasibility.finish <= limit
++                }) =>
++        {
++            current_selection
++        }
+         _ => proposed,
+     }
+ }
+diff --git a/crates/vig-core/tests/scheduler_flow.rs b/crates/vig-core/tests/scheduler_flow.rs
+index 2e534fd..94c3c39 100644
+--- a/crates/vig-core/tests/scheduler_flow.rs
++++ b/crates/vig-core/tests/scheduler_flow.rs
+@@ -616,6 +616,92 @@ fn with_approved(mut contract: ModelContract, approved: &[u16]) -> ModelContract
+     contract
+ }
+ 
++/// Hintergrund 25..45 wuerde den naechsten Frame bei 30 erst um 65 liefern,
++/// obwohl er ohne ihn seine Frist 50 haelt. Der Look-ahead muss dieselbe
++/// freigegebene Laufzeit sehen wie der Dispatch (Review 14.09.).
++fn assert_twenty_ms_forecast_is_protected(detector: &ModelContract) {
++    let background = contract(
++        Criticality::BestEffort,
++        QueuePolicy::Latest,
++        Some(100),
++        100,
++        200,
++        &[20],
++    );
++    let mut scheduler = build(vec![detector.clone(), background.clone()], 1);
++    let mut actions = Vec::new();
++    scheduler.on_event(at(0), Event::Arrival(frame(1, 0, 0, detector)), &mut |a| {
++        actions.push(a);
++    });
++    let slot = actions
++        .iter()
++        .find_map(|a| match a {
++            Action::Dispatch {
++                slot,
++                predicted_runtime,
++                ..
++            } => {
++                assert_eq!(*predicted_runtime, ms(20));
++                Some(*slot)
++            }
++            _ => None,
++        })
++        .unwrap();
++    scheduler.on_event(
++        at(20),
++        Event::Completion {
++            request: RequestId(1),
++            slot,
++        },
++        &mut |_| {},
++    );
++    actions.clear();
++    scheduler.on_event(
++        at(25),
++        Event::Arrival(frame(2, 1, 25, &background)),
++        &mut |a| actions.push(a),
++    );
++    assert!(
++        !actions.iter().any(|a| matches!(
++            a,
++            Action::Dispatch {
++                request: RequestId(2),
++                ..
++            }
++        )),
++        "der Hintergrund gefaehrdet die naechste geschuetzte Ankunft: {actions:?}"
++    );
++}
++
++#[test]
++fn lookahead_observes_the_variant_approval() {
++    assert_twenty_ms_forecast_is_protected(&with_approved(
++        contract(
++            Criticality::Protected,
++            QueuePolicy::Latest,
++            Some(30),
++            20,
++            60,
++            &[5, 20],
++        ),
++        &[1],
++    ));
++}
++
++#[test]
++fn lookahead_includes_the_variants_preprocessing() {
++    let mut detector = contract(
++        Criticality::Protected,
++        QueuePolicy::Latest,
++        Some(30),
++        20,
++        60,
++        &[5],
++    );
++    detector.variants.get_mut(0).unwrap().preprocess = ms(15);
++    assert_twenty_ms_forecast_is_protected(&detector);
++}
++
+ #[test]
+ fn an_unapproved_variant_is_never_dispatched() {
+     // Drei Varianten, aber nur die langsame mittlere ist freigegeben. Die
+diff --git a/crates/vig-core/tests/variant_supply.rs b/crates/vig-core/tests/variant_supply.rs
+index 6414de1..9cb4a5b 100644
+--- a/crates/vig-core/tests/variant_supply.rs
++++ b/crates/vig-core/tests/variant_supply.rs
+@@ -172,3 +172,28 @@ fn the_downgrade_for_supply_is_immediate() {
+     state.record(VariantIdx(0), at_us(0));
+     assert_eq!(chosen(&c, &state, at_us(1_000)).get(), 1);
+ }
++
++/// Qualitaet ist nicht monoton in der Laufzeit: auch eine Aufwertung kann
++/// die einzige Variante sein, die die Versorgung rettet (Review 14.09.).
++#[test]
++fn a_faster_upgrade_can_rescue_supply_during_the_dwell_time() {
++    let mut c = contract(10_000, 20_000, 20_000);
++    c.variants.get_mut(0).unwrap().profile = VariantProfile::solo(RuntimeProfile::exact(us(5_000)));
++    c.variants.get_mut(1).unwrap().profile =
++        VariantProfile::solo(RuntimeProfile::exact(us(15_000)));
++    let mut state = VariantState::default();
++    state.record(VariantIdx(1), at_us(0));
++    assert_eq!(chosen(&c, &state, at_us(1_000)), VariantIdx(0));
++}
++
++/// Ohne rettbare Versorgung bleibt die bestehende Verweildauer wirksam.
++#[test]
++fn an_upgrade_that_cannot_rescue_supply_still_observes_the_dwell_time() {
++    let mut c = contract(10_000, 20_000, 12_000);
++    c.variants.get_mut(0).unwrap().profile = VariantProfile::solo(RuntimeProfile::exact(us(5_000)));
++    c.variants.get_mut(1).unwrap().profile =
++        VariantProfile::solo(RuntimeProfile::exact(us(15_000)));
++    let mut state = VariantState::default();
++    state.record(VariantIdx(1), at_us(0));
++    assert_eq!(chosen(&c, &state, at_us(1_000)), VariantIdx(1));
++}

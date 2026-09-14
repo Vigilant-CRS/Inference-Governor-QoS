@@ -1,0 +1,85 @@
+     Locking 152 packages to latest Rust 1.98.0 compatible versions
+   Compiling indexmap v2.14.2
+   Compiling bitflags v2.13.2
+   Compiling syn v3.0.5
+   Compiling mio v1.2.3
+   Compiling smallvec v1.16.1
+   Compiling vig-core v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-core)
+   Compiling rustix v1.1.4
+   Compiling pulldown-cmark v0.13.4
+   Compiling tracing-subscriber v0.3.23
+   Compiling petgraph v0.8.3
+   Compiling pulldown-cmark-to-cmark v22.0.1
+   Compiling tempfile v3.27.0
+   Compiling vig-sim v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-sim)
+   Compiling prost-build v0.14.4
+   Compiling tokio-macros v2.7.2
+   Compiling serde_derive v1.0.229
+   Compiling async-trait v0.1.92
+   Compiling tokio v1.53.1
+   Compiling tonic-prost-build v0.14.6
+   Compiling vig-protocol-oip v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-protocol-oip)
+   Compiling serde v1.0.229
+   Compiling serde_urlencoded v0.7.1
+   Compiling serde_norway v0.9.42
+   Compiling tokio-util v0.7.19
+   Compiling tokio-rustls v0.26.5
+   Compiling tokio-stream v0.1.19
+   Compiling vig-config v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-config)
+   Compiling vig-platform v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-platform)
+   Compiling h2 v0.4.19
+   Compiling tower v0.5.3
+   Compiling hyper v1.11.1
+   Compiling hyper-util v0.1.20
+   Compiling hyper-timeout v0.5.2
+   Compiling axum v0.8.9
+   Compiling tonic v0.14.6
+   Compiling tonic-prost v0.14.6
+   Compiling vig-backend-triton v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-backend-triton)
+   Compiling vig-gateway v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-gateway)
+   Compiling vig-bench v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-bench)
+   Compiling vig-review-20260914 v0.0.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/docs/reviews/2026-09-14/repros)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 28.54s
+     Running tests/review.rs (target/debug/deps/review-cd511dfd17948ab3)
+
+running 5 tests
+
+thread 'a_new_measurement_arm_must_not_forget_quarantined_regions' (1145742) panicked at tests/review.rs:114:5:
+Die alte Quarantaene verschwindet am Armwechsel
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test a_new_measurement_arm_must_not_forget_quarantined_regions ... FAILED
+
+thread 'lookahead_must_use_an_approved_variant' (1145744) panicked at tests/review.rs:82:5:
+Hintergrund 25..45 verspaetet die einzige freigegebene Variante: 45+20 > Deadline 50; Aktionen: [Dispatch { request: RequestId(2), model: ModelIdx(1), variant: VariantIdx(0), slot: SlotIdx(0), predicted_runtime: Duration(20000000), quantum: None }, WakeAt(Instant(45000000))]
+test lookahead_must_use_an_approved_variant ... FAILED
+
+thread 'hysteresis_must_not_hold_a_variant_that_breaks_supply' (1145743) panicked at tests/review.rs:101:5:
+assertion `left == right` failed: 5 ms haelt die Versorgung bis 11 ms; 15 ms haelt nur die Deadline bei 21 ms
+  left: VariantIdx(1)
+ right: VariantIdx(0)
+test hysteresis_must_not_hold_a_variant_that_breaks_supply ... FAILED
+
+thread 'a_delayed_reset_must_not_release_a_new_aborted_call' (1145740) panicked at tests/review.rs:188:5:
+assertion `left == right` failed: Zaehler 100 -> 0 beendet einen neuen abgebrochenen Aufruf ohne Endnachweis; reconciled=1
+  left: 0
+ right: 1
+test a_delayed_reset_must_not_release_a_new_aborted_call ... FAILED
+
+thread 'a_finished_arm_must_not_leave_an_inference_running' (1145741) panicked at tests/review.rs:136:5:
+assertion `left == right` failed: run_arm lieferte schon ein Ergebnis, obwohl sein Backend noch rechnet: ArmReport { cameras: [CameraReport { name: "cam0", alarm: AlarmSummary { events: 0, missed: 0, latencies_ms: [] }, recall: TickRecall { total: 0, hits: 0, ideal: 0 }, coverage: Coverage { covered: 0, total: 1, response_age_p50_ns: 0, response_age_p95_ns: 0, response_age_p99_ns: 0, peak_aoi_ns: 100000000, delivered: 0, consumer_covered: 0, no_result: 1, longest_miss_run: 1, longest_gap_ns: 100000000, mean_aoi_ns: 50000000 }, sent: 1, delivered: 0, rejected: 0, negative_deliveries: 0, false_alarms: 0, buffers_exhausted: 0, buffers_quarantined: 0 }], llm: LlmReport { reports: 0, failed: 0, latencies_ms: [], basis_age_ms: [] } }
+  left: 0
+ right: 1
+test a_finished_arm_must_not_leave_an_inference_running ... FAILED
+
+failures:
+
+failures:
+    a_delayed_reset_must_not_release_a_new_aborted_call
+    a_finished_arm_must_not_leave_an_inference_running
+    a_new_measurement_arm_must_not_forget_quarantined_regions
+    hysteresis_must_not_hold_a_variant_that_breaks_supply
+    lookahead_must_use_an_approved_variant
+
+test result: FAILED. 0 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.69s
+
+error: test failed, to rerun pass `--test review`

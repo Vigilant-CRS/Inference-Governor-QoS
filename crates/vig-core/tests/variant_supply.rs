@@ -172,3 +172,28 @@ fn the_downgrade_for_supply_is_immediate() {
     state.record(VariantIdx(0), at_us(0));
     assert_eq!(chosen(&c, &state, at_us(1_000)).get(), 1);
 }
+
+/// Qualitaet ist nicht monoton in der Laufzeit: auch eine Aufwertung kann
+/// die einzige Variante sein, die die Versorgung rettet (Review 14.09.).
+#[test]
+fn a_faster_upgrade_can_rescue_supply_during_the_dwell_time() {
+    let mut c = contract(10_000, 20_000, 20_000);
+    c.variants.get_mut(0).unwrap().profile = VariantProfile::solo(RuntimeProfile::exact(us(5_000)));
+    c.variants.get_mut(1).unwrap().profile =
+        VariantProfile::solo(RuntimeProfile::exact(us(15_000)));
+    let mut state = VariantState::default();
+    state.record(VariantIdx(1), at_us(0));
+    assert_eq!(chosen(&c, &state, at_us(1_000)), VariantIdx(0));
+}
+
+/// Ohne rettbare Versorgung bleibt die bestehende Verweildauer wirksam.
+#[test]
+fn an_upgrade_that_cannot_rescue_supply_still_observes_the_dwell_time() {
+    let mut c = contract(10_000, 20_000, 12_000);
+    c.variants.get_mut(0).unwrap().profile = VariantProfile::solo(RuntimeProfile::exact(us(5_000)));
+    c.variants.get_mut(1).unwrap().profile =
+        VariantProfile::solo(RuntimeProfile::exact(us(15_000)));
+    let mut state = VariantState::default();
+    state.record(VariantIdx(1), at_us(0));
+    assert_eq!(chosen(&c, &state, at_us(1_000)), VariantIdx(1));
+}

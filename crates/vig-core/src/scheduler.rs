@@ -2003,48 +2003,9 @@ impl Scheduler {
             let Some(Some(expected_capture)) = self.next_capture.get(i).copied() else {
                 continue;
             };
-            // Die beste Variante ist die konservative Annahme: sie ist die
-            // langsamste, und der Look-ahead soll nicht optimistisch sein.
-            let Some(best) = contract.variants.get(0) else {
-                continue;
-            };
             let model = ModelIdx(u16::try_from(i).unwrap_or(u16::MAX));
-            // Dieselbe Laufzeitschaetzung, die auch der Dispatch benutzt:
-            // Online-Beobachtung ueber Offline-Profil, mit der **gelernten**
-            // Marge dieses Modells. Rechnet der Schutz stattdessen mit dem
-            // reinen Profil und der globalen Startmarge, plant er die
-            // geschuetzte Ankunft weiterhin mit einer Laufzeit, von der
-            // laengst gemessen ist, dass sie zu kurz war — und laesst Arbeit
-            // starten, die genau diese Ankunft verspaetet. Der Look-ahead darf
-            // nicht weniger wissen als der Dispatch.
-            let Some(runtime) = self.estimator.conservative(
-                model,
-                VariantIdx(0),
-                self.slots.occupancy(),
-                &best.profile,
-                self.margin_of(model),
-            ) else {
+            let Some(runtime) = self.forecast_runtime(model, contract) else {
                 continue;
-            };
-            // ADR-0035: laeuft gerade praemptierbare Arbeit, traegt die
-            // erwartete Ankunft deren Restblockierung — als Untergrenze ueber
-            // dem Alleinwert, nicht zusaetzlich zu einer Beobachtung, die sie
-            // schon enthaelt. Ohne Praemption ist das Maximum null, und die
-            // Prognose bleibt bitgleich.
-            let residual = self.active_residual();
-            let runtime = if residual > Duration::ZERO {
-                self.estimator
-                    .conservative(
-                        model,
-                        VariantIdx(0),
-                        0,
-                        &best.profile,
-                        self.margin_of(model),
-                    )
-                    .and_then(|solo| solo.checked_add(residual))
-                    .map_or(runtime, |floor| runtime.max(floor))
-            } else {
-                runtime
             };
             let Some(deadline) = forecast_deadline(
                 now,
@@ -2083,6 +2044,53 @@ impl Scheduler {
             });
         }
         out
+    }
+
+    /// Konservative Laufzeit einer erwarteten Ankunft, innerhalb ihrer Freigabe.
+    ///
+    /// Qualitaetsreihenfolge ist keine Laufzeitreihenfolge. Variante 0 kann
+    /// ausserdem gesperrt sein. Die Prognose muss jede Variante abdecken,
+    /// die der Dispatch waehlen darf; ohne automatische Wahl nur die erste
+    /// freigegebene. Vorverarbeitung und Restblockierung zaehlen wie beim
+    /// Dispatch mit. Der Einvariantenfall ohne Vorverarbeitung bleibt gleich.
+    fn forecast_runtime(&self, model: ModelIdx, contract: &ModelContract) -> Option<Duration> {
+        let first = (0..contract.variants.len())
+            .map(|i| VariantIdx(u16::try_from(i).unwrap_or(u16::MAX)))
+            .find(|idx| contract.variant_approved(*idx))?;
+        let end = if contract.auto_variant_selection() {
+            contract.variants.len()
+        } else {
+            first.get().saturating_add(1)
+        };
+        let residual = self.active_residual();
+        let mut longest: Option<Duration> = None;
+        for i in first.get()..end {
+            let idx = VariantIdx(u16::try_from(i).unwrap_or(u16::MAX));
+            if !contract.variant_usable(idx) {
+                continue;
+            }
+            let variant = contract.variant(idx)?;
+            let Some(mut runtime) = self.estimator.conservative(
+                model,
+                idx,
+                self.slots.occupancy(),
+                &variant.profile,
+                self.margin_of(model),
+            ) else {
+                continue;
+            };
+            if residual > Duration::ZERO {
+                runtime = self
+                    .estimator
+                    .conservative(model, idx, 0, &variant.profile, self.margin_of(model))
+                    .and_then(|solo| solo.checked_add(residual))
+                    .map_or(runtime, |floor| runtime.max(floor));
+            }
+            if let Some(runtime) = runtime.checked_add(variant.preprocess) {
+                longest = Some(longest.map_or(runtime, |previous| previous.max(runtime)));
+            }
+        }
+        longest
     }
 
     /// Der naechste Zeitpunkt, zu dem der Scheduler ohnehin nachsehen sollte.

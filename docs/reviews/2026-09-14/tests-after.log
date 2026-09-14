@@ -1,0 +1,1134 @@
+   Compiling vig-core v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-core)
+   Compiling vig-protocol-oip v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-protocol-oip)
+   Compiling vig-config v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-config)
+   Compiling vig-sim v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-sim)
+   Compiling vig-backend-triton v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-backend-triton)
+   Compiling vig-gateway v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-gateway)
+   Compiling vig-bench v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-bench)
+   Compiling vig-cli v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 39s
+     Running unittests src/lib.rs (target/debug/deps/vig_backend_triton-87f928048342425e)
+
+running 9 tests
+test capabilities::tests::a_server_without_shared_memory_is_recognised ... ok
+test capabilities::tests::silence_means_no_extensions ... ok
+test capabilities::tests::parenthesised_variants_still_count ... ok
+test fingerprint::tests::a_different_shape_yields_a_different_fingerprint ... ok
+test capabilities::tests::triton_advertises_what_vig_needs ... ok
+test fingerprint::tests::a_different_platform_yields_a_different_fingerprint ... ok
+test fingerprint::tests::a_server_upgrade_yields_a_different_fingerprint ... ok
+test fingerprint::tests::field_boundaries_matter ... ok
+test fingerprint::tests::the_same_environment_yields_the_same_fingerprint ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/vig_bench-dfd29fa93d017f87)
+
+running 23 tests
+test pilot::tests::a_degenerate_box_overlaps_nothing ... ok
+test pilot::tests::a_buffer_with_an_unknown_end_is_never_reused ... ok
+test pilot::tests::a_looped_sequence_counts_each_lap_separately ... ok
+test pilot::tests::alarm_latency_counts_from_the_arrival_not_from_the_computed_frame ... ok
+test pilot::tests::an_arrival_that_is_never_detected_is_missed_and_late_arrivals_are_forgiven ... ok
+test pilot::tests::arrivals_exclude_the_initial_scene_and_flickers ... ok
+test pilot::tests::first_appearance_counts_objects_visible_from_the_start ... ok
+test pilot::tests::cxcywh_is_converted_to_corners ... ok
+test pilot::tests::iou_of_identical_disjoint_and_half_overlapping_boxes ... ok
+test pilot::tests::global_frames_follow_the_clock_and_wrap ... ok
+test pilot::tests::matching_is_one_to_one_and_prefers_the_best_overlap ... ok
+test pilot::tests::percentile_is_robust_to_empty_and_small_series ... ok
+test pilot::tests::negative_ranges_come_from_the_negative_clips ... ok
+test pilot::tests::only_a_proven_end_frees_the_buffer ... ok
+test pilot::tests::rfdetr_output_is_decoded_to_the_strongest_class_above_threshold ... ok
+test pilot::tests::the_frame_tensor_is_chw_normalised_little_endian ... ok
+test pilot::tests::the_csv_is_read_and_filtered ... ok
+test pilot::tests::the_prompt_names_every_camera ... ok
+test pilot::tests::tick_recall_separates_stale_from_ideal ... ok
+test workload::tests::a_burst_shortens_the_period_only_inside_its_window ... ok
+test workload::tests::a_zero_interval_does_not_panic ... ok
+test workload::tests::the_copy_path_cycles_real_inputs_by_frame ... ok
+test pilot::tests::a_buffer_is_never_handed_out_while_its_old_reader_holds_it ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/diy-baseline.rs (target/debug/deps/diy_baseline-d6bbaa2d695d93cd)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/edge-pilot.rs (target/debug/deps/edge_pilot-567559d6c4ff46c6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/frontier.rs (target/debug/deps/frontier-eb2af59d5b6ce21d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/gate-m3.rs (target/debug/deps/gate_m3-9cdef765021a6c2d)
+
+running 3 tests
+test tests::nchw_float_puts_each_channel_in_its_own_plane_scaled_to_one ... ok
+test tests::nhwc_uint8_is_the_resized_image_itself ... ok
+test tests::other_shapes_and_types_stay_zeros ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/load-ramp.rs (target/debug/deps/load_ramp-f8c7541984e50c8b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/oip-check.rs (target/debug/deps/oip_check-8ff631217f979e76)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/serve-latency.rs (target/debug/deps/serve_latency-df6c6f30163e1aa9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/shm-latency.rs (target/debug/deps/shm_latency-1e9bb22c2dc7c382)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/soak.rs (target/debug/deps/soak-d69a4b01193fa6d1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/wire-bench.rs (target/debug/deps/wire_bench-3f81d71e9de91fb5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/wp26.rs (target/debug/deps/wp26-f4b77e888f8b3051)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/edge_pilot.rs (target/debug/deps/edge_pilot-76a03190bbfbbadd)
+
+running 1 test
+test the_pilot_pipeline_runs_end_to_end_without_a_gpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.24s
+
+     Running unittests src/main.rs (target/debug/deps/vig-6145711e648e2903)
+
+running 29 tests
+test artifact::tests::a_non_numeric_directory_is_not_a_version ... ok
+test artifact::tests::a_moved_file_changes_the_digest ... ok
+test calibrate::tests::the_residual_never_drops_to_zero_or_wraps ... ok
+test calibrate::tests::the_worst_protected_model_decides ... ok
+test artifact::tests::without_version_directories_the_old_rule_applies ... ok
+test artifact::tests::a_new_model_version_changes_the_digest ... ok
+test artifact::tests::the_same_directory_yields_the_same_digest ... ok
+test artifact::tests::the_deployment_configuration_is_not_part_of_the_artifact ... ok
+test artifact::tests::exchanged_weights_change_the_digest ... ok
+test calibrate::tests::a_measured_residual_is_written_as_measured ... ok
+test calibrate::tests::the_residual_is_the_p99_difference ... ok
+test doctor::tests::a_costly_decomposition_is_reported ... ok
+test identity::tests::a_century_that_is_not_a_leap_year_is_handled ... ok
+test doctor::tests::round_trips_alone_can_already_break_the_threshold ... ok
+test doctor::tests::a_contract_that_never_splits_is_not_judged ... ok
+test identity::tests::a_missing_model_directory_is_reported_not_swallowed ... ok
+test identity::tests::the_epoch_is_the_first_of_january_nineteen_seventy ... ok
+test identity::tests::the_timestamp_has_the_expected_shape ... ok
+test identity::tests::what_the_operator_does_not_state_stays_unknown ... ok
+test identity::tests::without_a_repository_no_digest_is_invented ... ok
+test serve::tests::an_open_endpoint_without_identity_is_refused_even_with_tls ... ok
+test serve::tests::identity_or_the_explicit_flag_opens_it ... ok
+test serve::tests::loopback_needs_no_identity_check ... ok
+test artifact::tests::a_note_beside_the_version_directory_does_not_change_the_digest ... ok
+test identity::tests::a_leap_day_is_a_leap_day ... ok
+test doctor::tests::capacity_is_checked_one_gpu_at_a_time ... ok
+test doctor::tests::preemption_is_reported_and_checked_against_the_deadline ... ok
+test doctor::tests::tls_alone_is_not_an_identity_check ... ok
+test artifact::tests::a_shifted_boundary_does_not_collide ... ok
+
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/vig_config-4d7568a540ffc05e)
+
+running 16 tests
+test manifest::tests::a_divergence_outweighs_a_gap ... ok
+test manifest::tests::a_legacy_profile_is_unverified_not_verified ... ok
+test manifest::tests::a_missing_field_is_unknown_and_never_verified ... ok
+test manifest::tests::a_manifest_without_a_revision_defaults_to_the_current_one ... ok
+test manifest::tests::a_partially_stated_domain_answers_only_for_what_it_states ... ok
+test manifest::tests::an_identical_manifest_verifies ... ok
+test manifest::tests::an_unstated_validity_domain_says_nothing ... ok
+test manifest::tests::another_device_invalidates ... ok
+test manifest::tests::another_resource_layout_invalidates ... ok
+test manifest::tests::another_runtime_invalidates ... ok
+test manifest::tests::exceeding_a_stated_limit_leaves_the_domain ... ok
+test manifest::tests::measurement_conditions_do_not_bear_identity ... ok
+test manifest::tests::silence_on_both_sides_is_not_agreement ... ok
+test manifest::tests::the_same_tensor_shape_with_another_engine_hash_invalidates ... ok
+test manifest::tests::a_manifest_survives_a_roundtrip ... ok
+test manifest::tests::the_yaml_block_is_indentable ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/domains.rs (target/debug/deps/domains-1cea2253576e1057)
+
+running 13 tests
+test an_endpoint_belongs_to_one_domain ... ok
+test a_domain_without_models_is_refused ... ok
+test findings_are_not_reported_twice ... ok
+test pairs_across_domains_are_refused_with_the_right_reason ... ok
+test the_name_default_is_the_backend_block ... ok
+test a_model_naming_an_unknown_domain_is_refused ... ok
+test without_domains_nothing_changes ... ok
+test pinning_a_variant_reaches_the_domain ... ok
+test a_lane_lives_in_the_domain_of_its_model ... ok
+test a_finding_inside_a_domain_names_the_domain ... ok
+test the_shipped_example_resolves_into_two_schedulers ... ok
+test two_domains_on_one_gpu_are_refused ... ok
+test a_domain_round_trips_through_yaml ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/schema.rs (target/debug/deps/schema-a090ebd4890a5d52)
+
+running 55 tests
+test a_semantics_block_without_outputs_is_rejected ... ok
+test a_corun_rule_pointing_at_nothing_is_reported ... ok
+test a_declared_io_signature_is_normalised_for_comparison ... ok
+test a_profile_from_before_fingerprints_still_resolves ... ok
+test a_half_described_variant_series_is_a_conflict_not_a_pass ... ok
+test a_missing_runtime_profile_stops_the_start ... ok
+test a_contract_without_an_extension_still_resolves ... ok
+test a_different_input_resolution_switches_off_auto_selection ... ok
+test a_miss_budget_without_a_consumer_period_is_rejected ... ok
+test a_profile_with_only_a_fingerprint_is_still_legacy ... ok
+test a_full_extension_reaches_the_contract ... ok
+test a_manifest_reaches_the_resolved_configuration ... ok
+test a_model_without_a_declared_signature_has_none ... ok
+test an_unknown_block_is_rejected_not_partially_read ... ok
+test a_stateful_model_with_latest_is_rejected ... ok
+test an_unknown_extension_key_is_rejected ... ok
+test an_empty_cooperative_token_range_prevents_startup ... ok
+test a_preemptible_model_gets_its_own_lane ... ok
+test a_manifest_survives_the_full_configuration_roundtrip ... ok
+test an_out_of_range_period_is_rejected_instead_of_silently_disabled ... ok
+test an_unknown_delivery_semantics_is_rejected ... ok
+test an_unknown_coordinate_convention_is_rejected ... ok
+test an_unknown_evidence_level_is_rejected ... ok
+test an_extension_survives_a_configuration_roundtrip ... ok
+test an_unknown_extension_version_is_rejected ... ok
+test an_unknown_key_is_rejected ... ok
+test an_unknown_manifest_key_is_rejected ... ok
+test an_invalid_miss_budget_is_rejected ... ok
+test an_out_of_range_max_age_is_rejected_instead_of_silently_disabled ... ok
+test diagnose_reports_every_problem_at_once ... ok
+test an_unknown_output_kind_is_rejected ... ok
+test an_unknown_unit_is_rejected ... ok
+test approved_variants_are_resolved_by_name ... ok
+test a_new_binary_reads_every_older_configuration ... ok
+test an_unknown_variant_name_in_the_approval_list_is_rejected ... ok
+test out_of_range_values_are_rejected_not_clamped ... ok
+test half_configured_tls_is_rejected ... ok
+test identical_semantics_keep_auto_selection ... ok
+test the_security_limits_can_be_set ... ok
+test profiles_under_load_reach_the_planner ... ok
+test the_profile_fingerprint_survives_resolution ... ok
+test the_preprocessing_cost_reaches_the_contract ... ok
+test the_same_shape_with_permuted_labels_switches_off_auto_selection ... ok
+test unknown_quality_provenance_disables_auto_selection ... ok
+test the_security_limits_are_safe_by_default ... ok
+test the_shipped_example_resolves ... ok
+test preemption_contradictions_are_refused ... ok
+test without_load_profiles_the_solo_profile_still_applies ... ok
+test the_prediction_mode_is_an_explicit_operator_step ... ok
+test variants_without_semantics_behave_as_before ... ok
+test the_supply_guard_is_an_explicit_operator_step ... ok
+test the_rfdetr_variant_example_resolves_and_reports_its_conflicts ... ok
+test security_limits_that_would_not_limit_are_refused ... ok
+test what_calibrate_writes_resolve_reads_again ... ok
+test margin_learning_is_opt_in_and_bounded ... ok
+
+test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (target/debug/deps/vig_core-2efd8c2eba96e9c1)
+
+running 242 tests
+test arrayvec::tests::insert_beyond_the_end_appends ... ok
+test arrayvec::tests::insert_shifts_the_tail_and_preserves_order ... ok
+test arrayvec::tests::out_of_range_access_returns_none_instead_of_panicking ... ok
+test arrayvec::tests::insert_stops_at_capacity_instead_of_growing ... ok
+test arrayvec::tests::pop_front_is_fifo ... ok
+test arrayvec::tests::push_stops_at_capacity_instead_of_growing ... ok
+test arrayvec::tests::remove_preserves_order ... ok
+test arrayvec::tests::retain_reports_every_removed_element ... ok
+test arrival::tests::a_single_burst_does_not_flip_the_verdict ... ok
+test arrival::tests::a_slow_stream_is_not_a_finding ... ok
+test arrival::tests::a_stream_at_double_its_contracted_rate_is_reported ... ok
+test arrival::tests::a_stream_at_its_contracted_rate_is_silent ... ok
+test arrival::tests::a_sustained_rate_change_is_detected ... ok
+test arrival::tests::a_sustained_rate_change_is_detected_within_seconds ... ok
+test arrival::tests::a_young_stream_makes_no_claim ... ok
+test arrival::tests::slight_overspeed_stays_within_tolerance ... ok
+test arrival::tests::without_a_contracted_period_nothing_is_claimed ... ok
+test contract_ext::background_progress_tests::a_minimum_background_progress_becomes_a_miss_budget ... ok
+test contract_ext::background_progress_tests::a_minimum_without_cycles_or_a_window_is_rejected ... ok
+test contract_ext::background_progress_tests::a_phase_offset_moves_the_sampling_grid ... ok
+test contract_ext::background_progress_tests::a_promise_the_product_cannot_make_is_refused ... ok
+test contract_ext::background_progress_tests::an_explicit_miss_budget_wins_over_a_derived_one ... ok
+test contract_ext::background_progress_tests::unenforced_requirements_are_named ... ok
+test contract_ext::slack_tests::a_fully_observed_window_says_so ... ok
+test contract_ext::slack_tests::a_running_miss_streak_eats_the_consecutive_budget ... ok
+test contract_ext::slack_tests::a_supply_ends_the_streak_and_gives_the_consecutive_budget_back ... ok
+test contract_ext::slack_tests::an_untouched_window_has_its_full_budget ... ok
+test contract_ext::slack_tests::each_miss_eats_the_budget ... ok
+test contract_ext::slack_tests::recovery_takes_as_long_as_the_window_is_wide ... ok
+test contract_ext::slack_tests::the_window_is_not_reset_by_a_violation ... ok
+test contract_ext::tests::a_budget_is_held_at_exactly_the_limit ... ok
+test contract_ext::tests::a_budget_that_permits_every_cycle_is_rejected ... ok
+test contract_ext::tests::a_consecutive_limit_above_the_budget_is_rejected ... ok
+test contract_ext::tests::a_contract_that_approves_no_variant_is_rejected ... ok
+test contract_ext::tests::a_contract_without_an_extension_is_the_old_contract ... ok
+test contract_ext::tests::a_miss_budget_without_a_consumer_tick_is_rejected ... ok
+test contract_ext::tests::a_gap_longer_than_the_ring_does_not_overflow ... ok
+test contract_ext::tests::a_monitor_carries_the_contract_revision_it_counts_under ... ok
+test contract_ext::tests::a_monitor_needs_a_tick_and_a_budget ... ok
+test contract_ext::tests::a_window_beyond_the_ring_is_rejected ... ok
+test contract_ext::tests::a_window_of_zero_is_rejected ... ok
+test contract_ext::tests::an_approval_outside_the_variant_range_does_not_count ... ok
+test contract_ext::tests::an_incomplete_window_says_warmup_not_holding ... ok
+test contract_ext::tests::an_index_beyond_the_maximum_is_never_approved ... ok
+test contract_ext::tests::an_out_of_range_background_progress_is_rejected ... ok
+test contract_ext::tests::an_out_of_range_observation_window_is_rejected ... ok
+test contract_ext::tests::an_unknown_extension_version_is_rejected_not_ignored ... ok
+test contract_ext::tests::approval_and_quality_are_different_statements ... ok
+test contract_ext::tests::evidence_levels_are_ordered_from_weak_to_strong ... ok
+test contract_ext::tests::one_miss_too_many_violates ... ok
+test contract_ext::tests::rejecting_everything_does_not_satisfy_the_contract ... ok
+test contract_ext::tests::silence_fills_the_window_with_misses ... ok
+test contract_ext::tests::the_required_evidence_level_is_not_derived_from_observations ... ok
+test contract_ext::tests::the_ring_constants_agree ... ok
+test contract_ext::tests::the_same_miss_rate_with_a_different_burst_shape_is_distinguished ... ok
+test contract_ext::tests::the_tick_does_not_drift_with_the_arrivals ... ok
+test contract_ext::tests::the_window_slides_and_forgets ... ok
+test contract_ext::tests::two_arrivals_within_one_cycle_count_once ... ok
+test dag::tests::a_completed_node_cannot_go_back_to_running ... ok
+test dag::tests::a_failed_parent_makes_a_finished_child_invalid ... ok
+test dag::tests::a_fusion_from_one_capture_is_accepted ... ok
+test dag::tests::a_fusion_is_valid_only_when_all_parents_delivered ... ok
+test dag::tests::a_fusion_needs_a_common_capture ... ok
+test dag::tests::a_model_index_is_kept_for_diagnostics ... ok
+test dag::tests::a_node_without_parents_is_valid_when_it_is_done ... ok
+test dag::tests::a_parent_is_not_collected_while_a_child_names_it ... ok
+test dag::tests::a_release_without_a_hold_is_refused ... ok
+test dag::tests::a_retained_node_is_not_collected ... ok
+test dag::tests::a_running_child_can_be_superseded_after_it_finishes ... ok
+test dag::tests::a_running_child_is_not_cancelled ... ok
+test dag::tests::a_running_node_cannot_be_cancelled_directly ... ok
+test dag::tests::an_epoch_change_is_not_bridged_even_across_captures ... ok
+test dag::tests::an_unknown_parent_is_refused ... ok
+test dag::tests::cancellation_does_not_touch_a_sibling_branch ... ok
+test dag::tests::crossing_captures_is_possible_but_must_be_said ... ok
+test dag::tests::cancellation_reaches_grandchildren ... ok
+test dag::tests::node_ids_are_not_reused_after_collection ... ok
+test dag::tests::one_parent_with_two_consumers_stays_until_the_last_releases ... ok
+test dag::tests::too_many_parents_are_refused ... ok
+test dag::tests::the_graph_is_bounded ... ok
+test estimator::tests::above_the_target_rate_the_margin_rises ... ok
+test estimator::tests::one_overrun_in_eleven_is_no_longer_accepted ... ok
+test estimator::tests::at_the_target_rate_the_margin_holds_still ... ok
+test estimator::tests::provisional_margin_starts_high_and_relaxes_to_the_configured_floor ... ok
+test estimator::tests::provisional_margin_stays_within_the_ceiling ... ok
+test estimator::tests::the_margin_tightens_fast_and_relaxes_slowly ... ok
+test feasibility::tests::a_lost_supply_does_not_disable_the_deadline_guard ... ok
+test feasibility::tests::a_preemptible_job_burdens_arrivals_after_its_nominal_end ... ok
+test feasibility::tests::a_non_preemptible_block_is_held_back ... ok
+test feasibility::tests::a_preemptible_job_is_held_back_when_its_residual_does_not_fit ... ok
+test feasibility::tests::a_supply_deadline_holds_back_work_the_frame_deadline_would_allow ... ok
+test generative::tests::a_cheap_decomposition_is_recommended ... ok
+test generative::tests::a_finer_split_costs_linearly_more_and_the_cache_sets_the_slope ... ok
+test generative::tests::a_last_quantum_smaller_than_the_others_is_counted ... ok
+test estimator::tests::observations_are_kept_per_occupancy_level ... ok
+test estimator::tests::too_few_observations_are_ignored ... ok
+test generative::tests::a_quantum_that_carries_the_whole_job_has_no_boundary ... ok
+test generative::tests::a_zero_token_job_is_not_a_decomposition ... ok
+test estimator::tests::a_hopeless_profile_is_reported_instead_of_compensated ... ok
+test estimator::tests::the_window_forgets_old_observations ... ok
+test estimator::tests::a_learned_factor_scales_the_profile_and_stops_at_the_observed_median ... ok
+test generative::tests::a_later_quantum_costs_more_than_an_earlier_one ... ok
+test estimator::tests::the_estimator_may_tighten_but_never_loosen ... ok
+test generative::tests::a_longer_job_at_the_same_quantum_size_costs_quadratically_more ... ok
+test generative::tests::an_undivided_job_has_no_overhead ... ok
+test estimator::tests::the_target_follows_the_contract_within_bounds ... ok
+test feasibility::tests::a_preemptible_job_starts_when_its_residual_fits ... ok
+test generative::tests::the_closed_form_matches_a_step_by_step_run ... ok
+test generative::tests::the_context_grows_with_every_quantum ... ok
+test generative::tests::the_last_boundary_is_right_even_when_the_quantum_does_not_divide_evenly ... ok
+test generative::tests::a_decomposition_beyond_the_limit_is_refused_with_its_price ... ok
+test generative::tests::the_projection_terminates_on_extreme_input ... ok
+test generative::tests::an_unmeasured_cost_model_says_so ... ok
+test generative::tests::decomposition_costs_more_and_the_model_says_how_much ... ok
+test generative::tests::prefill_work_is_booked_separately_from_progress ... ok
+test generative::tests::smaller_quanta_shorten_the_first_token_and_lengthen_the_later_gaps ... ok
+test generative::tests::an_undivided_job_has_no_quantum_boundary ... ok
+test generative::tests::the_worst_gap_uses_the_largest_context_not_the_prompt ... ok
+test generative::tests::without_a_measurement_there_is_no_verdict ... ok
+test generative::tests::without_a_prefill_term_the_model_falls_back_to_the_old_one ... ok
+test hints::tests::a_hint_for_a_model_that_does_not_exist_is_refused ... ok
+test hints::tests::a_hint_from_the_future_is_not_fresh ... ok
+test hints::tests::a_hint_offered_after_its_deadline_is_refused ... ok
+test hints::tests::a_hint_whose_deadline_overflows_counts_as_stale ... ok
+test hints::tests::a_later_hint_replaces_an_earlier_one ... ok
+test hints::tests::a_mode_beyond_the_mask_width_is_refused ... ok
+test hints::tests::a_mode_does_not_touch_the_max_age_by_itself ... ok
+test hints::tests::a_model_without_a_hint_gets_the_base_contract ... ok
+test hints::tests::a_refused_hint_does_not_disturb_the_accepted_one ... ok
+test hints::tests::a_relaxation_extends_the_ceiling_and_never_removes_it ... ok
+test hints::tests::a_relaxation_never_switches_freshness_off_entirely ... ok
+test hints::tests::a_tightened_policy_invalidates_an_already_accepted_hint ... ok
+test hints::tests::an_expired_hint_yields_the_base_contract_not_the_last_state ... ok
+test hints::tests::an_over_long_action_horizon_is_refused ... ok
+test hints::tests::an_unauthorised_source_is_not_heard ... ok
+test hints::tests::hints_for_one_model_do_not_reach_another ... ok
+test hints::tests::loosening_with_approval_is_bounded_by_its_own_deadline ... ok
+test hints::tests::loosening_without_approval_is_refused ... ok
+test hints::tests::only_approved_modes_are_accepted ... ok
+test hints::tests::the_contract_stays_the_ceiling_for_tightening ... ok
+test hints::tests::the_default_policy_hears_nobody ... ok
+test hints::tests::tightening_below_the_operator_floor_is_refused ... ok
+test hints::tests::tightening_is_accepted_without_a_mode_approval ... ok
+test hints::tests::two_contradicting_hints_at_the_same_instant_cancel_out ... ok
+test interference::tests::a_combination_for_one_victim_says_nothing_about_another ... ok
+test interference::tests::a_measured_combination_answers_for_three ... ok
+test interference::tests::a_model_does_not_disturb_itself ... ok
+test interference::tests::a_pair_recorded_as_a_combination_is_refused ... ok
+test interference::tests::a_repeated_neighbour_counts_once ... ok
+test interference::tests::a_second_measurement_of_the_same_combination_replaces_the_first ... ok
+test interference::tests::an_index_outside_the_table_is_refused_not_wrapped ... ok
+test interference::tests::an_unmeasured_pair_is_not_free ... ok
+test interference::tests::interference_is_directed_and_stays_directed ... ok
+test generative::tests::with_a_prefix_cache_decomposition_is_nearly_free ... ok
+test interference::tests::one_direction_measured_does_not_measure_the_other ... ok
+test interference::tests::running_alone_costs_nothing_and_that_is_measured ... ok
+test interference::tests::the_combination_order_does_not_matter ... ok
+test interference::tests::the_combination_list_is_bounded ... ok
+test interference::tests::the_conflict_kind_survives ... ok
+test interference::tests::the_doubling_heuristic_fires_at_the_stated_line ... ok
+test interference::tests::the_doubling_heuristic_needs_a_measurement ... ok
+test interference::tests::the_heuristic_says_nothing_about_unequal_job_lengths ... ok
+test interference::tests::the_table_holds_absolute_time_not_a_factor ... ok
+test interference::tests::the_pair_table_counts_directions_separately ... ok
+test interference::tests::two_neighbours_are_not_the_sum_of_two_pairs ... ok
+test learning::tests::an_unverified_profile_starts_high_and_warms_up_again ... ok
+test learning::tests::an_up_step_and_a_down_step_of_the_same_size_cancel ... ok
+test learning::tests::it_warms_up_like_the_linear_controller ... ok
+test learning::tests::the_range_is_validated ... ok
+test learning::tests::one_overrun_weighs_as_much_as_ninety_nine_kept_plans ... ok
+test metrics::domain_tests::two_domains_add_up_and_keep_each_model_at_its_global_place ... ok
+test predictor::tests::a_downclocked_memory_makes_the_class_reduced ... ok
+test predictor::tests::a_missing_memory_clock_leaves_the_sm_clock_standing ... ok
+test predictor::tests::an_unobservable_clock_is_its_own_class ... ok
+test predictor::tests::a_window_that_cannot_reach_the_threshold_would_be_useless ... ok
+test predictor::tests::a_state_change_between_planning_and_dispatch_invalidates_the_prediction ... ok
+test predictor::tests::a_different_occupancy_is_a_different_cell ... ok
+test predictor::tests::a_shape_beyond_the_maximum_is_clamped ... ok
+test predictor::tests::a_fallback_carries_its_reason_through ... ok
+test predictor::tests::a_throttled_state_does_not_read_the_nominal_cell ... ok
+test predictor::tests::a_thin_cell_yields_no_relaxation ... ok
+test predictor::tests::active_mode_uses_the_cell_even_when_it_is_shorter ... ok
+test predictor::tests::an_index_outside_the_table_is_refused_not_wrapped ... ok
+test predictor::tests::every_state_class_has_its_own_code ... ok
+test predictor::tests::an_unobserved_state_is_the_default_not_the_best_case ... ok
+test predictor::tests::the_clock_class_follows_the_ten_percent_line ... ok
+test predictor::tests::the_ledger_separates_bolder_from_more_cautious ... ok
+test predictor::tests::an_unobserved_state_yields_no_prediction ... ok
+test predictor::tests::active_mode_falls_back_when_there_is_no_cell ... ok
+test predictor::tests::nothing_is_interpolated_between_cells ... ok
+test predictor::tests::a_profile_change_empties_the_cell_instead_of_blending_it ... ok
+test profile::tests::non_monotonic_quantiles_are_rejected ... ok
+test learning::tests::a_rare_model_inherits_the_device_factor ... ok
+test profile::tests::occupancy_profile_uses_the_highest_measured_level_when_extrapolating ... ok
+test profile::tests::solo_profile_is_a_valid_starting_point ... ok
+test scheduler::forecast_tests::a_clock_far_off_does_not_hold_a_stream_open ... ok
+test scheduler::forecast_tests::on_time_the_deadline_counts_from_the_capture ... ok
+test scheduler::forecast_tests::with_an_envelope_it_moves_by_twice_the_envelope ... ok
+test scheduler::forecast_tests::without_an_envelope_a_late_arrival_keeps_the_old_deadline ... ok
+test semantics::tests::a_different_class_count_is_rejected ... ok
+test semantics::tests::a_different_coordinate_convention_is_rejected ... ok
+test semantics::tests::a_different_input_resolution_is_rejected ... ok
+test scheduler::forecast_tests::a_frame_that_cannot_make_it_alone_is_not_given_up ... ok
+test predictor::tests::the_state_space_does_not_grow_with_runtime ... ok
+test semantics::tests::a_different_box_layout_is_rejected ... ok
+test semantics::tests::a_different_normalization_is_rejected ... ok
+test semantics::tests::a_different_output_count_is_rejected ... ok
+test semantics::tests::a_label_fingerprint_is_never_accidentally_unspecified ... ok
+test semantics::tests::a_shifted_label_boundary_does_not_collide ... ok
+test semantics::tests::an_empty_label_set_is_unspecified ... ok
+test semantics::tests::an_unspecified_kind_is_never_comparable ... ok
+test semantics::tests::deliberately_opaque_outputs_compare_by_layout ... ok
+test semantics::tests::one_described_and_one_silent_is_not_interchangeable ... ok
+test semantics::tests::the_conflict_names_the_output_it_found ... ok
+test semantics::tests::the_label_fingerprint_is_order_sensitive ... ok
+test semantics::tests::the_same_labels_in_the_same_order_are_interchangeable ... ok
+test semantics::tests::the_same_shape_with_a_permuted_label_order_is_rejected ... ok
+test semantics::tests::two_undescribed_variants_are_not_interchangeable ... ok
+test slots::tests::a_lane_takes_only_preemptible_work_and_leaves_the_slot_free ... ok
+test slots::tests::a_preemptible_model_never_takes_the_regular_slot ... ok
+test slots::tests::lanes_count_against_the_slot_limit ... ok
+test slots::tests::without_lanes_nothing_changes ... ok
+test time::tests::age_of_a_future_frame_is_zero_not_negative ... ok
+test time::tests::display_is_readable_in_traces ... ok
+test time::tests::duration_rejects_absurd_contracts ... ok
+test time::tests::g012_deadline_arithmetic_cannot_overflow ... ok
+test time::tests::safety_margin_is_exact_integer_arithmetic ... ok
+test time::tests::signed_difference_survives_extremes ... ok
+test time::tests::slack_is_negative_when_infeasible ... ok
+test semantics::tests::a_tag_is_never_accidentally_unspecified ... ok
+test semantics::tests::an_incomplete_description_is_not_a_comparison ... ok
+test predictor::tests::the_cell_table_is_bounded_and_allocated_once ... ok
+test predictor::tests::shadow_mode_changes_no_decision ... ok
+test predictor::tests::the_table_follows_the_configuration_not_the_maximum ... ok
+test profile::tests::a_p99_from_too_few_samples_is_refused ... ok
+test profile::tests::conservative_runtime_applies_the_margin_to_p99 ... ok
+test profile::tests::every_margin_round_trips_through_its_percent_value ... ok
+test profile::tests::margin_is_bounded_in_both_directions ... ok
+test predictor::tests::two_states_keep_two_answers ... ok
+test learning::tests::an_optimistic_profile_is_corrected_within_dozens_of_overruns ... ok
+test learning::tests::a_pessimistic_profile_converges_below_one_to_the_p99 ... ok
+test learning::tests::the_hard_limits_hold_and_store_no_debt ... ok
+
+test result: ok. 242 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/golden_queue.rs (target/debug/deps/golden_queue-9ac444f9f11224a5)
+
+running 16 tests
+test a_stateful_request_is_never_superseded ... ok
+test every_request_reaches_exactly_one_terminal_state ... ok
+test an_older_frame_arriving_late_does_not_replace_a_newer_one ... ok
+test g001_latest_supersedes_queued ... ok
+test g002_forwarded_cannot_be_superseded ... ok
+test g003_fifo_preserves_order_and_never_supersedes ... ok
+test g004_never_drop_overflows_explicitly_instead_of_silently ... ok
+test g011_stateful_model_cannot_use_a_superseding_policy ... ok
+test invalid_capacity_is_rejected_not_repaired ... ok
+test latest_per_key_isolates_streams ... ok
+test never_drop_is_immune_to_freshness_rules ... ok
+test reject_oldest_non_protected_never_sacrifices_guarded_work ... ok
+test requests_without_max_age_never_go_stale ... ok
+test stale_collection_uses_generation_time_not_arrival_time ... ok
+test latest_queue_depth_never_exceeds_one ... ok
+test queue_stays_bounded_under_sustained_overload ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/golden_scheduling.rs (target/debug/deps/golden_scheduling-188826bfc34e38a1)
+
+running 27 tests
+test a_duplicate_completion_does_not_invent_credit ... ok
+test a_model_may_always_corun_with_itself ... ok
+test g005_a_frame_that_is_already_too_old_is_infeasible_on_arrival ... ok
+test forbidden_corun_delays_the_start_instead_of_blocking_the_slot ... ok
+test g005_deadline_is_anchored_at_capture_not_at_arrival ... ok
+test g007_a_second_slot_removes_the_conflict ... ok
+test best_effort_rejection_does_not_escalate_overload ... ok
+test g007_best_effort_waits_for_an_expected_protected_arrival ... ok
+test g007_no_veto_when_the_protected_work_was_doomed_anyway ... ok
+test g007_short_best_effort_work_is_not_blocked ... ok
+test g012_absurd_client_deadline_cannot_overflow_the_schedule ... ok
+test guard_ignores_arrivals_after_the_candidate_has_finished ... ok
+test guard_protects_an_arrival_however_far_away_the_candidate_reaches ... ok
+test guard_ignores_arrivals_of_equal_or_lower_criticality ... ok
+test l021_dispatch_is_bounded_by_slot_credits ... ok
+test overload_config_without_hysteresis_is_rejected ... ok
+test overload_states_gate_admission_as_specified ... ok
+test pipelining_depth_allows_exactly_one_queued_request_per_slot ... ok
+test slot_configuration_is_validated ... ok
+test overload_escalates_under_sustained_protected_violations ... ok
+test overload_escalates_one_level_at_a_time ... ok
+test overload_recovers_and_does_not_oscillate ... ok
+test g006_picks_the_highest_quality_variant_that_still_fits ... ok
+test g006_when_nothing_fits_the_fastest_variant_is_named ... ok
+test unknown_quality_provenance_disables_automatic_variant_selection ... ok
+test g009_a_growing_safety_margin_forces_a_smaller_variant ... ok
+test variant_hysteresis_is_asymmetric ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/review_invariants.rs (target/debug/deps/review_invariants-92ebf330b31c46aa)
+
+running 28 tests
+test a_corun_veto_lasts_until_the_work_actually_completes ... ok
+test a_quantum_costs_its_fixed_base_plus_generation_time ... ok
+test an_empty_cooperative_token_range_is_rejected_by_the_contract ... ok
+test control_corun_veto_also_holds_before_the_prediction_expires ... ok
+test latest_supersedes_across_the_whole_model_even_with_differing_client_keys ... ok
+test latest_per_key_still_keeps_separate_keys_apart ... ok
+test control_latest_with_the_same_key_still_supersedes ... ok
+test the_guard_reserves_the_combined_demand_of_expected_requests ... ok
+test a_cancelled_request_leaves_the_queue_with_a_terminal_state ... ok
+test a_stateful_fifo_sequence_is_not_reordered_by_edf ... ok
+test the_quantum_sizing_and_the_projection_share_one_cost_model ... ok
+test an_undivided_job_is_planned_with_its_full_runtime ... ok
+test counterexample_runtime_longer_than_period_does_not_imply_starvation ... ok
+test the_longest_supply_gap_is_recorded_per_stream ... ok
+test a_context_that_eats_the_whole_gap_is_reported_to_the_guard ... ok
+test freshness_pressure_drops_work_that_would_be_stale_on_arrival ... ok
+test a_blocked_candidate_does_not_idle_an_independent_slot ... ok
+test the_consumer_age_starts_at_capture_not_at_completion ... ok
+test beyond_a_certain_context_no_quantum_fits_and_it_is_counted ... ok
+test variants_that_are_not_interchangeable_disable_automatic_selection ... ok
+test a_continued_quantum_is_sized_smaller_than_the_first_one ... ok
+test the_scheduler_reserves_the_real_cost_of_a_quantum ... ok
+test the_quantum_is_sized_before_the_guard_evaluates_it ... ok
+test infeasible_fallback_chooses_the_measured_fastest_variant ... ok
+test the_guard_uses_the_learned_protected_runtime ... ok
+test every_stale_request_gets_a_terminal_action ... ok
+test degradation_prefers_the_fastest_feasible_variant ... ok
+test without_a_measured_prefill_the_context_changes_nothing ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/scheduler_flow.rs (target/debug/deps/scheduler_flow-3c6d23741a413589)
+
+running 39 tests
+test a_contract_that_approves_nothing_dispatches_nothing ... ok
+test a_hint_cannot_loosen_a_contract_the_operator_did_not_open ... ok
+test an_approved_action_horizon_saves_a_request_that_would_be_dropped ... ok
+test an_observation_lands_in_the_cell_of_the_dispatch_state ... ok
+test an_exhausted_budget_wins_inside_its_criticality_class ... ok
+test a_stream_that_stops_does_not_hold_background_back ... ok
+test approval_narrows_the_choice_without_touching_min_quality ... ok
+test an_unmeasured_pairing_gets_no_invented_surcharge ... ok
+test an_authorised_hint_tightens_the_effective_max_age ... ok
+test a_hint_does_not_change_what_the_scheduler_dispatches_by_itself ... ok
+test a_forced_downgrade_and_the_later_upgrade_are_counted_once_each ... ok
+test lookahead_observes_the_variant_approval ... ok
+test lookahead_includes_the_variants_preprocessing ... ok
+test a_still_fresh_result_supplies_a_quiet_cycle ... ok
+test a_stream_that_is_supplied_holds_its_miss_budget ... ok
+test measured_interference_reaches_the_planned_runtime ... ok
+test the_miss_aware_policy_is_off_by_default ... ok
+test the_policy_never_reorders_across_criticality_classes ... ok
+test an_unapproved_variant_is_never_dispatched ... ok
+test a_hardware_state_change_invalidates_the_learned_cells ... ok
+test without_a_policy_the_governor_hears_nobody ... ok
+test the_slack_is_reported_per_model ... ok
+test without_the_operators_approval_a_loosening_hint_changes_nothing ... ok
+test observations_land_in_the_cell_that_planning_reads ... ok
+test latest_policy_prevents_backlog_under_sustained_overload ... ok
+test without_the_policy_the_arrival_order_decides_as_before ... ok
+test a_long_best_effort_job_defers_for_expected_protected_work ... ok
+test the_contract_tick_keeps_running_when_nothing_arrives ... ok
+test a_load_within_the_contract_stays_silent ... ok
+test a_load_that_breaks_the_contract_becomes_visible ... ok
+test the_predictor_starts_in_the_shadow_and_changes_nothing ... ok
+test a_preemptible_background_job_runs_and_the_protected_stream_keeps_its_deadline ... ok
+test without_look_ahead_the_same_workload_would_lose_protected_deadlines ... ok
+test the_dwell_time_damps_switching_under_alternating_pressure ... ok
+test an_active_predictor_keeps_the_operators_margin ... ok
+test g008_overload_stays_bounded_and_every_request_terminates ... ok
+test an_active_predictor_keeps_the_quality_a_stale_profile_gives_away ... ok
+test without_preemption_the_long_background_job_starves ... ok
+test a_residual_that_breaks_the_protected_slack_keeps_the_job_back ... ok
+
+test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/variant_supply.rs (target/debug/deps/variant_supply-831e276728f47eae)
+
+running 8 tests
+test a_variant_that_meets_its_deadline_but_leaves_a_gap_is_passed_over ... ok
+test the_downgrade_for_supply_is_immediate ... ok
+test a_faster_upgrade_can_rescue_supply_during_the_dwell_time ... ok
+test if_no_variant_supplies_the_deadline_rule_decides ... ok
+test an_upgrade_that_cannot_rescue_supply_still_observes_the_dwell_time ... ok
+test the_supply_deadline_is_anchored_at_capture ... ok
+test without_a_supply_window_nothing_changes ... ok
+test where_the_large_variant_supplies_it_stays_the_choice ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/vig_gateway-53e236ee7d316926)
+
+running 58 tests
+test actor::tests::a_continuation_changes_nothing_but_its_id_and_context ... ok
+test actor::tests::every_quantum_carries_its_context_including_the_first ... ok
+test auth::tests::a_short_token_is_refused ... ok
+test auth::tests::a_colon_inside_a_token_does_not_make_a_label ... ok
+test auth::tests::an_empty_token_file_is_a_configuration_error ... ok
+test auth::tests::anything_but_a_known_token_is_rejected ... ok
+test actor::tests::an_armed_guard_reports_the_cancellation ... ok
+test auth::tests::identities_differ_per_token_and_are_never_anonymous ... ok
+test actor::tests::a_disarmed_guard_reports_nothing_and_releases_its_sender ... ok
+test auth::tests::the_gate_rejects_before_the_service_sees_anything ... ok
+test auth::tests::duplicate_labels_and_tokens_are_refused ... ok
+test auth::tests::the_hint_authority_comes_from_the_label_not_the_secret ... ok
+test auth::tests::without_tokens_everyone_is_anonymous ... ok
+test clock::tests::an_old_frame_right_after_startup_keeps_its_age ... ok
+test auth::tests::tokens_are_read_line_by_line_ignoring_comments ... ok
+test cooperative::tests::a_backend_that_returns_only_the_continuation_also_works ... ok
+test cooperative::tests::a_job_without_text_input_is_not_splittable ... ok
+test cooperative::tests::a_quantum_keeps_the_other_inputs ... ok
+test cooperative::tests::an_empty_quantum_ends_the_job ... ok
+test cooperative::tests::a_quantum_never_asks_for_more_tokens_than_the_client_did ... ok
+test cooperative::tests::each_quantum_carries_the_accumulated_text ... ok
+test cooperative::tests::the_context_grows_with_every_quantum ... ok
+test cooperative::tests::only_the_top_level_max_tokens_is_the_clients_limit ... ok
+test cooperative::tests::sampling_that_is_not_a_json_object_is_not_split ... ok
+test cooperative::tests::the_ordered_amount_binds_where_it_is_smaller ... ok
+test cooperative::tests::the_quantum_never_exceeds_what_remains ... ok
+test cooperative::tests::the_token_budget_holds_against_single_byte_tokens ... ok
+test cooperative::tests::the_total_token_budget_is_enforced ... ok
+test datapath_budget::tests::a_governor_faster_than_the_direct_call_is_no_credit ... ok
+test datapath_budget::tests::a_short_call_is_judged_by_the_absolute_budget_only ... ok
+test datapath_budget::tests::a_tail_regression_alone_fails ... ok
+test datapath_budget::tests::an_accidental_copy_on_the_shm_path_fails ... ok
+test datapath_budget::tests::camera_frames_on_the_copy_path_are_not_budgeted ... ok
+test datapath_budget::tests::every_shm_point_carries_the_same_budget ... ok
+test datapath_budget::tests::quantiles_are_nearest_rank ... ok
+test datapath_budget::tests::the_measured_shm_overhead_passes ... ok
+test cooperative::tests::the_sampling_stays_valid_json_whatever_the_field_order ... ok
+test executor::tests::a_backend_without_evidence_is_a_capability_not_a_crash ... ok
+test executor::tests::a_fake_executor_answers_without_a_gpu ... ok
+test executor::tests::a_fake_executor_reproduces_the_states_that_decide_a_credit ... ok
+test executor::tests::the_fake_records_what_it_was_asked_to_run ... ok
+test exporter::tests::readiness_fails_when_every_slot_is_quarantined ... ok
+test exporter::tests::readiness_hangs_on_an_active_probe_not_on_the_last_failure ... ok
+test exporter::tests::readiness_names_the_domain_that_is_not_ready ... ok
+test exporter::tests::a_weakly_hard_violation_is_exported ... ok
+test exporter::tests::the_cancellation_counter_reaches_prometheus ... ok
+test service::tests::a_hint_longer_than_the_limit_is_dropped ... ok
+test service::tests::region_references_are_found_in_inputs_and_outputs ... ok
+test exporter::tests::domain_series_carry_their_label_and_appear_only_with_two_domains ... ok
+test exporter::tests::the_deliberate_omissions_are_exported ... ok
+test shm::tests::a_name_belongs_to_its_registrant ... ok
+test exporter::tests::the_rendered_format_is_parseable_prometheus ... ok
+test shm::tests::an_empty_name_unregisters_everything ... ok
+test shm::tests::keys_must_carry_the_prefix_and_nothing_else ... ok
+test shm::tests::re_registering_replaces_instead_of_accumulating ... ok
+test shm::tests::registrations_are_tracked_and_summed ... ok
+test shm::tests::the_registry_is_bounded ... ok
+test shm::tests::extents_must_not_overflow ... ok
+
+test result: ok. 58 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/domains.rs (target/debug/deps/domains-f45a85fba3156a28)
+
+running 4 tests
+test without_domains_there_is_one_actor ... ok
+test each_request_reaches_the_backend_of_its_gpu ... ok
+test a_failed_gpu_takes_no_credit_from_the_other ... ok
+test a_busy_gpu_does_not_hold_up_the_other ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.01s
+
+     Running tests/end_to_end.rs (target/debug/deps/end_to_end-c345bfc5d1fa6be8)
+
+running 8 tests
+test datapath_budgets_hold ... ignored, Zeitmessung: nur auf ruhiger Maschine zur Releasequalifikation, siehe docs/datapath-budgets.md
+test report_future_sizes ... ok
+test an_unconfigured_model_passes_through_unchanged ... ok
+test client_parameters_are_honoured_and_validated ... ok
+test a_configured_model_is_mapped_to_its_physical_variant ... ok
+test a_burst_is_superseded_down_to_the_newest_request ... ok
+test the_shm_path_never_carries_the_payload ... ok
+test report_proxy_overhead_on_the_grpc_copy_path ... ok
+
+test result: ok. 7 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 9.32s
+
+     Running tests/fake_executor.rs (target/debug/deps/fake_executor-36fc678e775d101e)
+
+running 6 tests
+test an_unprogrammed_backend_fails_loudly ... ok
+test a_successful_call_goes_through_the_seam ... ok
+test a_call_that_never_started_returns_its_credit ... ok
+test the_executor_owns_no_resources_of_the_governor ... ok
+test an_aborted_call_does_not_return_its_credit ... ok
+test a_timeout_answers_the_client_and_keeps_waiting_for_the_backend ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.71s
+
+     Running tests/fault_injection.rs (target/debug/deps/fault_injection-42e4264c5c3500fe)
+
+running 14 tests
+test a_model_error_does_not_take_the_governor_out_of_rotation ... ok
+test a_drain_over_a_healthy_backend_reports_success ... ok
+test a_vanished_backend_turns_readiness_red ... ok
+test a_recovered_backend_turns_readiness_green_again ... ok
+test two_hanging_calls_quarantine_every_slot ... ok
+test a_backend_without_statistics_reports_the_missing_baseline ... ok
+test an_aborted_call_starts_the_reconciliation ... ok
+test a_late_proof_of_completion_frees_the_slot ... ok
+test a_request_that_never_reached_the_backend_does_not_raise_the_target ... ok
+test a_late_baseline_is_refused_and_reported ... ok
+test a_drain_over_a_hanging_backend_reports_failure_not_success ... ok
+test a_restart_against_a_long_running_backend_does_not_free_a_credit ... ok
+test a_later_completion_does_not_prove_an_earlier_request_finished ... ok
+test readiness_recovers_without_any_traffic ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.06s
+
+     Running tests/metrics_listener.rs (target/debug/deps/metrics_listener-0118d0d004b1e780)
+
+running 1 test
+test the_metrics_listener_holds_at_most_its_limit ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+     Running tests/mock_backend.rs (target/debug/deps/mock_backend-210e855ebf1dd745)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/reconciliation.rs (target/debug/deps/reconciliation-d50cae9a387ad1ce)
+
+running 7 tests
+test aliases_of_one_backend_model_need_one_baseline ... ok
+test evidence_counts_every_version_of_the_model ... ok
+test after_a_restart_new_work_is_proven_by_the_new_counter ... ok
+test the_proof_comes_from_the_server_that_ran_the_call ... ok
+test a_restart_ends_only_the_calls_that_died_with_it ... ok
+test one_poller_per_backend_however_often_the_transport_breaks ... ok
+test an_open_call_across_a_restart_counts_in_the_new_epoch ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.74s
+
+     Running tests/review_invariants.rs (target/debug/deps/review_invariants-c27a09f8e8957a1a)
+
+running 26 tests
+test readiness_fails_after_a_confirmed_transport_failure ... ok
+test an_aborted_call_holds_the_credit_a_refused_connection_does_not ... ok
+test a_failed_backend_call_is_counted_as_a_failure ... ok
+test a_cooperative_job_is_actually_split_into_several_quanta ... ok
+test strict_mode_refuses_to_run_past_the_governor ... ok
+test strict_mode_lets_clients_lower_their_class_but_not_raise_it ... ok
+test the_grown_context_of_a_continuation_reaches_the_metrics ... ok
+test a_fusion_across_captures_is_refused_before_it_computes ... ok
+test a_decoupled_model_is_read_to_its_final_response ... ok
+test a_preemptible_model_runs_on_its_lane ... ok
+test the_payload_budget_also_counts_typed_tensor_contents ... ok
+test a_decomposition_that_costs_too_much_is_not_run ... ok
+test the_prediction_switch_reaches_the_scheduler ... ok
+test the_response_keeps_the_logical_model_name ... ok
+test a_proven_execution_end_releases_the_credit_exactly_once ... ok
+test without_a_valid_token_nothing_gets_through ... ok
+test a_drain_answers_pending_work_before_the_actor_stops ... ok
+test without_a_declared_capture_nothing_changes ... ok
+test the_payload_budget_outlives_a_client_timeout ... ok
+test full_quarantine_refuses_new_work_instead_of_letting_it_wait ... ok
+test a_hanging_backend_releases_the_client_but_not_the_slot ... ok
+test a_cancelled_client_stops_a_job_that_is_already_split ... ok
+test a_cancelled_client_request_never_reaches_the_backend ... ok
+test the_payload_budget_counts_bytes_not_requests ... ok
+test a_drain_does_not_report_success_while_the_backend_still_runs ... ok
+test no_credit_is_returned_while_the_backend_may_still_compute ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.87s
+
+     Running tests/security.rs (target/debug/deps/security-31f177df094c9bd1)
+
+running 13 tests
+test liveness_is_answered_locally ... ok
+test shm_registration_is_confined_to_its_prefix_owner_and_bound ... ok
+test admin_endpoints_are_closed_until_an_admin_token_is_presented ... ok
+test the_gate_refuses_before_anything_is_decoded ... ok
+test request_ids_are_namespaced_per_caller ... ok
+test strict_mode_only_lets_a_caller_name_its_own_regions ... ok
+test implausible_client_timestamps_are_counted_not_each_logged ... ok
+test a_full_graph_answers_graph_full ... ok
+test one_identity_cannot_fill_the_graph_alone ... ok
+test an_open_request_id_cannot_be_used_twice ... ok
+test passthrough_is_bounded_by_the_payload_budget ... ok
+test a_parent_outlives_its_first_consumer ... ok
+test thousands_of_captures_are_all_delivered ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.94s
+
+     Running unittests src/lib.rs (target/debug/deps/vig_platform-52355c7b71a4817c)
+
+running 82 tests
+test actuation::tests::a_card_rounding_to_its_own_step_still_counts_as_confirmed ... ok
+test actuation::tests::a_command_that_succeeds_without_effect_is_not_confirmed ... ok
+test actuation::tests::a_competing_setter_shows_up_as_an_unobserved_request ... ok
+test actuation::tests::a_confirmed_request_becomes_the_planning_point ... ok
+test actuation::tests::a_failed_restore_does_not_claim_the_card_is_back ... ok
+test actuation::tests::a_refused_command_leaves_the_state_untouched ... ok
+test actuation::tests::a_lock_from_a_dead_process_is_taken_over ... ok
+test actuation::tests::a_target_below_the_promised_floor_is_refused ... ok
+test actuation::tests::a_target_outside_the_platform_range_is_refused_before_the_command ... ok
+test actuation::tests::a_second_governor_does_not_get_the_setting_rights ... ok
+test actuation::tests::a_tightened_floor_takes_effect_on_the_next_move ... ok
+test actuation::tests::an_observation_from_before_the_request_confirms_nothing ... ok
+test actuation::tests::a_missing_binary_is_a_permission_finding_not_a_crash ... ok
+test actuation::tests::an_observed_clock_below_the_promised_floor_is_not_confirmation ... ok
+test actuation::tests::each_device_has_its_own_lock ... ok
+test actuation::tests::an_unconfirmed_state_does_not_start_a_dwell ... ok
+test actuation::tests::restoring_without_having_set_anything_is_not_an_error ... ok
+test actuation::tests::restoring_gives_the_card_back ... ok
+test actuation::tests::the_caller_is_told_how_long_to_wait ... ok
+test actuation::tests::the_default_has_no_authority_to_set_anything ... ok
+test actuation::tests::without_any_observation_the_request_is_unconfirmed ... ok
+test actuation::tests::the_regulator_does_not_oscillate ... ok
+test actuation::tests::the_device_lock_is_exclusive ... ok
+test collector::tests::a_recording_replays_in_order_and_then_ends ... ok
+test collector::tests::a_single_failure_does_not_change_the_operating_mode ... ok
+test collector::tests::a_replay_does_not_pass_itself_off_as_a_measurement ... ok
+test collector::tests::nvidia_smi_reports_no_platform_power_mode ... ok
+test collector::tests::the_threshold_switches_to_the_qualified_profile ... ok
+test collector::tests::several_cards_are_parsed_into_one_snapshot ... ok
+test gpu::tests::a_field_the_card_does_not_report_is_unsupported_not_zero ... ok
+test gpu::tests::a_missing_clock_makes_no_statement_about_the_clock ... ok
+test gpu::tests::a_line_with_the_wrong_column_count_is_rejected ... ok
+test gpu::tests::several_reasons_come_back_in_bit_order ... ok
+test collector::tests::a_missing_binary_is_an_error_not_an_empty_snapshot ... ok
+test gpu::tests::an_unknown_bit_is_kept_not_dropped ... ok
+test gpu::tests::the_throttle_mask_becomes_a_named_reason ... ok
+test measure::tests::a_clean_run_qualifies ... ok
+test measure::tests::a_discarded_cell_yields_no_number ... ok
+test collector::tests::the_query_arguments_ask_for_exactly_the_parsed_fields ... ok
+test measure::tests::a_failure_does_not_improve_the_quantile ... ok
+test collector::tests::one_success_restores_the_operating_mode ... ok
+test measure::tests::a_long_stall_skips_many_points_without_overflowing ... ok
+test measure::tests::a_repeated_run_says_which_repetition_it_is ... ok
+test collector::tests::an_unreadable_line_is_skipped_not_guessed ... ok
+test gpu::tests::a_real_line_parses_completely ... ok
+test gpu::tests::an_idle_card_is_not_a_throttled_card ... ok
+test measure::tests::a_zero_period_does_not_stall_the_grid ... ok
+test measure::tests::an_impossible_requirement_is_reported_not_ignored ... ok
+test measure::tests::a_schedule_that_is_not_behind_skips_nothing ... ok
+test measure::tests::a_thermal_limit_during_the_cell_discards_it_with_a_reason ... ok
+test measure::tests::an_overrun_counts_twice_over ... ok
+test gpu::tests::the_query_field_list_matches_the_parser ... ok
+test measure::tests::a_stable_card_does_not_invalidate_a_cell ... ok
+test gpu::tests::an_unreadable_number_is_unavailable_not_zero ... ok
+test measure::tests::an_overrun_does_not_shift_the_grid ... ok
+test measure::tests::catching_up_exactly_on_a_grid_point_skips_nothing_extra ... ok
+test measure::tests::every_release_lands_in_exactly_one_counter ... ok
+test measure::tests::releases_lie_on_an_absolute_grid ... ok
+test measure::tests::skipped_points_can_be_booked_in_bulk ... ok
+test measure::tests::the_buffer_is_allocated_before_the_measured_loop ... ok
+test measure::tests::the_clock_on_this_machine_can_measure_a_millisecond ... ok
+test measure::tests::the_first_reason_is_the_one_that_counts ... ok
+test measure::tests::too_few_samples_discard_the_cell ... ok
+test measure::tests::too_many_failures_discard_the_cell ... ok
+test snapshot::tests::a_clock_drop_is_reported ... ok
+test snapshot::tests::a_disappearing_card_is_an_event ... ok
+test snapshot::tests::an_appearing_card_is_an_event ... ok
+test snapshot::tests::a_thermal_limit_appearing_is_visible_with_both_timestamps ... ok
+test snapshot::tests::an_unchanged_state_produces_no_events ... ok
+test snapshot::tests::clock_jitter_is_not_a_state_change ... ok
+test snapshot::tests::noise_does_not_produce_events ... ok
+test snapshot::tests::the_reason_order_does_not_matter ... ok
+test tests::a_measurement_from_the_future_is_not_extra_fresh ... ok
+test tests::exactly_at_the_limit_is_still_fresh ... ok
+test tests::freshness_separates_old_from_absent ... ok
+test tests::unsupported_and_unavailable_are_different_states ... ok
+test snapshot::tests::a_snapshot_survives_a_roundtrip ... ok
+test measure::tests::a_run_manifest_survives_a_roundtrip_and_keeps_its_denominators ... ok
+test collector::tests::a_recording_survives_a_roundtrip_and_replays_the_state_change ... ok
+test collector::tests::a_prompt_command_returns_its_output ... ok
+test actuation::tests::setting_the_clock_without_rights_is_refused_and_says_so ... ok
+test collector::tests::a_hanging_command_is_aborted_not_awaited ... ok
+
+test result: ok. 82 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running unittests src/lib.rs (target/debug/deps/vig_protocol_oip-d957bce135b4228e)
+
+running 12 tests
+test params::tests::a_misspelled_vig_parameter_is_rejected ... ok
+test params::tests::a_shared_monotonic_timestamp_is_taken_as_is ... ok
+test params::tests::all_documented_parameters_are_read ... ok
+test params::tests::a_plain_request_is_accepted_unchanged ... ok
+test params::tests::a_reported_age_is_subtracted_from_the_arrival_time ... ok
+test params::tests::a_timestamp_from_another_clock_domain_is_rejected ... ok
+test params::tests::an_implausibly_old_timestamp_is_clamped_not_rejuvenated ... ok
+test params::tests::generation_and_age_are_mutually_exclusive ... ok
+test params::tests::hostile_values_cannot_produce_an_absurd_contract ... ok
+test params::tests::small_skew_is_tolerated_and_clamped ... ok
+test params::tests::without_a_hint_the_arrival_time_is_used ... ok
+test params::tests::wrong_types_are_rejected ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/vig_sim-8d82c187277419c1)
+
+running 38 tests
+test coverage::tests::a_delivery_outside_the_window_is_not_measured ... ok
+test coverage::tests::a_fresh_result_covers_its_window ... ok
+test coverage::tests::a_late_older_frame_does_not_lower_the_age ... ok
+test coverage::tests::a_stale_delivery_does_not_shorten_a_continuous_supply_gap ... ok
+test coverage::tests::a_stale_result_does_not_cover_its_window ... ok
+test coverage::tests::a_stream_without_any_delivery_has_maximal_peak_aoi ... ok
+test coverage::tests::a_timely_delivery_still_closes_the_gap ... ok
+test coverage::tests::a_still_fresh_earlier_result_counts_in_the_next_window_too ... ok
+test coverage::tests::dropping_everything_scores_zero_coverage ... ok
+test coverage::tests::nothing_available_is_counted_apart_from_too_old ... ok
+test coverage::tests::aoi_percentiles_are_reported ... ok
+test coverage::tests::peak_aoi_counts_the_time_without_deliveries ... ok
+test coverage::tests::several_results_in_one_window_count_once ... ok
+test coverage::tests::silence_after_the_last_delivery_counts_towards_the_gap ... ok
+test coverage::tests::steady_delivery_keeps_peak_aoi_near_one_period ... ok
+test coverage::tests::the_legacy_numbers_are_untouched ... ok
+test coverage::tests::the_same_miss_rate_with_different_bursts_is_distinguished ... ok
+test decision::tests::a_small_sample_takes_its_largest_values_for_the_tail ... ok
+test decision::tests::an_empty_sample_is_all_zero ... ok
+test decision::tests::the_gate_m3_set_is_overloaded_like_the_real_gate ... ok
+test decision::tests::quantiles_follow_the_nearest_rank_rule ... ok
+test decision::tests::many_models_is_bounded_and_loaded ... ok
+test decision::tests::the_median_of_repeats_is_the_upper_middle ... ok
+test event::tests::clock_refuses_to_run_backwards ... ok
+test event::tests::events_come_out_in_time_order ... ok
+test event::tests::simultaneous_events_keep_insertion_order ... ok
+test rng::tests::different_streams_are_independent ... ok
+test workload::tests::constant_distribution_never_varies ... ok
+test workload::tests::distribution_matches_its_calibration_points ... ok
+test workload::tests::periodic_stream_separates_capture_from_arrival ... ok
+test workload::tests::impossible_profiles_are_rejected ... ok
+test rng::tests::bounded_is_within_range_and_covers_it ... ok
+test rng::tests::same_seed_yields_identical_sequence ... ok
+test workload::tests::jitter_stays_within_its_bound ... ok
+test rng::tests::normal_has_expected_moments ... ok
+test workload::tests::sampled_distribution_matches_analytic_quantile ... ok
+test decision::tests::observing_does_not_change_the_run ... ok
+test decision::tests::the_gate_m3_trace_exercises_supersession_and_variants ... ok
+
+test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+
+     Running unittests src/bin/decision-bench.rs (target/debug/deps/decision_bench-27b807678deb7f77)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/gate-s.rs (target/debug/deps/gate_s-f0098da9138dc326)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/bursts_and_frontier.rs (target/debug/deps/bursts_and_frontier-57c311d79bc38fd8)
+
+running 5 tests
+test tables ... ignored, druckt die Tabellen der Analyse
+test a_fixed_large_variant_cannot_supply_when_its_runtime_reaches_the_period ... ok
+test where_the_large_variant_supplies_it_is_kept ... ok
+test under_bursts_the_window_metric_measures_phase_not_supply ... ok
+test under_overload_the_automatic_choice_supplies_like_the_small_variant ... ok
+
+test result: ok. 4 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.93s
+
+     Running tests/margin_learning.rs (target/debug/deps/margin_learning-3d09d78b5c21e90a)
+
+running 8 tests
+test the_edge_matrix ... ignored, Messmatrix, ~1 min im Release-Build
+test the_plan_size_trade_off ... ignored, Beleg, ~10 s im Release-Build
+test an_optimistic_profile_is_corrected_within_the_first_completions ... ok
+test a_pessimistic_profile_is_learned_below_one ... ok
+test without_learning_the_scheduler_is_bit_identical ... ok
+test at_the_edge_the_margin_decides_nothing ... ok
+test a_strongly_pessimistic_profile_starves_the_other_streams_until_it_is_learned ... ok
+test a_learned_plan_behaves_like_a_correct_profile ... ok
+
+test result: ok. 6 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 1.68s
+
+     Running tests/nv23_bounded.rs (target/debug/deps/nv23_bounded-b0d4c279e5a78006)
+
+running 13 tests
+test inside_the_assumptions_no_run_breaks_the_bound_full ... ignored, ausfuehrliche Suche, einige Minuten im Release-Build
+test every_assumption_is_checked ... ok
+test the_bounds_are_the_formulas_of_the_analysis ... ok
+test the_plan_uses_the_cores_integer_margin ... ok
+test a_late_frame_the_guard_gave_up_on_waits_for_the_whole_background_job ... ok
+test the_bound_is_reached_exactly ... ok
+test background_before_the_first_frame_is_the_start_up_exception ... ok
+test when_a_frame_can_still_wait_at_the_next_arrival_it_is_superseded ... ok
+test with_an_envelope_a_late_frame_is_not_given_up ... ok
+test a_background_job_that_overruns_its_plan_breaks_the_bound ... ok
+test the_deadline_counts_from_the_capture_not_the_arrival ... ok
+test an_arrival_beyond_the_old_horizon_is_protected ... ok
+test inside_the_assumptions_no_run_breaks_the_bound ... ok
+
+test result: ok. 12 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 23.25s
+
+     Running tests/supply_guard.rs (target/debug/deps/supply_guard-1f7c99994d03313e)
+
+running 6 tests
+test the_supply_matrix ... ignored, Messmatrix, Ausgabe fuer das ADR
+test without_a_supply_window_nothing_changes ... ok
+test the_supply_guard_also_pays_where_nothing_had_to_be_rescued ... ok
+test the_supply_guard_costs_background_progress ... ok
+test work_that_keeps_every_deadline_still_costs_the_consumer_its_supply ... ok
+test the_supply_guard_closes_the_gaps ... ok
+
+test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.71s
+
+     Running tests/wp1_determinism.rs (target/debug/deps/wp1_determinism-d6eb60b6b99e61a8)
+
+running 3 tests
+test digest_detects_reordering ... ok
+test wp1_same_seed_reproduces_run_exactly ... ok
+test wp1_different_seed_changes_the_run ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+
+   Doc-tests vig_backend_triton
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests vig_bench
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests vig_config
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests vig_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests vig_gateway
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests vig_platform
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests vig_protocol_oip
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests vig_sim
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
