@@ -257,16 +257,25 @@ def _panel(draw: ImageDraw.ImageDraw, top: int, height: int, title_text: str) ->
               anchor="lm")
 
 
-def _source(draw: ImageDraw.ImageDraw, path: Path, y: int, date: str = "") -> None:
+def _source(draw: ImageDraw.ImageDraw, path: Path, y: int, date: str = "",
+            treatment: str = "only the German headings translated") -> None:
     """Quellenangabe im Bild: welche Datei, welches Datum, was uebersetzt wurde.
 
     Ohne diese Zeile waere die englische Tabelle eine Behauptung. Mit ihr kann
     jeder die Zahl in der genannten Datei nachschlagen — und sieht zugleich,
-    dass an ihr nichts uebersetzt wurde ausser der Ueberschrift darueber.
+    was auf dem Weg ins Bild mit ihr geschehen ist.
+
+    `treatment` ist ein Parameter und keine Konstante, weil die Antwort nicht
+    fuer jede Quelle dieselbe ist. Die Protokolle von `vig doctor` und
+    `gate-m3` sind deutsch und werden zeilenweise uebersetzt; die
+    Qualifikationsdatei von `vig autotune` ist in den Feldern, die das Bild
+    zeigt, bereits englisch. Dort "uebersetzt" zu behaupten, waere eine
+    falsche Angabe zur Methode — klein, aber in einem Projekt, das Belegbarkeit
+    verkauft, genau die falsche Stelle zum Schlampen.
     """
     draw.text((130, y),
               f"source: {report.source_label(path, date)}  ·  numbers read from "
-              f"that file, only the German headings translated",
+              f"that file, {treatment}",
               font=font(SANS, 22), fill=DIM)
 
 
@@ -619,7 +628,11 @@ def autotune(scene, progress: float) -> Image.Image:
               "It refuses to certify on data it threw away — and tells you how "
               "much it threw away.",
               font=font(SANS, 25), fill=DIM)
-    _source(draw, path, below + 38, scene.data.get("date", ""))
+    # Hier wurde nichts uebersetzt: die Felder, die dieses Bild zeigt, stehen
+    # englisch in der Datei. Die Standardangabe der anderen Szenen waere an
+    # dieser Stelle schlicht unwahr.
+    _source(draw, path, below + 38, scene.data.get("date", ""),
+            treatment="shown unchanged")
     return image
 
 
