@@ -185,6 +185,28 @@ you: the three load cases, the consumer-side view next to the window view, and
 the same verdict tool an evaluation would use — including the verdict "you do
 not need this", which is one of its normal answers.
 
+**And here is what it found, so that your own machine is not the first to tell
+you.** RTX 3070 laptop, three runs per case, 14.09.2026: with a detector beside
+a language model the direct path won outright — 100 % against 33 % detector
+coverage, *and* more background reports. With two detector sizes side by side
+the direct path won as well (99–100 % against 89–94 %). Four cameras on one
+detector could not be calibrated on that card at all. `vig-fit` printed its
+verdict "you do not need this" in two of three runs.
+
+That does not contradict the table at the top of this page — it marks its edge,
+and the edge is the honest part. These public pairs land at 47 % and 91 % of
+one GPU slot; Gate M3 measures at 103 %, and the knee sits between 100 and
+110 %. Below saturation there is nothing to arbitrate, so the governor only
+costs its own overhead, and the counters say so plainly: nothing superseded,
+nothing stale, nothing held back.
+
+So what the reproduction actually proves is narrower than we would like, and
+still worth something: **the tools run on models we did not choose, and they
+report their own limit instead of flattering us.** What stays open is the
+claim above saturation with public models — for that we still need a pair that
+pushes an 8 GB laptop card past 100 % without the profile measurement failing
+on a wandering clock. The gap is named in the walkthrough, not hidden in it.
+
 Details, and the two pitfalls that cost us an afternoon:
 [reproduce it on your machine](docs/benchmark/reproduce.md).
 
