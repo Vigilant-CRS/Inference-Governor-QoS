@@ -239,9 +239,7 @@ async fn run() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_HOURS);
-    let out_dir = std::env::var("SOAK_OUT").unwrap_or_else(|_| {
-        "/run/media/dd/USB_40281/Projekte/InferenceQoS-runtime/soak".to_owned()
-    });
+    let out_dir = std::env::var("SOAK_OUT").unwrap_or_else(|_| "soak".to_owned());
     std::fs::create_dir_all(&out_dir).expect("Ausgabeverzeichnis");
     let metrics_port: u16 = 9490;
 

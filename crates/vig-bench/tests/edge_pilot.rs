@@ -143,7 +143,14 @@ async fn start_gateway(backend: &str) -> String {
             .serve_with_incoming(incoming)
             .await;
     });
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // Auf einem geteilten CI-Runner reicht ein fester Schlaf nicht: warten,
+    // bis der Server wirklich annimmt.
+    for _ in 0..200 {
+        if tokio::net::TcpStream::connect(&address).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
     address
 }
 
