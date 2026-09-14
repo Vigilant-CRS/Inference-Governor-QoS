@@ -89,8 +89,35 @@ abgesichert werden konnten.
   vernichtet, wird kein zweites Mal gestartet.
 - **Die Dauer ist eine Zusage.** Der Befehl schaetzt vorab und nennt, wenn
   der volle Umfang laenger dauert als die zugesagte halbe Stunde, den
-  kuerzeren Umfang (`--quick`, `--only`). Ein Unittest haelt die Schaetzung
-  gegen die Zusage.
+  kuerzeren Umfang (`--quick`, `--only`).
+
+  Die erste Fassung dieser Zusage pruefte sich selbst nicht: Die Schaetzung
+  bestand aus vier festen Konstanten, deren Summe (1065 s) die Schwelle
+  (1800 s) nie erreichen konnte — der Hinweis auf `--quick` war toter Code,
+  und der Unittest verglich eine Konstantensumme mit einer Konstanten, konnte
+  also auch dann nicht fehlschlagen, wenn ein echter Lauf Stunden gebraucht
+  haette. Seitdem haengt die Schaetzung an der tatsaechlichen Matrix
+  (Modelle, Slots, Proben; die Paarmessung waechst quadratisch), und ein Test
+  belegt, dass die Warnung bei grosser Matrix **ausloest**.
+
+  **Was die Schaetzung nicht kann:** die Laufzeit der Modelle vorhersagen,
+  die sie noch nicht gemessen hat. Der Faktor stammt von der
+  Referenzmaschine; auf dem Pixel 2 dauert ein Detektoraufruf zehnmal so
+  lange. Die Ansage sagt das jetzt dazu, statt eine Genauigkeit zu
+  behaupten, die vor der ersten Messung niemand haben kann.
+- **Eine Fortsetzung vervollstaendigt den Bericht, statt ihn zu kuerzen.**
+  Der Zustand traegt den ganzen bisherigen Stand — Schritte, verworfene
+  Reihen, Urteile, den Pfad der eingefrorenen Konfiguration — und nicht nur
+  die Namen der erledigten Schritte. Vorher begann ein fortsetzender Lauf mit
+  einer leeren Qualifikation und ueberschrieb die Berichte damit: Nach einem
+  Abbruch hinter `measure` nannte der fertige Bericht weder die verworfenen
+  Reihen noch die entstandene Konfiguration, obwohl beides auf der Platte lag.
+  Ein Test faehrt diesen Fall ueber zwei Aufrufe.
+
+  Dazu traegt der Zustand einen Fingerabdruck aus Endpunkt und
+  Konfigurations-Hash. Wechselt einer von beiden zwischen zwei Aufrufen, gilt
+  der alte Stand nicht mehr — sonst liefen `fit` und `check` gegen eine
+  Messung von einer anderen Maschine, ohne ein Wort darueber.
 - **Die Validierung gegen die eigenen Aufbauten hat drei Luecken gezeigt**
   ([validierung-autotune.md](../benchmark/validierung-autotune.md)), die
   offen bleiben:
@@ -113,6 +140,18 @@ abgesichert werden konnten.
     mit demselben `samples:` und derselben `source:` da wie ein frisch
     gemessener. Der Bericht sagt, wie viele Reihen verwertbar waren; die
     Datei, die in Betrieb geht, sagt es nicht.
+
+    **Das gilt weiterhin fuer die Soloprofile.** Fuer die
+    **Interferenztabelle** war es schlimmer und ist behoben: Dort loeschte
+    `apply()` die Tabelle bedingungslos und schrieb nur die Paare zurueck,
+    die dieser Lauf messen konnte. Ein frueher gemessener Aufschlag
+    verschwand damit ersatzlos, und ein verworfenes Paar war in der Datei
+    nicht mehr von einem Paar zu unterscheiden, das gemessen und fuer
+    unkritisch befunden wurde. Entfernt wird jetzt nur, was dieser Lauf neu
+    setzt, was er serialisiert und was er messen wollte und verwerfen musste;
+    die verworfenen Paare nennt der Lauf ausdruecklich. Nebenbei fiel dabei
+    auf, dass ein Lauf mit `slots: 1` — der gar keine Paare misst — die
+    Tabelle trotzdem leerte.
 - **Was offen bleibt:** `autotune` misst Versorgung, nicht Erkennungsguete;
   es sagt nichts ueber andere Hardware als die, auf der es lief, und nichts
   ueber Stunden — dafuer gibt es den Dauerlauf. Ob die Belegungsstufe des

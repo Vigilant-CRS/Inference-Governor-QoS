@@ -589,11 +589,12 @@ pub(crate) async fn run(
         }
     }
 
-    let (pairs, directed) = if slots > 1 {
+    let pairs_measured = slots > 1;
+    let (pairs, directed, discarded_pairs) = if pairs_measured {
         Box::pin(measure_pairs(&clients, &measurements, samples, period_us)).await
     } else {
         eprintln!("\nEin Slot: Modellpaare koennen sich nicht behindern, keine Paarmessung.");
-        (Vec::new(), Vec::new())
+        (Vec::new(), Vec::new(), Vec::new())
     };
 
     let cooperative = Box::pin(measure_all_cooperative(&config)).await;
@@ -606,7 +607,14 @@ pub(crate) async fn run(
     ))
     .await;
 
-    apply(&mut config, &measurements, &pairs, &directed);
+    apply(
+        &mut config,
+        &measurements,
+        &pairs,
+        &directed,
+        &discarded_pairs,
+        pairs_measured,
+    );
     report_qualification();
     apply_cooperative(&mut config, &cooperative);
     apply_preemption(&mut config, &preemption);
@@ -659,11 +667,18 @@ async fn measure_pairs(
     measurements: &[VariantMeasurement],
     samples: usize,
     period_us: Option<u64>,
-) -> (Vec<Pair>, Vec<Directed>) {
+) -> (Vec<Pair>, Vec<Directed>, Vec<(String, String)>) {
     // Beide Richtungen, und zwar getrennt (NV-11). Bis hierhin wurde nur eine
     // gemessen und das Ergebnis symmetrisch angewandt — genau der Fehler, um
     // den es geht.
     let mut directed: Vec<Directed> = Vec::new();
+    // Die Paare, deren Reihe verworfen wurde. Sie muessen den Aufrufer
+    // erreichen: Ein Paar, das gemessen werden sollte und dessen Reihe der
+    // Takt zerschossen hat, ist etwas anderes als ein Paar, das gemessen und
+    // fuer unkritisch befunden wurde. Ohne diese Liste sehen beide in der
+    // Konfiguration gleich aus — dieselbe Verwechslung, die ADR-0044 fuer
+    // Soloprofile ausdruecklich ausschliesst.
+    let mut discarded: Vec<(String, String)> = Vec::new();
     eprintln!("\nPaarmessung (gerichtet, beide Richtungen):");
     for victim in measurements {
         for co_tenant in measurements {
@@ -691,7 +706,11 @@ async fn measure_pairs(
             // Messung lief unter einer Nebenlast, die niemand angegeben hatte.
             stop_load(&stop, tasks).await;
             let Some(under) = under.as_ref().map(quantiles) else {
-                eprintln!("    Paarmessung ohne verwertbare Reihe; das Paar faellt aus");
+                eprintln!(
+                    "    {} neben {}: Reihe verworfen, kein Aufschlag gesetzt",
+                    victim.logical, co_tenant.logical
+                );
+                discarded.push((victim.logical.clone(), co_tenant.logical.clone()));
                 continue;
             };
 
@@ -740,7 +759,30 @@ async fn measure_pairs(
         });
     }
     report_asymmetry(&directed);
-    (pairs, directed)
+    report_discarded_pairs(&discarded);
+    (pairs, directed, discarded)
+}
+
+/// Nennt die Paare, fuer die dieser Lauf keinen Aufschlag festgestellt hat.
+///
+/// Ohne diese Zeile verschwindet ein verworfenes Paar lautlos: In der
+/// geschriebenen Konfiguration steht dann kein Eintrag — genau wie bei einem
+/// Paar, das gemessen wurde und sich nicht behindert. Der Unterschied ist
+/// aber der ganze Punkt: Das eine ist eine Feststellung, das andere eine
+/// Luecke.
+fn report_discarded_pairs(discarded: &[(String, String)]) {
+    if discarded.is_empty() {
+        return;
+    }
+    eprintln!(
+        "\nOhne Interferenzwert geblieben ({} Paar(e)) — die Reihe wurde verworfen,\n\
+         und es steht deshalb **kein** Aufschlag in der Konfiguration. Das ist\n\
+         keine Feststellung, dass sich die beiden nicht behindern:",
+        discarded.len()
+    );
+    for (victim, co_tenant) in discarded {
+        eprintln!("  {victim} neben {co_tenant}");
+    }
 }
 
 /// Nennt die Paare, deren Richtungen deutlich auseinanderliegen (NV-11).
@@ -1156,6 +1198,8 @@ fn apply(
     measurements: &[VariantMeasurement],
     pairs: &[Pair],
     directed: &[Directed],
+    discarded_pairs: &[(String, String)],
+    pairs_measured: bool,
 ) {
     for (name, model) in &mut config.models {
         for variant in &mut model.variants {
@@ -1192,7 +1236,38 @@ fn apply(
     //
     // Ein Paar, das ohnehin serialisiert wird, braucht keinen Aufschlag: die
     // beiden laufen nie gleichzeitig.
-    config.backend.interference.clear();
+    // Nur anfassen, was dieser Lauf auch gemessen hat.
+    //
+    // Vorher stand hier ein bedingungsloses `clear()`. Das hatte zwei Folgen,
+    // die beide der Ehrlichkeitsregel widersprechen:
+    //
+    // * Bei `slots: 1` laeuft **gar keine** Paarmessung — der Lauf loeschte
+    //   also eine Tabelle, die er nie angefasst hat.
+    // * Wurde die Reihe eines Paares verworfen, verschwand sein frueher
+    //   gemessener Eintrag ersatzlos. In der Datei ist das von „gemessen und
+    //   unkritisch" nicht zu unterscheiden, und genau diese Verwechslung
+    //   schliesst ADR-0044 fuer Soloprofile aus.
+    //
+    // Entfernt wird deshalb nur, was dieser Lauf neu setzt (`directed`), was
+    // er serialisiert (`pairs`, dort braucht es keinen Aufschlag) und was er
+    // messen wollte und verwerfen musste (`discarded_pairs` — der Wert bleibt
+    // ungesetzt, und `report_discarded_pairs` sagt es laut). Alles andere
+    // bleibt stehen.
+    if pairs_measured {
+        config.backend.interference.retain(|existing| {
+            let re_measured = directed
+                .iter()
+                .any(|d| d.victim == existing.victim && d.co_tenant == existing.co_tenant);
+            let thrown_away = discarded_pairs.iter().any(|(victim, co_tenant)| {
+                *victim == existing.victim && *co_tenant == existing.co_tenant
+            });
+            let serialised = pairs.iter().any(|p| {
+                (p.a == existing.victim && p.b == existing.co_tenant)
+                    || (p.b == existing.victim && p.a == existing.co_tenant)
+            });
+            !(re_measured || thrown_away || serialised)
+        });
+    }
     for entry in directed {
         let serialised = pairs.iter().any(|p| {
             (p.a == entry.victim && p.b == entry.co_tenant)

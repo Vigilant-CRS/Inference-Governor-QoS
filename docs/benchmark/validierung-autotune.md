@@ -247,7 +247,7 @@ Operator auf der CPU (die NMS-Nachbearbeitung, 266 von 267 Knoten auf der
 GPU). Was davon die Ursache ist, sagt diese Messung nicht; sie wird hier
 festgehalten und nicht weiter verfolgt.
 
-### 4. Die eingefrorene Konfiguration unterscheidet gemessen und uebernommen nicht (offen)
+### 4. Die eingefrorene Konfiguration unterscheidet gemessen und uebernommen nicht (Soloprofile offen, Interferenztabelle behoben)
 
 Wird eine Reihe verworfen, bleibt der vorhandene Wert stehen — richtig so,
 geschaetzt wird nichts. Er steht danach aber mit demselben `samples:` und
@@ -255,6 +255,22 @@ derselben `source:` da wie ein frisch gemessener. Auf dem Laptop gingen drei
 von vier Profilen unveraendert aus der Eingabe in die erzeugte Datei, ohne
 Kennzeichnung. Der Bericht sagt „1 von 4 Reihen verwertbar"; die Datei, die
 in Betrieb geht, sagt es nicht.
+
+**Fuer die Soloprofile gilt das unveraendert.** Fuer die
+**Interferenztabelle** war derselbe Befund schaerfer und ist behoben: Dort
+leerte `apply()` die gerichtete Tabelle bedingungslos und schrieb nur die
+Paare zurueck, die dieser Lauf messen konnte. Ein frueher gemessener
+Aufschlag verschwand damit **ersatzlos** — schlimmer als ein veralteter Wert,
+denn eine fehlende Zeile ist von „gemessen und unkritisch" nicht zu
+unterscheiden. Entfernt wird jetzt nur, was dieser Lauf neu setzt, was er
+serialisiert und was er messen wollte und verwerfen musste; die verworfenen
+Paare nennt der Lauf ausdruecklich beim Namen. Beim Reparieren fiel
+ausserdem auf, dass ein Lauf mit `slots: 1` die Tabelle ebenfalls leerte,
+obwohl er gar keine Paare misst.
+
+Die Kennzeichnung der Soloprofile bleibt damit der offene Rest — sie braucht
+ein Feld im Schema, das zwischen „in diesem Lauf gemessen" und „aus der
+Eingabe uebernommen" unterscheidet.
 
 ### 5. Der Bericht wechselt mitten im Dokument die Sprache (offen)
 

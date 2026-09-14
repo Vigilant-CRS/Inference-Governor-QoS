@@ -5,6 +5,42 @@ bedeutet, steht in [docs/releases.md](docs/releases.md).
 
 ## [Unveroeffentlicht]
 
+### Behoben
+
+- **Vier Befunde aus dem Review von `vig autotune`**, alle in derselben
+  Familie: Das Werkzeug verlor oder verwischte Angaben, die es laut ADR-0044
+  nennen muss.
+  - **Eine Fortsetzung kuerzte den Bericht.** Nach einem Abbruch hinter
+    `measure` begann der naechste Aufruf mit einer leeren Qualifikation und
+    ueberschrieb `qualification.json`, `.md` und `state.json` damit. Der
+    fertige Bericht nannte danach weder die verworfenen Reihen noch die
+    eingefrorene Konfiguration (`"config": null`), obwohl beides auf der
+    Platte lag; ein zweiter Abbruch haette die ganze Messung wiederholt. Der
+    Zustand traegt jetzt den vollstaendigen Stand, und ein Test faehrt den
+    Fall ueber zwei Aufrufe.
+  - **Ein Stand von woanders galt weiter.** `state.json` nannte nur
+    Schrittnamen. Wer zwischen zwei Aufrufen den Endpunkt wechselte oder die
+    Konfiguration aenderte, bekam die alten Schritte angerechnet — `fit` und
+    `check` liefen dann gegen eine Messung von einer anderen Maschine. Ein
+    Fingerabdruck aus Endpunkt und Konfigurations-Hash verwirft solche
+    Staende und sagt es.
+  - **Eine verworfene Interferenzmessung sah aus wie „gemessen und
+    unkritisch".** `vig calibrate` leerte die gerichtete Tabelle
+    bedingungslos und schrieb nur die diesmal gelungenen Paare zurueck. Ein
+    frueher gemessener Aufschlag verschwand damit spurlos — und ein Lauf mit
+    `slots: 1`, der gar keine Paare misst, leerte die Tabelle ebenfalls.
+    Entfernt wird jetzt nur, was dieser Lauf neu setzt, serialisiert oder
+    verwerfen musste; die verworfenen Paare werden benannt.
+  - **Die Dauerzusage konnte sich nicht selbst pruefen.** Die Schaetzung
+    bestand aus vier festen Konstanten (Summe 1065 s) und lag damit immer
+    unter der Schwelle von 1800 s: Der Hinweis „laenger als die zugesagte
+    halbe Stunde, nutze `--quick`" war unerreichbar, und der zugehoerige
+    Test verglich eine Konstantensumme mit einer Konstanten. Die Schaetzung
+    haengt jetzt an Modellzahl, Slots und `--samples` — die Paarmessung
+    waechst quadratisch —, die Ansage nennt die Matrix, auf der sie beruht,
+    und sagt dazu, dass sie die Hardware **nicht** kennt. Ein Test belegt,
+    dass die Warnung ausloest.
+
 ### Hinzugefuegt
 
 - **`vig autotune` qualifiziert die eigene Hardware — ohne uns.** Ein Befehl

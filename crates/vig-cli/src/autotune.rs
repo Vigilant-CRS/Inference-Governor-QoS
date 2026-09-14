@@ -121,16 +121,10 @@ impl Step {
     ///
     /// Bewusst grob und eher zu hoch: Wer eine halbe Stunde einplant und nach
     /// zwanzig Minuten fertig ist, ist zufrieden; umgekehrt nicht.
-    const fn rough_seconds(self, quick: bool) -> u64 {
+    const fn rough_seconds(self, quick: bool, shape: RunShape) -> u64 {
         match self {
             Self::Discover => 5,
-            Self::Measure => {
-                if quick {
-                    300
-                } else {
-                    900
-                }
-            }
+            Self::Measure => shape.measure_seconds(quick),
             Self::Fit => {
                 if quick {
                     60
@@ -142,6 +136,76 @@ impl Step {
         }
     }
 }
+
+/// Wie gross der Messlauf ist, den dieser Aufruf vorhat.
+///
+/// Vorher hing die Schaetzung an nichts als dem Schritt selbst. Ein Anwender
+/// mit zwoelf Modellen und `--samples 500` bekam dieselbe Ansage wie einer mit
+/// vieren — und die eingebaute Warnung, dass die zugesagte halbe Stunde nicht
+/// reicht, konnte gar nicht ausloesen, weil die Summe fester Konstanten sie
+/// nie erreichte. Eine Zusage, die sich selbst nicht pruefen kann, ist keine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RunShape {
+    /// Modelle in der Konfiguration.
+    pub(crate) models: u64,
+    /// Slots des Backends — ab zwei werden Paare gemessen.
+    pub(crate) slots: u64,
+    /// Proben je Messreihe.
+    pub(crate) samples: u64,
+}
+
+impl RunShape {
+    /// Die Groesse, mit der dieses Werkzeug validiert wurde
+    /// (`docs/benchmark/validierung-autotune.md`): vier Modelle, zwei Slots,
+    /// 200 Proben. Sie gilt, solange die Konfiguration nicht lesbar ist.
+    pub(crate) const REFERENCE: Self = Self {
+        models: 4,
+        slots: 2,
+        samples: 200,
+    };
+
+    /// Messzellen: jedes Modell solo, dazu jedes geordnete Paar.
+    ///
+    /// Die Paarmessung ist quadratisch (`measure_pairs`, beide Richtungen
+    /// getrennt) und laeuft nur ab zwei Slots. Genau daran waechst ein Lauf,
+    /// und genau das hat die alte Schaetzung nicht gewusst.
+    const fn cells(self) -> u64 {
+        let pairs = if self.slots > 1 {
+            self.models.saturating_mul(self.models.saturating_sub(1))
+        } else {
+            0
+        };
+        self.models.saturating_add(pairs)
+    }
+
+    /// Grobe Dauer des Messschritts in Sekunden.
+    ///
+    /// Der Faktor stammt aus dem validierten Laptoplauf: 16 Zellen a 200
+    /// Proben in 28 s, also rund 9 ms je Probe. Hier stehen 20 ms — mehr als
+    /// das Doppelte, weil eine Schaetzung eher zu hoch sein soll.
+    ///
+    /// **Was er nicht kann:** die Laufzeit der Modelle vorhersagen, die er
+    /// noch nicht gemessen hat. Auf dem Pixel 2 dauert ein Detektoraufruf
+    /// 158 ms statt 15; dort ist diese Zahl deutlich zu niedrig. Die Ansage
+    /// sagt das, statt eine Genauigkeit zu behaupten, die vor der ersten
+    /// Messung niemand haben kann.
+    const fn measure_seconds(self, quick: bool) -> u64 {
+        let samples = if quick && self.samples > 50 {
+            50
+        } else {
+            self.samples
+        };
+        self.cells()
+            .saturating_mul(samples)
+            .saturating_mul(MILLIS_PER_SAMPLE)
+            .saturating_div(1000)
+            // Aufbau, Warmlauf und Vorlauf je Zelle, unabhaengig von der Groesse.
+            .saturating_add(60)
+    }
+}
+
+/// Angesetzte Dauer einer einzelnen Probe auf der Referenzmaschine.
+const MILLIS_PER_SAMPLE: u64 = 20;
 
 /// Ob der Takt der Rechenhardware waehrend der Messung beobachtbar war.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -394,10 +458,10 @@ pub(crate) fn quiet_enough(loadavg: f64) -> bool {
 }
 
 /// Die Schaetzung vor dem Start, in Sekunden.
-pub(crate) fn estimate_seconds(steps: &[Step], quick: bool) -> u64 {
-    steps
-        .iter()
-        .fold(0_u64, |sum, s| sum.saturating_add(s.rough_seconds(quick)))
+pub(crate) fn estimate_seconds(steps: &[Step], quick: bool, shape: RunShape) -> u64 {
+    steps.iter().fold(0_u64, |sum, s| {
+        sum.saturating_add(s.rough_seconds(quick, shape))
+    })
 }
 
 /// Welche Schritte dieser Lauf ausfuehrt.
@@ -620,10 +684,15 @@ pub(crate) async fn execute<S: Steps + ?Sized>(
     config: &Path,
     out_config: &Path,
     quick: bool,
+    prior: Qualification,
 ) -> Qualification {
+    // Auf dem bisherigen Stand aufbauen, nicht bei null anfangen. Sonst
+    // verliert eine Fortsetzung genau das, was der Bericht nennen muss:
+    // verworfene Reihen, den Pfad der eingefrorenen Konfiguration und die
+    // Schritte, die vor dem Abbruch liefen.
     let mut q = Qualification {
         clock: steps.clock(),
-        ..Qualification::default()
+        ..prior
     };
     for step in plan {
         println!("\n[{}] {}", step.key(), step.title());
@@ -752,6 +821,8 @@ struct Live {
     period_us: Option<u64>,
     offline: bool,
     identity: IdentityArgs,
+    /// Endpunkt und Konfigurations-Hash dieses Laufs.
+    fingerprint: String,
 }
 
 impl Live {
@@ -903,8 +974,7 @@ impl Steps for Live {
         if let Err(e) = std::fs::write(&md_path, markdown(&q, &self.endpoint)) {
             eprintln!("    Bericht nicht schreibbar: {e}");
         }
-        let state = serde_json::json!({ "done": q.done_keys() });
-        if let Err(e) = std::fs::write(&state_path, state.to_string()) {
+        if let Err(e) = std::fs::write(&state_path, state_json(&q, &self.fingerprint)) {
             eprintln!("    Zustand nicht schreibbar: {e}");
         }
     }
@@ -979,15 +1049,157 @@ fn manifest(endpoint: &str, config: Option<&Path>) -> Vec<(String, String)> {
     entries
 }
 
-/// Liest, welche Schritte ein frueherer Lauf schon erledigt hat.
-fn completed_steps(state_path: &Path) -> Vec<Step> {
+/// Die Groesse des Laufs, aus der Konfiguration gelesen.
+///
+/// Ist die Datei noch nicht da — `discover` schreibt sie erst — oder nicht
+/// lesbar, gilt die Groesse, mit der dieses Werkzeug validiert wurde. Das ist
+/// ehrlicher als eine Schaetzung aus geratenen Zahlen, und die Ansage nennt
+/// beides: worauf sie beruht und dass sie die Hardware nicht kennt.
+fn run_shape(config: &Path, samples: usize) -> RunShape {
+    let samples = u64::try_from(samples).unwrap_or(RunShape::REFERENCE.samples);
+    let fallback = RunShape {
+        samples,
+        ..RunShape::REFERENCE
+    };
+    let Ok(text) = std::fs::read_to_string(config) else {
+        return fallback;
+    };
+    let Ok(parsed) = vig_config::Config::from_yaml(&text) else {
+        return fallback;
+    };
+    RunShape {
+        models: u64::try_from(parsed.models.len()).unwrap_or(RunShape::REFERENCE.models),
+        slots: u64::try_from(parsed.backend.slots.max(1)).unwrap_or(RunShape::REFERENCE.slots),
+        samples,
+    }
+}
+
+/// Woran ein Lauf erkennt, dass er denselben Fall fortsetzt.
+///
+/// Der Zustand nannte bisher nur Schrittnamen. Wer zwischen zwei Aufrufen den
+/// Endpunkt wechselte oder die Konfiguration aenderte, bekam die alten
+/// Schritte trotzdem als erledigt angerechnet — `fit` und `check` liefen dann
+/// gegen eine `measured.yaml` von einer anderen Maschine, ohne ein Wort
+/// darueber. Der Fingerabdruck macht daraus einen erkennbaren Fall.
+fn fingerprint_of(endpoint: &str, config: &Path) -> String {
+    use sha2::Digest as _;
+    let bytes = std::fs::read(config).unwrap_or_default();
+    let digest = sha2::Sha256::digest(&bytes);
+    let short: String = format!("{digest:x}").chars().take(16).collect();
+    format!("{endpoint}|{short}")
+}
+
+/// Was ein frueherer Lauf hinterlassen hat.
+struct PriorRun {
+    /// Die Schritte, die er erledigt hat.
+    done: Vec<Step>,
+    /// Sein gesammelter Stand, als Grundlage fuer den Bericht.
+    qualification: Qualification,
+    /// Der Fingerabdruck, unter dem er lief.
+    fingerprint: Option<String>,
+}
+
+/// Liest den Stand eines frueheren Laufs.
+///
+/// Vorher las diese Stelle ausschliesslich die Namen der erledigten Schritte.
+/// Alles andere — verworfene Messreihen, das Urteil von `vig-fit`, der Pfad
+/// der eingefrorenen Konfiguration — ging bei einer Fortsetzung verloren, weil
+/// `execute` mit einer leeren `Qualification` begann und `persist` die Dateien
+/// damit ueberschrieb. Der abschliessende Bericht verschwieg dann genau das,
+/// was ADR-0044 verlangt: was gemessen wurde und was verworfen.
+/// Ein einzelner Schritteintrag aus der Zustandsdatei.
+///
+/// `None`, wenn der Eintrag keinen bekannten Schritt nennt — ein Zustand aus
+/// einer aelteren oder neueren Fassung soll den Lauf nicht zum Absturz
+/// bringen, sondern nur weniger beitragen.
+fn step_from_state(entry: &serde_json::Value) -> Option<StepResult> {
+    let step = entry
+        .get("step")
+        .and_then(serde_json::Value::as_str)
+        .and_then(Step::from_key)?;
+    let reason = entry
+        .get("reason")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let outcome = match entry.get("outcome").and_then(serde_json::Value::as_str) {
+        Some("done") => Outcome::Done,
+        Some("contaminated") => Outcome::Contaminated {
+            reason: reason.unwrap_or_default(),
+        },
+        Some("skipped") => Outcome::Skipped {
+            reason: reason.unwrap_or_default(),
+        },
+        // Ein unbekanntes Wort als „gescheitert" zu lesen ist die sichere
+        // Richtung: Es verweigert die Freigabe, statt sie aus einem
+        // Tippfehler abzuleiten.
+        _ => Outcome::Failed {
+            reason: reason.unwrap_or_else(|| "unreadable state entry".to_owned()),
+        },
+    };
+    Some(StepResult {
+        step,
+        outcome,
+        seconds: entry
+            .get("seconds")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        notes: entry
+            .get("notes")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    })
+}
+
+fn prior_state(state_path: &Path) -> PriorRun {
+    let empty = PriorRun {
+        done: Vec::new(),
+        qualification: Qualification::default(),
+        fingerprint: None,
+    };
     let Ok(text) = std::fs::read_to_string(state_path) else {
-        return Vec::new();
+        return empty;
     };
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return Vec::new();
+        return empty;
     };
-    parsed
+
+    let mut q = Qualification::default();
+    if let Some(steps) = parsed.get("steps").and_then(serde_json::Value::as_array) {
+        q.steps = steps.iter().filter_map(step_from_state).collect();
+    }
+    if let Some(series) = parsed.get("series") {
+        q.series = SeriesCount {
+            qualified: series
+                .get("qualified")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+            discarded: series
+                .get("discarded")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+        };
+    }
+    q.fit_verdict = parsed
+        .get("fit_verdict")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    q.doctor = parsed
+        .get("doctor")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    q.config = parsed
+        .get("config")
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from);
+
+    let done = parsed
         .get("done")
         .and_then(serde_json::Value::as_array)
         .map(|items| {
@@ -997,22 +1209,77 @@ fn completed_steps(state_path: &Path) -> Vec<Step> {
                 .filter_map(Step::from_key)
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+    PriorRun {
+        done,
+        qualification: q,
+        fingerprint: parsed
+            .get("fingerprint")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+    }
+}
+
+/// Der Zustand, den ein Lauf hinterlaesst.
+///
+/// Er traegt den **ganzen** bisherigen Stand und nicht nur die Schrittnamen:
+/// Ein Lauf, der fortsetzt, muss den Bericht vervollstaendigen koennen und
+/// nicht bei null anfangen.
+fn state_json(q: &Qualification, fingerprint: &str) -> String {
+    let steps: Vec<serde_json::Value> = q
+        .steps
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "step": s.step.key(),
+                "outcome": s.outcome.label(),
+                "reason": s.outcome.reason(),
+                "seconds": s.seconds,
+                "notes": s.notes,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "done": q.done_keys(),
+        "fingerprint": fingerprint,
+        "steps": steps,
+        "series": { "qualified": q.series.qualified, "discarded": q.series.discarded },
+        "fit_verdict": q.fit_verdict,
+        "doctor": q.doctor,
+        "config": q.config.as_ref().map(|p| p.display().to_string()),
+    })
+    .to_string()
 }
 
 /// Sagt vorher, wie lange es dauert — und was zu tun ist, wenn das zu lang ist.
-fn announce(steps: &[Step], quick: bool) {
-    let seconds = estimate_seconds(steps, quick);
+fn announce(steps: &[Step], quick: bool, shape: RunShape) {
+    let seconds = estimate_seconds(steps, quick, shape);
     let minutes = seconds.saturating_add(59).saturating_div(60);
     println!("{PROMISE}\n");
     println!("Planned steps ({minutes} minutes, estimated generously):");
     for step in steps {
         let each = step
-            .rough_seconds(quick)
+            .rough_seconds(quick, shape)
             .saturating_add(59)
             .saturating_div(60);
         println!("  {:<9} {} (~{each} min)", step.key(), step.title());
     }
+    println!(
+        "  based on {} models, {} slots, {} samples per series — {} cells in all.",
+        shape.models,
+        shape.slots,
+        shape.samples,
+        shape.cells()
+    );
+    // Die Grenze der Schaetzung gehoert neben die Schaetzung, nicht in eine
+    // Fussnote: Sie kennt die Groesse der Matrix, aber nicht die Laufzeit der
+    // Modelle, die sie noch nicht gemessen hat. Auf dem Pixel 2 dauert ein
+    // Detektoraufruf zehnmal so lange wie auf der Referenzmaschine.
+    println!(
+        "  The estimate scales with that matrix, not with your hardware: it assumes runtimes \
+         like the machine this was validated on. On a slower device it takes longer."
+    );
     if seconds > PROMISED_SECONDS {
         println!(
             "\nThat is longer than the half hour promised above. `--quick` measures a smaller \
@@ -1037,10 +1304,25 @@ pub(crate) async fn run(
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&options.out_dir)?;
     let state_path = options.out_dir.join("state.json");
-    let done = if options.restart {
-        Vec::new()
+    let fingerprint = fingerprint_of(&options.endpoint, &options.config);
+    let prior = prior_state(&state_path);
+    // Ein Stand von einem anderen Endpunkt oder einer geaenderten
+    // Konfiguration ist kein Stand dieses Laufs. Ihn anzurechnen hiesse,
+    // `fit` und `check` gegen eine Messung von woanders laufen zu lassen.
+    let stale = prior
+        .fingerprint
+        .as_ref()
+        .is_some_and(|seen| *seen != fingerprint);
+    let (done, prior_qualification) = if options.restart || stale {
+        if stale {
+            println!(
+                "The saved state belongs to a different endpoint or configuration; measuring \
+                 again from the start."
+            );
+        }
+        (Vec::new(), Qualification::default())
     } else {
-        completed_steps(&state_path)
+        (prior.done, prior.qualification)
     };
     if !done.is_empty() {
         let names: Vec<&str> = done.iter().map(|s| s.key()).collect();
@@ -1052,7 +1334,11 @@ pub(crate) async fn run(
         println!("Nothing left to do. Use --restart to measure again.");
         return Ok(ExitCode::SUCCESS);
     }
-    announce(&steps, options.quick);
+    announce(
+        &steps,
+        options.quick,
+        run_shape(&options.config, options.samples),
+    );
 
     let out_config = options.out_dir.join("measured.yaml");
     let mut live = Live {
@@ -1062,6 +1348,7 @@ pub(crate) async fn run(
         period_us: options.period_us,
         offline: options.offline,
         identity: identity.clone(),
+        fingerprint,
     };
 
     let qualification = Box::pin(execute(
@@ -1071,6 +1358,7 @@ pub(crate) async fn run(
         &options.config,
         &out_config,
         options.quick,
+        prior_qualification,
     ))
     .await;
 
@@ -1098,7 +1386,7 @@ pub(crate) async fn run(
 #[allow(clippy::unwrap_used, clippy::panic, clippy::unused_async_trait_impl)]
 mod tests {
     use super::{
-        Clock, Outcome, Qualification, Release, SeriesCount, Step, StepResult, Steps,
+        Clock, Outcome, Qualification, Release, RunShape, SeriesCount, Step, StepResult, Steps,
         estimate_seconds, execute, headline, json, markdown, plan, quiet_enough, summary,
     };
     use std::path::{Path, PathBuf};
@@ -1173,8 +1461,79 @@ mod tests {
             Path::new("vig.yaml"),
             Path::new("measured.yaml"),
             false,
+            Qualification::default(),
         )
         .await
+    }
+
+    /// Eine Fortsetzung darf den Bericht nicht kuerzen.
+    ///
+    /// Der Fall aus dem Review: Lauf 1 misst und verwirft drei von vier
+    /// Reihen, dann bricht er ab. Lauf 2 faehrt nur noch `fit` und `check`.
+    /// Vorher begann dieser zweite Lauf mit einer leeren `Qualification` und
+    /// ueberschrieb den Bericht damit — die verworfenen Reihen, die
+    /// eingefrorene Konfiguration und die beiden ersten Schritte waren weg.
+    #[tokio::test]
+    async fn resuming_keeps_what_the_earlier_run_measured() {
+        let prior = Qualification {
+            steps: vec![
+                StepResult {
+                    step: Step::Discover,
+                    outcome: Outcome::Done,
+                    seconds: 1,
+                    notes: vec!["4 models found at the backend".to_owned()],
+                },
+                StepResult {
+                    step: Step::Measure,
+                    outcome: Outcome::Done,
+                    seconds: 28,
+                    notes: vec!["3 of 4 series discarded".to_owned()],
+                },
+            ],
+            series: SeriesCount {
+                qualified: 1,
+                discarded: 3,
+            },
+            config: Some(PathBuf::from("measured.yaml")),
+            ..Qualification::default()
+        };
+        let mut fake = clean();
+        let q = execute(
+            &mut fake,
+            &[Step::Fit, Step::Check],
+            "127.0.0.1:8001",
+            Path::new("vig.yaml"),
+            Path::new("measured.yaml"),
+            false,
+            prior,
+        )
+        .await;
+
+        assert!(q.complete(), "alle vier Schritte im Bericht: {:?}", q.steps);
+        assert_eq!(
+            q.series,
+            SeriesCount {
+                qualified: 1,
+                discarded: 3
+            },
+            "die verworfenen Reihen des ersten Laufs bleiben im Bericht"
+        );
+        assert_eq!(
+            q.config,
+            Some(PathBuf::from("measured.yaml")),
+            "und die eingefrorene Konfiguration ebenfalls"
+        );
+        let Release::Refused { reasons } = q.release() else {
+            panic!("drei verworfene Reihen duerfen nichts offenlassen");
+        };
+        assert!(
+            reasons.iter().any(|r| r.contains("discarded")),
+            "der Grund muss die Reihen des ersten Laufs nennen: {reasons:?}"
+        );
+        assert!(
+            markdown(&q, "x").contains("not set"),
+            "und der Bericht muss weiterhin sagen, dass Werte fehlen"
+        );
     }
 
     fn clean() -> Fake {
@@ -1367,15 +1726,67 @@ mod tests {
         assert_eq!(plan(None, &Step::ALL), Vec::new());
     }
 
-    /// Die Zusage aus der Ueberschrift muss der Schaetzung standhalten.
+    /// Die Zusage gilt fuer die Groesse, mit der sie validiert wurde.
     #[test]
-    fn the_full_run_fits_into_the_promised_half_hour() {
+    fn the_reference_run_fits_into_the_promised_half_hour() {
+        let reference = RunShape::REFERENCE;
         assert!(
-            estimate_seconds(&Step::ALL, false) <= super::PROMISED_SECONDS,
+            estimate_seconds(&Step::ALL, false, reference) <= super::PROMISED_SECONDS,
             "die Schaetzung ueberschreitet die zugesagte halbe Stunde: {} s",
-            estimate_seconds(&Step::ALL, false)
+            estimate_seconds(&Step::ALL, false, reference)
         );
-        assert!(estimate_seconds(&Step::ALL, true) < estimate_seconds(&Step::ALL, false));
+        assert!(
+            estimate_seconds(&Step::ALL, true, reference)
+                < estimate_seconds(&Step::ALL, false, reference)
+        );
+    }
+
+    /// Und sie muss reissen koennen — sonst ist die Warnung toter Code.
+    ///
+    /// Der alte Test verglich die Summe fester Konstanten mit einer festen
+    /// Schwelle. Er konnte gar nicht fehlschlagen, auch dann nicht, wenn ein
+    /// echter Lauf Stunden gebraucht haette. Dieser hier haelt fest, dass die
+    /// Schaetzung mit der Matrix waechst **und** dass sie die Zusage
+    /// ueberschreitet, sobald die Matrix gross genug ist.
+    #[test]
+    fn a_large_matrix_breaks_the_promise_and_the_tool_says_so() {
+        let reference = RunShape::REFERENCE;
+        let large = RunShape {
+            models: 16,
+            slots: 4,
+            samples: 500,
+        };
+        assert!(
+            estimate_seconds(&Step::ALL, false, large)
+                > estimate_seconds(&Step::ALL, false, reference),
+            "eine groessere Matrix muss laenger dauern"
+        );
+        assert!(
+            estimate_seconds(&Step::ALL, false, large) > super::PROMISED_SECONDS,
+            "die Warnung muss erreichbar sein: {} s bei {} Zellen",
+            estimate_seconds(&Step::ALL, false, large),
+            large.cells()
+        );
+    }
+
+    /// Ein Slot heisst: keine Paarmessung, also eine viel kleinere Matrix.
+    #[test]
+    fn a_single_slot_measures_no_pairs() {
+        let one = RunShape {
+            models: 8,
+            slots: 1,
+            samples: 200,
+        };
+        let two = RunShape { slots: 2, ..one };
+        assert_eq!(one.cells(), 8, "acht Solomessungen, keine Paare");
+        assert_eq!(
+            two.cells(),
+            8 + 8 * 7,
+            "und mit zwei Slots beide Richtungen"
+        );
+        assert!(
+            estimate_seconds(&Step::ALL, false, one) < estimate_seconds(&Step::ALL, false, two)
+        );
     }
 
     #[test]
