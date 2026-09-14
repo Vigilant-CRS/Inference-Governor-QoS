@@ -890,6 +890,19 @@ fn cell_json(
 /// Governor; das Kriterium A2 gilt dann als nicht anwendbar.
 const MIN_IDEAL_PERMILLE: u64 = 500;
 
+/// Ab welcher Abdeckung der Vergleichsarm als Massstab fuer Latenz taugt.
+///
+/// P1 vergleicht Vigilants Alarmzeit mit der des Backends direkt. Versorgt
+/// dieser Arm weniger als die Haelfte der Perioden mit einem frischen
+/// Ergebnis, misst seine Alarmzeit nicht mehr seine Latenz, sondern die Zeit
+/// bis zu einem zufaelligen Treffer — ein Arm, der die Aufgabe nicht mehr
+/// erfuellt, ist kein Massstab dafuer, wie gut sie erfuellt wird. Dann tragen
+/// P3 und P4 das Urteil, die ihn an derselben Stelle ohnehin vergleichen.
+///
+/// Die Haelfte ist dieselbe Grenze wie bei [`MIN_IDEAL_PERMILLE`] und aus
+/// demselben Grund gewaehlt, nicht aus den Messwerten des Laufs vom 12.09.
+const MIN_COMPARABLE_COVERAGE_PERMILLE: u64 = 500;
+
 /// Welche Frage ein Kriterium beantwortet.
 ///
 /// Die Kriterien vom 11.09. massen zwei Dinge in einem Urteil: was der
@@ -951,10 +964,15 @@ impl RunStatus {
         }
     }
 
-    /// 0, 1 oder 2; die Funktionsprobe faellt fachlich nie durch.
+    /// 0 bestanden, 1 Planung verfehlt, 2 kaputt, 3 kein Urteil; die
+    /// Funktionsprobe faellt fachlich nie durch.
+    ///
+    /// Ein Lauf ohne auswertbares Kriterium hat frueher 0 geliefert und sah
+    /// damit aus wie ein bestandener (Review 14.09., R05). Eine Teilmatrix
+    /// erlaubt Diagnose, aber keine Freigabe: dafuer gibt es jetzt 3.
     const fn exit(self, smoke: bool) -> u8 {
         match self {
-            Self::Met | Self::NoVerdict => 0,
+            Self::Met => 0,
             Self::Missed => {
                 if smoke {
                     0
@@ -963,7 +981,101 @@ impl RunStatus {
                 }
             }
             Self::Broken => 2,
+            Self::NoVerdict => {
+                if smoke {
+                    0
+                } else {
+                    3
+                }
+            }
         }
+    }
+}
+
+/// Das Freigabeurteil: fuenf Fragen, die nicht ineinander aufgehen.
+///
+/// Ein bestandener Planungsstatus ist keine Abnahme (Review 14.09., R05). Er
+/// sagt: auf den **gemessenen** Zellen entschied der Governor besser als das
+/// Backend direkt. Ob die Matrix vollstaendig lief, ob die Anwendung ihre
+/// absoluten Schwellen haelt und ob Hardware und Backend fuer diesen Fall
+/// qualifiziert sind, sind drei weitere Fragen. Dieses Binary beantwortet
+/// keine davon positiv, solange sie offen ist — „nicht anwendbar", eine
+/// Teilmatrix oder ein Teilversuch erzeugen deshalb nie eine Freigabe.
+struct Release {
+    /// Lief die geplante Matrix vollstaendig durch?
+    ablauf: &'static str,
+    /// Das Urteil der Gruppe Planung.
+    planung: &'static str,
+    /// Das Urteil der Gruppe Anwendung.
+    anwendung: &'static str,
+    /// Hardware und Backend: das kann ein Messlauf nicht ueber sich selbst
+    /// feststellen, deshalb immer `nicht_bewertet`.
+    qualifikation: &'static str,
+    /// Die Gesamtfreigabe.
+    freigabe: &'static str,
+    /// Warum die Freigabe so lautet.
+    grund: String,
+}
+
+/// Leitet das Freigabeurteil aus Status, Kriterien und Ablauf ab.
+///
+/// `cells` ist `(gemessen, geplant)`; `None` heisst, dass der Lauf vor der
+/// Matrix abgebrochen ist.
+fn release_verdict(
+    status: RunStatus,
+    criteria: &[Criterion],
+    cells: Option<(u64, u64)>,
+) -> Release {
+    let ablauf = match (status, cells) {
+        (RunStatus::Broken, _) | (_, None) => "kaputt",
+        (_, Some((measured, total))) if total > 0 && measured >= total => "vollstaendig",
+        _ => "unvollstaendig",
+    };
+    let planung = match status {
+        RunStatus::Met => "bestanden",
+        RunStatus::Missed => "verfehlt",
+        RunStatus::NoVerdict | RunStatus::Broken => "kein_urteil",
+    };
+    let application = |f: fn(&&Criterion) -> bool| criteria.iter().filter(f).count();
+    let anwendung = if status == RunStatus::Broken
+        || application(|c| c.group == Group::Anwendung && c.applicable) == 0
+    {
+        "kein_urteil"
+    } else if application(|c| c.group == Group::Anwendung && c.applicable && !c.ok) > 0 {
+        "verfehlt"
+    } else {
+        "bestanden"
+    };
+    // Ein Messlauf kann nicht bestaetigen, dass diese Hardware und dieses
+    // Backend fuer den Einsatzfall qualifiziert sind; er kennt nur sich selbst.
+    let qualifikation = "nicht_bewertet";
+    let grund = if ablauf != "vollstaendig" {
+        format!("Ablauf {ablauf}: ohne vollstaendige Matrix gibt es keine Freigabe")
+    } else if planung != "bestanden" {
+        format!("Planung {planung}")
+    } else if anwendung != "bestanden" {
+        format!("Anwendung {anwendung}: die absoluten Schwellen tragen hier kein Urteil")
+    } else {
+        "Planung und Anwendung bestanden; die Qualifikation von Hardware und \
+         Backend steht aus und gehoert nicht in diesen Lauf"
+            .to_owned()
+    };
+    let freigabe = if ablauf == "vollstaendig"
+        && planung == "bestanden"
+        && anwendung == "bestanden"
+        && qualifikation == "bestaetigt"
+    {
+        "empfohlen"
+    } else {
+        "nicht_empfohlen"
+    };
+    Release {
+        ablauf,
+        planung,
+        anwendung,
+        qualifikation,
+        freigabe,
+        grund,
     }
 }
 
@@ -974,11 +1086,23 @@ fn write_summary(
     criteria: &[Criterion],
     problem: Option<&str>,
     run: &Value,
+    cells: Option<(u64, u64)>,
 ) {
+    let release = release_verdict(status, criteria, cells);
     let summary = json!({
         "status": status.label(),
         "exit": status.exit(smoke),
         "smoke": smoke,
+        "freigabe": {
+            "ablauf": release.ablauf,
+            "planung": release.planung,
+            "anwendung": release.anwendung,
+            "qualifikation": release.qualifikation,
+            "freigabe": release.freigabe,
+            "grund": release.grund,
+            "zellen_gemessen": cells.map(|(m, _)| m),
+            "zellen_geplant": cells.map(|(_, t)| t),
+        },
         "problem": problem,
         "criteria": criteria
             .iter()
@@ -1035,6 +1159,7 @@ fn main() -> ExitCode {
                 &[],
                 Some("Abbruch durch eine Panik, siehe Protokoll"),
                 &Value::Null,
+                None,
             );
             ExitCode::from(RunStatus::Broken.exit(smoke))
         },
@@ -1224,6 +1349,7 @@ async fn run(options: &Options) -> u8 {
                 &[],
                 Some(&problem),
                 &Value::Null,
+                None,
             );
             return RunStatus::Broken.exit(options.smoke);
         }
@@ -1441,6 +1567,7 @@ async fn run(options: &Options) -> u8 {
             &[],
             Some(&problem),
             &run_facts,
+            None,
         );
         drop(regions);
         return RunStatus::Broken.exit(options.smoke);
@@ -1509,14 +1636,20 @@ async fn run(options: &Options) -> u8 {
             ) {
                 let direct_meets = get(name, Arm::Direct, |s| s.missed_permille)
                     .is_some_and(|m| meets_absolute(direct_p95, m));
+                // Ein relatives Kriterium braucht einen Vergleichsarm, der die
+                // Aufgabe noch erfuellt. Versorgt er weniger als die Haelfte
+                // der Perioden, ist seine Alarmzeit die Zeit bis zu einem
+                // zufaelligen Treffer und kein Massstab; dann tragen P3 und P4
+                // das Urteil (Review 14.09.).
+                let direct_cov = get(name, Arm::Direct, |s| s.coverage_permille).unwrap_or(0);
                 push(
                     "P1",
                     Group::Planung,
                     format!(
-                        "{name}: Alarm p95 {p95} ms gegen direkt {direct_p95} ms (≥ 30 % kuerzer, oder direkt erfuellt A1 selbst: {direct_meets})"
+                        "{name}: Alarm p95 {p95} ms gegen direkt {direct_p95} ms (≥ 30 % kuerzer, oder direkt erfuellt A1 selbst: {direct_meets}); Vergleichsarm versorgt {direct_cov} ‰ (anwendbar ab {MIN_COMPARABLE_COVERAGE_PERMILLE} ‰)"
                     ),
                     p95 * 10 <= direct_p95 * 7 || direct_meets,
-                    true,
+                    direct_cov >= MIN_COMPARABLE_COVERAGE_PERMILLE,
                 );
             }
             if let (Some(recall), Some(direct_recall)) = (
@@ -1686,6 +1819,23 @@ async fn run(options: &Options) -> u8 {
             "\nAnwendung: {application_missed} verfehlt, {application_na} nicht anwendbar — das aendert den Exitcode nicht."
         );
     }
+    let measured_cells = u64::try_from(store.done.len()).unwrap_or(u64::MAX);
+    let cells = Some((measured_cells, total_cells));
+    let release = release_verdict(status, &criteria, cells);
+    println!(
+        "\nFreigabeurteil — fuenf getrennte Fragen (docs/pilot/edge-pilot.md):\n  \
+         Ablauf          {} ({measured_cells} von {total_cells} Zellen)\n  \
+         Planung         {}\n  \
+         Anwendung       {}\n  \
+         Qualifikation   {} (Hardware und Backend; ein Messlauf stellt das nicht ueber sich selbst fest)\n  \
+         Freigabe        {} — {}",
+        release.ablauf,
+        release.planung,
+        release.anwendung,
+        release.qualifikation,
+        release.freigabe,
+        release.grund,
+    );
     println!(
         "\nErgebnis: {} (Exitcode {}{}), Ablage {}",
         status.label(),
@@ -1704,6 +1854,7 @@ async fn run(options: &Options) -> u8 {
         &criteria,
         None,
         &run_facts,
+        cells,
     );
     drop(regions);
     status.exit(options.smoke)

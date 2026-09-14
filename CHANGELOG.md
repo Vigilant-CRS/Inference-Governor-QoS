@@ -253,6 +253,22 @@ Verbindungsgrenze am Metrikport.
 
 ### Behoben
 
+- **Ein Pilotlauf ohne auswertbares Kriterium sah aus wie ein bestandener**
+  (Review 14.09., R05). `RunStatus::NoVerdict` lieferte Exitcode 0. Jetzt
+  liefert eine Teilmatrix **3**, und neben dem Status steht ein
+  Freigabeurteil aus fuenf getrennten Feldern — Ablauf, Planung, Anwendung,
+  Qualifikation, Freigabe — in der Ausgabe und in `summary.json` unter
+  `freigabe`. `qualifikation` lautet nie „bestaetigt": ein Messlauf stellt
+  ueber seine eigene Hardware nichts fest, also kann dieses Binary eine
+  Freigabe nur verweigern und begruenden. Dazu gilt **P1** nur noch, solange
+  der Vergleichsarm mindestens 500 Promille der Perioden versorgt — ein Arm
+  mit 0 Promille Abdeckung ist kein Massstab fuer Latenz
+  ([edge-pilot.md](docs/pilot/edge-pilot.md)).
+- **Das Basisalter eines Lageberichts nannte die juengste Kamera**
+  (Review 14.09., R06). Der Prompt enthaelt die Detektionen aller Kameras; aus
+  einer 1 s und einer 10 s alten Quelle wurde ein Bericht mit „1 s". Gemeldet
+  wird jetzt die **aelteste** verwendete Quelle, und `reports_missing_source`
+  zaehlt, wie oft eine Kamera gar nichts beisteuerte.
 - **Nach einem Backend-Neustart konnte neue Arbeit zu frueh freigegeben
   werden** (Review 11.09., R01, [ADR-0040](docs/adr/0040-a-restart-proves-only-what-died-with-it.md)).
   Der Abgleichs-Poller merkte sich den hoechsten Zaehlerstand selbst und

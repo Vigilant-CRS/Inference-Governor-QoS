@@ -90,6 +90,7 @@ pub(crate) async fn run(
     verdict = verdict.max(check_variant_signatures(&resolved, offline).await);
     verdict = verdict.max(check_security(&resolved));
     verdict = verdict.max(check_margin_learning(&resolved));
+    verdict = verdict.max(check_supply_guard_vs_background(&resolved));
     verdict = verdict.max(check_semantics(&resolved));
     verdict = verdict.max(check_hardware(offline));
 
@@ -98,6 +99,89 @@ pub(crate) async fn run(
         Verdict::NotReady => ExitCode::FAILURE,
         Verdict::Ready | Verdict::ReadyWithWarnings => ExitCode::SUCCESS,
     })
+}
+
+/// Versorgungsschutz gegen Mindestfortschritt: schliesst die eine Zusage die
+/// andere aus, wird das hier gemeldet (ADR-0043).
+///
+/// Ein unteilbarer Hintergrundauftrag der Dauer `B` passt nur zwischen zwei
+/// geschuetzte Ankuenfte, wenn die naechste danach noch vor dem Ablauf des
+/// vorigen Ergebnisses fertig wird. Im unguenstigsten Fall startet er
+/// unmittelbar davor: mit konservativer Laufzeit `C` und Hoechstalter `A` des
+/// geschuetzten Stroms heisst das `B <= A - 2C`. Darueber gibt es keine
+/// Reihenfolge, die beide Zusagen haelt — und ein Regler, der es trotzdem
+/// versucht, bricht abwechselnd beide.
+///
+/// Die Rechnung ist konservativ und beweist nur Unerfuellbarkeit, nicht
+/// Erfuellbarkeit: `p99 x Marge` ist keine obere Schranke der Laufzeit.
+fn check_supply_guard_vs_background(resolved: &Resolved) -> Verdict {
+    if !resolved.protect_supply {
+        return Verdict::Ready;
+    }
+    // Das engste geschuetzte Fenster bestimmt die Luecke.
+    let mut narrowest: Option<(&str, Duration)> = None;
+    for (i, contract) in resolved.contracts.iter().enumerate() {
+        if !contract.criticality.is_guarded() {
+            continue;
+        }
+        let (Some(max_age), Some(best)) = (contract.max_age, contract.variants.get(0)) else {
+            continue;
+        };
+        let Ok(runtime) = best.profile.conservative_at(0, resolved.margin) else {
+            continue;
+        };
+        let room = Duration::from_nanos_unbounded(
+            max_age
+                .as_nanos()
+                .saturating_sub(runtime.as_nanos().saturating_mul(2)),
+        );
+        let name = resolved.model_names.get(i).map_or("?", String::as_str);
+        if narrowest.is_none_or(|(_, previous)| room < previous) {
+            narrowest = Some((name, room));
+        }
+    }
+    let Some((guarded, room)) = narrowest else {
+        return Verdict::Ready;
+    };
+
+    let mut verdict = Verdict::Ready;
+    for (i, contract) in resolved.contracts.iter().enumerate() {
+        if contract.criticality.is_guarded() {
+            continue;
+        }
+        let Some(pct) = contract
+            .extension
+            .as_ref()
+            .and_then(|e| e.minimum_background_progress_pct)
+        else {
+            continue;
+        };
+        let name = resolved.model_names.get(i).map_or("?", String::as_str);
+        let longest = contract
+            .variants
+            .iter()
+            .filter_map(|v| v.profile.conservative_at(0, resolved.margin).ok())
+            .max();
+        let Some(longest) = longest else {
+            continue;
+        };
+        if longest > room {
+            fail(&format!(
+                "{name}: {pct} % Mindestfortschritt und der Versorgungsschutz von {guarded} \
+                 schliessen sich aus — ein unteilbarer Auftrag von {longest} passt nicht in \
+                 die Luecke von {room} (Hoechstalter minus zweimal Laufzeit). Zerlegen \
+                 (ADR-0014), Rate senken, Hoechstalter anheben, praemptierbar machen \
+                 (ADR-0035) oder eine eigene Ressource geben (ADR-0037) — siehe ADR-0043"
+            ));
+            verdict = Verdict::NotReady;
+        } else {
+            ok(&format!(
+                "{name}: {pct} % Mindestfortschritt passt neben den Versorgungsschutz von \
+                 {guarded} ({longest} in einer Luecke von {room})"
+            ));
+        }
+    }
+    verdict
 }
 
 /// Statische Vertragspruefungen, die kein Backend brauchen.
@@ -967,7 +1051,74 @@ mod tests {
 
     use super::{
         Verdict, check_capacity, check_decomposition_cost, check_preemption, check_security,
+        check_supply_guard_vs_background,
     };
+
+    /// ADR-0043: Zwei Zusagen, die sich ausschliessen, sollen beim Start
+    /// auffallen und nicht im Betrieb abwechselnd gebrochen werden.
+    ///
+    /// Geschuetzt: Hoechstalter 100 ms, konservative Laufzeit 22 ms (p99
+    /// 20 ms mal Marge 110 %) — es bleibt eine Luecke von 100 - 44 = 56 ms.
+    /// Der Hintergrund fordert Mindestfortschritt; mit 60 ms p99 (66 ms
+    /// konservativ) passt er nicht hinein, mit 20 ms (22 ms) schon.
+    #[test]
+    fn a_background_promise_that_the_supply_guard_cannot_keep_is_refused() {
+        let yaml = |background_us: u64, protect: bool| {
+            format!(
+                r#"
+version: 1
+backend:
+  type: triton
+  grpc_endpoint: "127.0.0.1:9201"
+  slots: 1
+  protect_supply: {protect}
+models:
+  detector:
+    class: protected
+    queue: {{ policy: latest, capacity: 1 }}
+    contract: {{ period_ms: 33, deadline_ms: 33, max_age_ms: 100 }}
+    variants:
+      - id: main
+        backend_model: detector_main
+        quality: {{ value: 1.0, source: measured }}
+        profile: {{ p50_us: 20000, p95_us: 20000, p99_us: 20000, samples: 100 }}
+  report:
+    class: best_effort
+    queue: {{ policy: latest, capacity: 1 }}
+    contract:
+      period_ms: 1000
+      deadline_ms: 1000
+      max_age_ms: 2000
+      extension:
+        version: 1
+        consumer_period_ms: 1000
+        observation_window: 100
+        minimum_background_progress_pct: 20
+    variants:
+      - id: main
+        backend_model: report_main
+        quality: {{ value: 1.0, source: measured }}
+        profile: {{ p50_us: {background_us}, p95_us: {background_us}, p99_us: {background_us}, samples: 100 }}
+"#
+            )
+        };
+        let resolve = |y: String| Config::from_yaml(&y).unwrap().resolve().unwrap();
+        assert_eq!(
+            check_supply_guard_vs_background(&resolve(yaml(60_000, true))),
+            Verdict::NotReady,
+            "60 ms passen nicht in eine Luecke von 56 ms"
+        );
+        assert_eq!(
+            check_supply_guard_vs_background(&resolve(yaml(20_000, true))),
+            Verdict::Ready,
+            "20 ms passen hinein"
+        );
+        assert_eq!(
+            check_supply_guard_vs_background(&resolve(yaml(60_000, false))),
+            Verdict::Ready,
+            "ohne Versorgungsschutz gibt es nichts zu pruefen"
+        );
+    }
 
     /// NV-22: die geschuetzte Auslastung ist eine Eigenschaft einer GPU. Ein
     /// ueberzeichneter Detektor auf GPU 1 faellt auf, obwohl GPU 0 fast leer

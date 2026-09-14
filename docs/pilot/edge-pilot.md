@@ -158,7 +158,7 @@ weiter aus `shm-latency`.
 
 | # | früher | Kriterium | Bestanden, wenn |
 |---|---|---|---|
-| P1 | K2 | **Alarm unter Last** (C, D) | Vigilants p95-Alarmlatenz ist mindestens 30 % kürzer als die des Backends direkt, **oder** das Backend direkt erfüllt A1 selbst — dann gibt es dort nichts zu gewinnen |
+| P1 | K2 | **Alarm unter Last** (C, D) | Vigilants p95-Alarmlatenz ist mindestens 30 % kürzer als die des Backends direkt, **oder** das Backend direkt erfüllt A1 selbst — dann gibt es dort nichts zu gewinnen. **Anwendbar, solange** der Vergleichsarm mindestens 500 ‰ der Perioden versorgt |
 | P2 | K3 | **Kein Schaden ohne Last** (A) | Vigilants p95 höchstens 5 % oder 10 ms schlechter als direkt (Spec 19.8), das Größere von beiden |
 | P3 | neu | **Aufgabenqualität unter Last** (C, D) | Vigilants Trefferquote höchstens 2 % schlechter als die des Backends direkt |
 | P4 | neu | **Versorgung unter Last** (C, D) | Abdeckung des Alarmpfads höchstens 2 % schlechter und längste Lücke höchstens 10 % (oder 10 ms) länger als direkt |
@@ -170,7 +170,7 @@ wandern in die andere Gruppe, und ohne sie stünde für Trefferquote und
 Versorgung gar kein Maß mehr da. Ihr Maßstab ist derselbe Lauf auf derselben
 Karte, nur ohne Governor.
 
-#### Offen: P1 braucht einen Vergleichsarm, der die Aufgabe noch erfüllt
+#### P1 braucht einen Vergleichsarm, der die Aufgabe noch erfüllt
 
 Der Lauf unter XSched vom 12.09. zeigt eine Lücke im Entwurf von P1. Bei den
 Lastpunkten C und D liefert der Arm „Backend direkt" gar keine Versorgung
@@ -181,15 +181,25 @@ gemessen verfehlt Vigilant die 30-Prozent-Schwelle (1778 gegen 2317 ms, also
 erfüllt.
 
 **Ein relatives Kriterium braucht einen Vergleichsarm, der die Aufgabe noch
-erfüllt.** Vorgeschlagene Fassung, vor der nächsten Messung zu entscheiden:
-P1 gilt nur, solange der Vergleichsarm eine Mindestabdeckung hält (etwa
-500 ‰); darunter tragen P3 und P4 das Urteil, die ihn an derselben Stelle
-ohnehin deutlich schlagen.
+erfüllt.** Seit dem 14.09. gilt P1 deshalb nur, solange der Vergleichsarm
+**mindestens 500 ‰ der Perioden versorgt**; darunter steht es als *nicht
+anwendbar* im Bericht, und P3 und P4 tragen das Urteil.
 
-**Hier bewusst nicht umgesetzt.** Eine Schwelle nachträglich so
-zurechtzulegen, dass der eigene Lauf besteht, wäre genau der Fehler, den die
-Trennung in zwei Gruppen gerade behebt. Der Lauf vom 12.09. bleibt „Planung
-verfehlt", und die Begründung steht daneben.
+**Woher die 500 ‰ kommen.** Nicht aus den Messwerten: Die Grenze ist
+dieselbe wie bei A2 und aus demselben Grund gewählt. Versorgt ein Arm
+weniger als die **Hälfte** der Perioden mit einem frischen Ergebnis, misst
+seine Alarmzeit nicht mehr seine Latenz, sondern die Zeit bis zu einem
+zufälligen Treffer. Ein Arm, der die Aufgabe nicht mehr erfüllt, ist kein
+Maßstab dafür, wie gut sie erfüllt wird. Die Schwelle steht damit vor der
+nächsten Messung fest und wurde nicht an einen vorhandenen Lauf angepasst.
+
+**Der Lauf vom 12.09. wird nicht umgewertet.** Er bleibt „Planung verfehlt".
+Zur Einordnung, was die neue Fassung dort geändert hätte: Der Vergleichsarm
+lag bei C und D bei 0 ‰ Abdeckung, P1 wäre also *nicht anwendbar* gewesen,
+und das Urteil hätte auf P3 und P4 beruht — die er an beiden Punkten
+bestanden hat. Das ist eine Aussage über das Kriterium, kein neues Ergebnis:
+Gemessen wurde nichts neu, und die Zahlen des Laufs stehen unverändert im
+[Messbericht](../benchmark/messkette-2026-09-12.md).
 
 ### Gruppe Anwendung
 
@@ -208,10 +218,32 @@ beschreibt dann ihn und nicht die Planung.
 ### Was das Werkzeug daraus macht
 
 Das Binary druckt beide Gruppen getrennt und setzt den Exitcode allein nach
-der Gruppe Planung: 0 bestanden, 1 sauber gelaufen und Planung verfehlt, 2
-Aufbau oder Lauf kaputt. Eine verfehlte oder nicht anwendbare
-Anwendungsgruppe steht im Bericht und in `summary.json`, macht aber keinen
-Fehlschlag daraus.
+der Gruppe Planung: **0** bestanden, **1** sauber gelaufen und Planung
+verfehlt, **2** Aufbau oder Lauf kaputt, **3** kein Urteil (keine
+auswertbare Zelle). Eine verfehlte oder nicht anwendbare Anwendungsgruppe
+steht im Bericht und in `summary.json`, macht aber keinen Fehlschlag daraus.
+
+#### Das Freigabeurteil: fünf getrennte Fragen
+
+Ein bestandener Planungsstatus ist **keine Abnahme**. Er sagt nur: auf den
+gemessenen Zellen entschied der Governor besser als das Backend direkt. Bis
+zum 14.09. lieferte ein Lauf ohne jedes auswertbare Kriterium Exitcode 0 und
+sah damit aus wie ein bestandener; das war der Befund R05 des Reviews. Seit
+dem 14.09. steht deshalb neben dem Status ein Freigabeurteil aus fünf
+Feldern, in der Ausgabe und in `summary.json` unter `freigabe`:
+
+| Feld | Werte | Woher |
+|---|---|---|
+| `ablauf` | vollständig, unvollständig, kaputt | gemessene gegen geplante Zellen |
+| `planung` | bestanden, verfehlt, kein_urteil | Gruppe P |
+| `anwendung` | bestanden, verfehlt, kein_urteil | Gruppe A, nur anwendbare Kriterien |
+| `qualifikation` | immer `nicht_bewertet` | Hardware und Backend; ein Messlauf stellt das nicht über sich selbst fest |
+| `freigabe` | empfohlen, nicht_empfohlen | nur wenn **alle vier** darüber bestätigt sind |
+
+Weil `qualifikation` aus eigener Kraft nie „bestätigt" lautet, kann dieses
+Binary **keine** Freigabe aussprechen — es kann sie nur verweigern und den
+Grund nennen. Eine Teilmatrix, eine nicht anwendbare Anwendungsgruppe oder
+ein abgebrochener Lauf erzeugen nie ein positives Gesamturteil.
 
 | # | Kriterium | Bestanden, wenn |
 |---|---|---|

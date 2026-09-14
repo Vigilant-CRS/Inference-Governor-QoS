@@ -1005,9 +1005,19 @@ pub struct LlmReport {
     pub failed: u64,
     /// Dauer je Bericht, in Millisekunden.
     pub latencies_ms: Vec<u64>,
-    /// Alter der juengsten Detektion, auf der ein Bericht beruhte, bei
+    /// Alter der **aeltesten** Detektion, auf der ein Bericht beruhte, bei
     /// seiner Fertigstellung, in Millisekunden.
+    ///
+    /// Der Prompt nennt die Detektionen aller Kameras. Das Alter der
+    /// juengsten wuerde verdecken, dass ein Teil der Aussage auf einer alten
+    /// Quelle beruht: aus einer 1 s und einer 10 s alten Kamera wuerde ein
+    /// Bericht mit „1 s" (Review 14.09., R06).
     pub basis_age_ms: Vec<u64>,
+    /// Berichte, bei denen mindestens eine Kamera keine aktuelle Detektion
+    /// beisteuerte. Der Prompt sagt das je Kamera; hier steht, wie oft es
+    /// vorkam — sonst taeuscht ein junges Basisalter ueber eine fehlende
+    /// Quelle hinweg.
+    pub reports_missing_source: u64,
 }
 
 /// Das Ergebnis eines Arms.
@@ -1363,6 +1373,7 @@ pub async fn run_arm(config: ArmConfig) -> Result<ArmReport, String> {
                 let started = Instant::now();
                 let mut counts = Vec::new();
                 let mut basis: Option<Instant> = None;
+                let mut missing_source = false;
                 for (camera, state) in cameras.iter().zip(&states) {
                     let snapshot = state
                         .lock()
@@ -1370,8 +1381,14 @@ pub async fn run_arm(config: ArmConfig) -> Result<ArmReport, String> {
                         .map(|s| (s.latest.as_ref().map(|(_, d)| d.len()), s.latest_capture));
                     let (count, capture) = snapshot.unwrap_or((None, None));
                     counts.push((camera.name.clone(), count));
+                    if count.is_none() {
+                        missing_source = true;
+                    }
+                    // Die **aelteste** verwendete Quelle bestimmt das Alter des
+                    // Berichts. `max` waere die juengste und wuerde eine alte
+                    // Kamera verdecken (Review 14.09., R06).
                     basis = match (basis, capture) {
-                        (Some(a), Some(b)) => Some(a.max(b)),
+                        (Some(a), Some(b)) => Some(a.min(b)),
                         (a, b) => a.or(b),
                     };
                 }
@@ -1386,6 +1403,10 @@ pub async fn run_arm(config: ArmConfig) -> Result<ArmReport, String> {
                 };
                 if ok {
                     report.reports = report.reports.saturating_add(1);
+                    if missing_source {
+                        report.reports_missing_source =
+                            report.reports_missing_source.saturating_add(1);
+                    }
                     report
                         .latencies_ms
                         .push(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));

@@ -166,7 +166,7 @@ Basislinie vor der ersten Auslieferung: `on_baseline` verwirft spaete
 Basislinien dauerhaft, waehrend die Bereitschaft sie nicht voraussetzt.
 Dieser Startfall ist hier eine Quelltextfeststellung, keine sechste Gegenprobe.
 
-**R05 · P1 fuer Verkaufsfreigabe · Ein gruener Pilotstatus bestaetigt nicht die Anwendung. OFFEN.**
+**R05 · P1 fuer Verkaufsfreigabe · Ein gruener Pilotstatus bestaetigt nicht die Anwendung. BEHOBEN am 14.09.:** `summary.json` und die Ausgabe tragen jetzt ein Freigabeurteil aus fuenf getrennten Feldern (Ablauf, Planung, Anwendung, Qualifikation, Freigabe); eine Teilmatrix liefert Exitcode 3 statt 0, und `qualifikation` lautet nie „bestaetigt", weil ein Messlauf das nicht ueber sich selbst feststellt. P1 gilt nur noch, solange der Vergleichsarm mindestens 500 Promille der Perioden versorgt.
 
 Stelle: [edge-pilot.rs](../../../crates/vig-bench/src/bin/edge-pilot.rs),
 `RunStatus::exit` und Urteilsbildung. Nur anwendbare Planungskriterien entscheiden
@@ -194,7 +194,7 @@ koennen Diagnose erlauben, aber keine positive Gesamtfreigabe erzeugen.
 P6 prueft derzeit nur A/B und mindestens zwei Berichte pro Minute. Eine
 behauptete Hintergrundzusage bei C/D wird dadurch nicht geprueft.
 
-**R06 · P2 · Das Berichtsbasisalter zeigt die frischeste beteiligte Kamera. OFFEN.**
+**R06 · P2 · Das Berichtsbasisalter zeigt die frischeste beteiligte Kamera. BEHOBEN am 14.09.:** gemeldet wird die **aelteste** verwendete Quelle, und `reports_missing_source` zaehlt die Berichte, bei denen eine Kamera nichts beisteuerte.
 
 Stelle: [pilot.rs](../../../crates/vig-bench/src/pilot.rs), Reporter,
 Zusammenfuehrung mit `Some(a.max(b))`. Der Prompt enthaelt jedoch die
@@ -210,7 +210,7 @@ verwendete Zeitstempel und eine erkennbare Kennzeichnung fehlender/veralteter
 Quellen. Dieser Befund wurde im Quelltext geprueft, nicht mit einem echten
 Sprachmodell reproduziert.
 
-**R07 · Produktentscheidung · Mindestfortschritt laesst sich nicht einfach ueber den Guard stellen. OFFEN.**
+**R07 · Produktentscheidung · Mindestfortschritt laesst sich nicht einfach ueber den Guard stellen. ENTSCHIEDEN am 14.09. ([ADR-0043](../../adr/0043-an-impossible-contract-is-reported-not-alternately-broken.md)):** Der Mindestfortschritt ueberstimmt den Versorgungsschutz nicht. Eine Kombination, die sich nicht erfuellen laesst (`B > A - 2C`), meldet `vig doctor` beim Start als unerfuellbar, statt im Betrieb abwechselnd beide Zusagen zu brechen.
 
 `minimum_background_progress_pct` wird als Missbudget beobachtet. Der Guard
 nimmt es nicht als Grund, ein Veto zurueckzunehmen. Die missbewusste Policy
