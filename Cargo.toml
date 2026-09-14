@@ -21,7 +21,7 @@ edition = "2024"
 rust-version = "1.90"
 license = "BUSL-1.1"
 authors = ["Vigilant e.K. <info@vigilant-crs.de>"]
-repository = "https://github.com/Vigilant-CRS/Inference-QoS"
+repository = "https://github.com/Vigilant-CRS/Inference-Governor-QoS"
 description = "Inference QoS for edge robotics: a freshness- and deadline-aware governor in front of NVIDIA Triton"
 
 # Siehe Spec 26.4 (Coding-Regeln) und docs/adr/.

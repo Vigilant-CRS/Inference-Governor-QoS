@@ -48,7 +48,7 @@ Kamera und Steuerung; verweigert er den Dienst, faellt die Wahrnehmung
 komplett aus. Ein zu vorsichtig geplantes Modell liefert weniger Durchsatz —
 eine nicht gestartete Wahrnehmung liefert nichts.
 
-Das ist dieselbe Richtung wie in [ADR-0010](0010-pessimistic-promises.md):
+Das ist dieselbe Richtung wie in [ADR-0010](0010-pessimistic-promises-optimistic-discards.md):
 im Zweifel pessimistisch versprechen. Ein unbestaetigtes Profil ist Zweifel,
 kein Beweis.
 

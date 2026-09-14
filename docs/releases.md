@@ -29,7 +29,7 @@ cargo audit bin vig
 cosign verify-blob \
   --certificate      vig-0.1.0-x86_64-unknown-linux-gnu.tar.gz.pem \
   --signature        vig-0.1.0-x86_64-unknown-linux-gnu.tar.gz.sig \
-  --certificate-identity-regexp '^https://github\.com/Vigilant-CRS/Inference-QoS/\.github/workflows/release\.yml@refs/tags/v[0-9].*$' \
+  --certificate-identity-regexp '^https://github\.com/Vigilant-CRS/Inference-Governor-QoS/\.github/workflows/release\.yml@refs/tags/v[0-9].*$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   vig-0.1.0-x86_64-unknown-linux-gnu.tar.gz
 

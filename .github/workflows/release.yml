@@ -163,7 +163,7 @@ jobs:
           cosign verify-blob \
             --certificate      vig-<version>-<target>.tar.gz.pem \
             --signature        vig-<version>-<target>.tar.gz.sig \
-            --certificate-identity-regexp '^https://github\.com/Vigilant-CRS/Inference-QoS/\.github/workflows/release\.yml@refs/tags/v[0-9].*$' \
+            --certificate-identity-regexp '^https://github\.com/Vigilant-CRS/Inference-Governor-QoS/\.github/workflows/release\.yml@refs/tags/v[0-9].*$' \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             vig-<version>-<target>.tar.gz
           ```

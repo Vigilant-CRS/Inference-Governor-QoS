@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license = "BUSL-1.1"
 description = "Lesende Hardwarebeobachtung fuer den Vigilant Inference Governor"
-repository = "https://github.com/Vigilant-CRS/Inference-QoS"
+repository = "https://github.com/Vigilant-CRS/Inference-Governor-QoS"
 publish = false
 
 [dependencies]

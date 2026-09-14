@@ -17,7 +17,7 @@ seine Konfiguration nicht mehr zur Wirklichkeit passt. Er wird den Fehler
 zuerst beim Governor suchen, denn dort sind die Zahlen schlechter geworden.
 
 Das ist genau die Sorte stiller Fehlfunktion, gegen die dieses Projekt sonst
-konsequent vorgeht: Aushungerung ist ein Befund ([ADR-0012](0012-starvation-is-a-finding.md)),
+konsequent vorgeht: Aushungerung ist ein Befund ([ADR-0012](0012-best-effort-starvation.md)),
 ein Profil aus fremder Umgebung ist ein Befund ([ADR-0016](0016-unverified-profiles-widen-the-margin.md)).
 
 ## Entscheidung

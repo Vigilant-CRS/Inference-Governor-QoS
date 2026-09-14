@@ -1,7 +1,7 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: vigilant-inference-governor
 Upstream-Contact: Vigilant e.K. <info@vigilant-crs.de>
-Source: https://github.com/Vigilant-CRS/Inference-QoS
+Source: https://github.com/Vigilant-CRS/Inference-Governor-QoS
 
 Files: *
 Copyright: 2026 Vigilant e.K.
