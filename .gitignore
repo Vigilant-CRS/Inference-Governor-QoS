@@ -13,3 +13,9 @@ backends/**/target/
 
 # Die gebaute Projektseite (site/build.py) gehoert nicht ins Repository.
 /_site
+# Videoartefakte gehoeren nach InferenceQoS-runtime/video/, nicht hierher.
+# Im Repository steht nur der Bauplan (tools/video/).
+*.mp4
+*.wav
+*.srt
+tools/video/build/
