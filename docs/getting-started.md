@@ -16,6 +16,25 @@ cargo build --release
 # binary at target/release/vig
 ```
 
+## Step 0 — let the machine write the first draft
+
+You do not have to type the model names, tensor shapes and data types out of
+your inference server. `vig init` reads them from a running one:
+
+```bash
+vig init --endpoint 127.0.0.1:8001 --out vig.yaml
+```
+
+What it fills in is what the machine knows. What it leaves open — as literal
+`TODO_` placeholders, one per line, each with a sentence explaining what the
+number means — is what only you know: how often a source delivers, how long a
+result stays useful, which stream matters more.
+
+**The generated file deliberately does not load** while a placeholder is left.
+A template that starts with invented periods would move the error into
+production, and an invented number looks exactly like a measured one once it
+sits in a configuration file.
+
 ## Step 1 — describe what your robot needs
 
 The configuration answers two kinds of question. **Requirements** — what has to
@@ -159,6 +178,31 @@ may only name regions its own caller registered.
 Half a configuration is refused rather than half applied: a certificate without
 a key looks like protection and is none. What this protects and what it does
 not is listed in [security.md](security.md).
+
+## Is it worth it here? — `vig-fit`
+
+Before you change a single client, let the question be answered with your
+models, your contracts and your hardware:
+
+```bash
+target/release/vig-fit vig.yaml          # about two minutes
+VIG_FIT_JSON=fit.json target/release/vig-fit vig.yaml
+```
+
+It drives your streams twice per load point — first straight at the backend,
+then through the governor — at 90, 100, 110 and 125 % of the offered load, and
+prints what the consumer would have seen: uncovered samples per mille and the
+longest gap, for the protected stream and for what the lower-priority ones pay.
+
+The last line is a verdict in one sentence, and **"you do not need this" is one
+of its normal outcomes**. Below saturation the governor only costs its own
+overhead; the tool says so rather than producing a number that sounds
+impressive. It also says so when the machine is too busy for the measurement to
+mean anything.
+
+What it does not answer: whether your detection is good enough (it measures
+supply, not quality), what happens on other hardware, and what happens over
+hours — that is what the [soak run](benchmark/soak.md) is for.
 
 ## Step 4 — point your client at it
 

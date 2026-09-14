@@ -203,6 +203,10 @@ The break-even is between 100 % and 110 % offered load
 ## Quick start
 
 ```bash
+# 0. Let the machine write the first draft from your running Triton.
+#    It fills in models, shapes and types; periods and deadlines stay TODO.
+vig init --endpoint 127.0.0.1:8001 --out vig.yaml
+
 # 1. Point at your existing Triton and check that everything lines up.
 vig doctor -c examples/gate_m3/vig.yaml
 

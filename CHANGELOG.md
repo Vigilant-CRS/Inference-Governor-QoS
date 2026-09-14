@@ -7,6 +7,31 @@ bedeutet, steht in [docs/releases.md](docs/releases.md).
 
 ### Hinzugefuegt
 
+- **`vig init` schreibt die erste Konfiguration aus einem laufenden Backend.**
+  Modellnamen, Tensorformen und Datentypen liest das Werkzeug ueber OIP
+  (`repository_index` und die Modellmetadaten) und traegt sie ein. Alles, was
+  nur der Betreiber weiss — Periode, Frist, Hoechstalter, Wichtigkeitsklasse —
+  bleibt als `TODO_`-Platzhalter stehen, jeder mit einem Satz, was die Groesse
+  bedeutet. **Die erzeugte Datei laedt absichtlich nicht**, solange ein
+  Platzhalter offen ist: eine Vorlage mit erfundenen Perioden startet und
+  faellt erst im Betrieb auf, und in einer Konfigurationsdatei sieht eine
+  erfundene Zahl aus wie eine gemessene. Bisher war die erste `vig.yaml` die
+  eigentliche Einstiegshuerde — nicht das Protokoll, das ist kompatibel.
+- **`vig-fit` beantwortet „lohnt sich der Governor hier?"** in rund zwei
+  Minuten, mit den Modellen, Vertraegen und der Hardware des Interessenten.
+  Es faehrt je Lastpunkt (90, 100, 110, 125 %) erst direkt gegen das Backend
+  und dann ueber den Governor und druckt die Verbrauchersicht: unabgedeckte
+  Abtastungen je Promille und laengste Luecke, fuer den geschuetzten Strom und
+  fuer das, was die nachrangigen dafuer zahlen. Das Urteil steht in einem Satz
+  — und **„brauchst du nicht" ist eines seiner normalen Ergebnisse**:
+  unterhalb der Saettigung kostet der Governor nur seinen Aufwand, und das
+  sagt das Werkzeug, statt eine beeindruckende Zahl zu erzeugen. Ist der
+  Governor nicht besser, steht auch das so da. Zusaetzlich als JSON
+  (`VIG_FIT_JSON`), damit sich das Ergebnis mailen oder in CI haengen laesst.
+  Es liegt in `vig-bench` und nicht in der CLI: es braucht den Lastgenerator,
+  den Coverage-Tracker und einen Governor im Prozess — also den Messbaukasten,
+  nicht das Produktbinary.
+
 - **Der Look-ahead schuetzt die Versorgung** (opt-in,
   [ADR-0041](docs/adr/0041-the-look-ahead-protects-the-supply-not-only-the-deadline.md)).
   `backend.protect_supply: true` gibt jeder erwarteten geschuetzten Ankunft

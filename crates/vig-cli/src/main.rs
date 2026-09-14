@@ -20,6 +20,7 @@ mod artifact;
 mod calibrate;
 mod doctor;
 mod identity;
+mod init;
 mod profile;
 mod runloop;
 mod serve;
@@ -39,6 +40,23 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Write a starting configuration from a running inference server.
+    ///
+    /// Fills in what the machine knows — models, tensor names, shapes, data
+    /// types — and leaves what only you know as an explicit placeholder:
+    /// period, deadline, maximum age, importance. The file deliberately does
+    /// not load until you have filled those in.
+    Init {
+        /// Address of the inference server to read the models from.
+        #[arg(short, long, default_value = "127.0.0.1:8001")]
+        endpoint: String,
+        /// Target file. Without one the template goes to stdout.
+        #[arg(short, long, value_name = "FILE")]
+        out: Option<PathBuf>,
+        /// Overwrite an existing file.
+        #[arg(long)]
+        force: bool,
+    },
     /// Check the configuration and the backend without starting anything.
     Doctor {
         /// Path to the configuration file.
@@ -166,6 +184,11 @@ async fn run() -> ExitCode {
     // Die generierten gRPC-Typen sind gross; ohne `Box::pin` landet ein
     // 90-KB-Future auf dem Stack des Aufrufers.
     let result = match cli.command {
+        Command::Init {
+            endpoint,
+            out,
+            force,
+        } => Box::pin(init::run(&endpoint, out.as_deref(), force)).await,
         Command::Doctor { config, offline } => Box::pin(doctor::run(&config, offline)).await,
         Command::Profile {
             config,
