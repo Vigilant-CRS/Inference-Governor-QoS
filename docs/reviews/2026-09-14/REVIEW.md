@@ -102,7 +102,15 @@ Verweildauer stattfinden. Wenn auch der Wechsel die Versorgung nicht retten
 kann, bleibt die Hysterese erhalten. Beide Faelle sind als Regressionstests
 in [variant_supply.rs](../../../crates/vig-core/tests/variant_supply.rs).
 
-**R03 · P1 · Die Pufferkorrektur endet am Messarm; alte Leser koennen weiterleben. OFFEN.**
+**R03 · P1 · Die Pufferkorrektur endet am Messarm; alte Leser koennen weiterleben. BEHOBEN am 14.09.**
+
+**Behoben** ([ADR-0042](../../adr/0042-an-end-is-proven-not-assumed.md)): Die
+Quarantaene gehoert der Region und gilt prozessweit
+(`pilot::tests::a_new_measurement_arm_does_not_forget_quarantined_regions`),
+und `run_arm` sammelt seine Aufrufe in einem `JoinSet` ein; bleibt nach 60 s
+einer offen, ist die Messzelle ungueltig
+(`arm_drain::a_finished_arm_leaves_no_inference_running`). Das pauschale
+Warten von 500 ms entfaellt.
 
 Stellen: [pilot.rs](../../../crates/vig-bench/src/pilot.rs), `run_arm`:
 neuer `RegionPool` je Aufruf, ungesammelte innere `tokio::spawn`-Aufgaben,
@@ -135,7 +143,15 @@ Zeitueberschreitung muss einen ungueltigen Lauf ergeben. Ein neuer Pool oder
 ein weiterer Timer ist kein Endnachweis. Bei Armwechsel darf keine unzugeordnete
 Backendarbeit uebrig sein.
 
-**R04 · P1 · Ein spaet erkannter Reset kann weiterhin neue Arbeit freigeben. OFFEN, bereits dokumentierte Grenze jetzt reproduziert.**
+**R04 · P1 · Ein spaet erkannter Reset kann weiterhin neue Arbeit freigeben. BEHOBEN am 14.09.**
+
+**Behoben** (ADR-0042): Ein Zaehlerabfall beendet nur Ansprueche, die das
+Backend in dieser Epoche nachweislich gezaehlt hat; die uebrigen werden
+gesperrt statt beendet
+(`reconciliation::a_delayed_reset_does_not_release_a_call_it_cannot_place`,
+Gegenfall `a_restart_still_ends_a_call_the_counter_saw_alive`). Der Preis
+steht im ADR: ein gesperrter Kredit kommt erst mit einem Neustart des
+Governors zurueck.
 
 Stelle: [actor.rs](../../../crates/vig-gateway/src/actor.rs),
 `on_backend_restart`. Der Code gibt bei einem Zaehlerabfall alle Ansprueche

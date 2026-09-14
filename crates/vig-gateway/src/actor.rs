@@ -252,6 +252,14 @@ struct Lease {
     epoch: u64,
     /// Wie der Anspruch derzeit steht.
     state: LeaseState,
+    /// Ob das Backend seit dem Dispatch **einmal** gezaehlt hat, in dieser
+    /// Epoche (Review 14.09., R04).
+    ///
+    /// Nur dann belegt ein spaeterer Zaehlerabfall, dass dieser Aufruf im
+    /// alten Prozess lag: Die Meldung zeigt, dass die alte Epoche zur Zeit des
+    /// Dispatch noch lief. Ohne sie kann der Aufruf schon im neuen Prozess
+    /// entstanden sein, und sein Ende ist unbelegt.
+    seen_in_epoch: bool,
 }
 
 /// Wogegen ein Anspruch abgeglichen wird: der Server, der den Aufruf bekam,
@@ -320,6 +328,14 @@ enum LeaseState {
     /// versucht den Abgleich erneut. Ein Ziel ohne Basislinie waere im Zweifel
     /// zu klein und gaebe den Kredit frei, der gehalten gehoert.
     AwaitingBaseline,
+    /// Der Aufruf brach ab, und kein Zaehler kann sein Ende mehr belegen.
+    ///
+    /// Zwischen seinem Dispatch und dem erkannten Neustart lag keine einzige
+    /// Zaehlermeldung der Epoche. Er kann also genauso gut schon im neuen
+    /// Prozess gelaufen sein, und dort rechnet er womoeglich weiter. Der
+    /// Kredit bleibt gehalten, sichtbar in `vig_quarantined_slots`, bis der
+    /// Governor neu startet (Review 14.09., R04; `docs/runbook.md`).
+    Quarantined,
 }
 
 /// Meldet dem Actor, dass niemand mehr auf einen Request wartet.
@@ -1600,6 +1616,7 @@ impl Actor {
                 identity,
                 epoch,
                 state: LeaseState::Running,
+                seen_in_epoch: false,
             },
         );
         tokio::spawn(async move {
@@ -2132,19 +2149,36 @@ impl Actor {
             return;
         }
         ledger.highest = completed;
+        let epoch = ledger.epoch;
         // Gezaehlt wird, was das Backend in dieser Epoche **erreicht** hat.
         // Ein Aufruf, der schon am Kanalaufbau scheiterte, wird nie eine
         // Fertigstellung erzeugen; ihn im Ziel zu fuehren machte das Ziel
         // unerreichbar.
         let target = baseline.saturating_add(ledger.reached);
+
+        // Diese Meldung stammt aus der laufenden Epoche und belegt damit, dass
+        // sie zur Zeit des Dispatch noch lief. Nur solche Auftraege darf ein
+        // spaeterer Zaehlerabfall beenden (Review 14.09., R04).
+        for lease in self.leases.values_mut() {
+            if lease.identity == *identity && lease.epoch == epoch {
+                lease.seen_in_epoch = true;
+            }
+        }
         if completed < target {
             return;
         }
 
+        // Der Nachweis gilt nur fuer die laufende Epoche: ein Anspruch aus
+        // einer aelteren zaehlt in diesem Ziel nicht mit und wird von ihm
+        // nicht beendet. Ein gesperrter Anspruch ohnehin nicht.
         let proven: Vec<RequestId> = self
             .leases
             .iter()
-            .filter(|(_, lease)| lease.identity == *identity && lease.state != LeaseState::Running)
+            .filter(|(_, lease)| {
+                lease.identity == *identity
+                    && lease.epoch == epoch
+                    && !matches!(lease.state, LeaseState::Running | LeaseState::Quarantined)
+            })
             .map(|(request, _)| *request)
             .collect();
         for request in proven {
@@ -2182,10 +2216,15 @@ impl Actor {
     /// genau einmal verarbeitet: danach ist der gemeldete Stand der hoechste,
     /// und dieselbe Meldung noch einmal ist keiner.
     ///
-    /// Nicht belegbar mit einem aggregierten Zaehler, und deshalb in
-    /// `docs/runbook.md` benannt: ein Aufruf, der nach dem Reset in den neuen
-    /// Prozess ging und dort **vor** dem Erkennen des Resets einen
-    /// Transportfehler bekam, endet hier zu frueh.
+    /// Welcher abgebrochene Aufruf im alten Prozess lag, entscheidet nicht die
+    /// Reihenfolge der Meldungen, sondern ein Beleg: Hat das Backend seit dem
+    /// Dispatch dieses Aufrufs **einmal** in dieser Epoche gezaehlt, lief sie
+    /// damals noch, und der Aufruf starb mit ihr. Fehlt dieser Beleg, kann er
+    /// ebenso gut im neuen Prozess entstanden sein — er endet dann nicht,
+    /// sondern wird gesperrt (`LeaseState::Quarantined`). Sein Kredit bleibt
+    /// gehalten und in `vig_quarantined_slots` sichtbar; zurueck kommt er erst
+    /// mit einem Neustart des Governors (Review 14.09., R04;
+    /// `docs/runbook.md`).
     fn on_backend_restart<S: FnMut(Action)>(
         &mut self,
         now: Instant,
@@ -2205,6 +2244,7 @@ impl Actor {
 
         let mut dead = Vec::new();
         let mut carried = 0_u64;
+        let mut blocked = 0_u64;
         for (request, lease) in &mut self.leases {
             if lease.identity != *identity {
                 continue;
@@ -2212,9 +2252,22 @@ impl Actor {
             match lease.state {
                 LeaseState::Running | LeaseState::TimedOut => {
                     lease.epoch = epoch;
+                    lease.seen_in_epoch = false;
                     carried = carried.saturating_add(1);
                 }
-                LeaseState::Reconciling | LeaseState::AwaitingBaseline => dead.push(*request),
+                LeaseState::Reconciling | LeaseState::AwaitingBaseline => {
+                    if lease.seen_in_epoch {
+                        dead.push(*request);
+                    } else {
+                        // Seit seinem Dispatch hat dieses Backend kein einziges
+                        // Mal gezaehlt: der Aufruf kann schon im neuen Prozess
+                        // gelaufen sein. Dann laeuft er dort womoeglich weiter,
+                        // und sein Ende ist unbelegbar (Review 14.09., R04).
+                        lease.state = LeaseState::Quarantined;
+                        blocked = blocked.saturating_add(1);
+                    }
+                }
+                LeaseState::Quarantined => {}
             }
         }
         if let Some(ledger) = self.ledgers.get_mut(identity) {
@@ -2228,9 +2281,12 @@ impl Actor {
             ended_epoch,
             ended = dead.len(),
             carried,
+            blocked,
             "Abschlusszaehler zurueckgefallen: Server neu gestartet oder Modell \
-             neu geladen. Abgebrochene Aufrufe der alten Epoche enden; Aufrufe \
-             mit offener Verbindung warten auf ihre Antwort."
+             neu geladen. Abgebrochene Aufrufe, die das Backend in dieser Epoche \
+             noch gezaehlt hat, enden; Aufrufe mit offener Verbindung warten auf \
+             ihre Antwort. Abgebrochene ohne einen solchen Zaehlerbeleg bleiben \
+             gesperrt: sie koennen im neuen Prozess entstanden sein."
         );
         for request in dead {
             self.end_by_reconciliation(now, request, sink);

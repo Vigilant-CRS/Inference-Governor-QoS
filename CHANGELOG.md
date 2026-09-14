@@ -269,6 +269,22 @@ Verbindungsgrenze am Metrikport.
   einer 1 s und einer 10 s alten Quelle wurde ein Bericht mit „1 s". Gemeldet
   wird jetzt die **aelteste** verwendete Quelle, und `reports_missing_source`
   zaehlt, wie oft eine Kamera gar nichts beisteuerte.
+- **Ein Messarm endete, waehrend seine Inferenzen noch liefen** (Review 14.09.,
+  R03, [ADR-0042](docs/adr/0042-an-end-is-proven-not-assumed.md)). `run_arm`
+  wartete auf seine Kameraschleifen und schlief danach pauschal 500 ms; die
+  Aufrufe selbst liefen frei weiter, und die naechste Messzelle mass neben
+  ihnen. Jetzt liegen sie in einem `JoinSet` und werden eingesammelt; bleibt
+  nach 60 s einer offen, ist die Zelle ungueltig statt stillschweigend
+  weiterzulaufen. Ausserdem gehoert die Quarantaene einer Shared-Memory-Region
+  jetzt der **Region** und gilt prozessweit: Der naechste Arm bekommt einen
+  gesperrten Puffer nicht zurueck.
+- **Ein spaet erkannter Backend-Neustart gab neue Arbeit frei** (Review 14.09.,
+  R04, ADR-0042). Fiel der Abschlusszaehler, endeten alle abgebrochenen
+  Aufrufe — auch einer, der erst nach dem Neustart in den neuen Prozess ging
+  und dort weiterrechnen kann. Beendet wird jetzt nur, was das Backend in
+  dieser Epoche nachweislich gezaehlt hat (`seen_in_epoch`); alles andere
+  bleibt gesperrt und in `vig_quarantined_slots` sichtbar.
+
 - **Nach einem Backend-Neustart konnte neue Arbeit zu frueh freigegeben
   werden** (Review 11.09., R01, [ADR-0040](docs/adr/0040-a-restart-proves-only-what-died-with-it.md)).
   Der Abgleichs-Poller merkte sich den hoechsten Zaehlerstand selbst und

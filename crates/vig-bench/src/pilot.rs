@@ -33,10 +33,11 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tonic::Code;
 use vig_gateway::cooperative::{SAMPLING_PARAMETERS, TEXT_INPUT};
 use vig_gateway::outcome::REASON_HEADER;
@@ -775,15 +776,43 @@ pub struct RegionPool {
     quarantined: AtomicU64,
 }
 
+/// Die gesperrten Regionen dieses Prozesses, nach ihrem registrierten Namen.
+///
+/// Die Sperre gehoert der **Region**, nicht dem Pool: Ein Messarm legt seinen
+/// Pool neu an, die Shared-Memory-Regionen bleiben aber dieselben und sind beim
+/// Backend fuer die ganze Laufzeit registriert. Bis zum Review vom 14.09. (R03)
+/// vergass der naechste Arm deshalb jede Quarantaene des vorigen und gab einen
+/// Puffer wieder aus, dessen Leser womoeglich noch lief.
+static QUARANTINED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// Sperrt eine Region fuer den Rest des Prozesses.
+fn quarantine_region(name: &str) {
+    if let Ok(mut set) = QUARANTINED.lock() {
+        set.insert(name.to_owned());
+    }
+}
+
+/// Ob diese Region gesperrt ist.
+fn region_is_quarantined(name: &str) -> bool {
+    QUARANTINED.lock().is_ok_and(|set| set.contains(name))
+}
+
 impl RegionPool {
-    /// Ein Pool ueber diese Regionen, alle frei.
+    /// Ein Pool ueber diese Regionen; frei ist, was nicht gesperrt ist.
     #[must_use]
     pub fn new(regions: Vec<(String, PathBuf)>) -> Arc<Self> {
-        let free = (0..regions.len()).collect();
+        let free: VecDeque<usize> = (0..regions.len())
+            .filter(|i| {
+                regions
+                    .get(*i)
+                    .is_some_and(|(name, _)| !region_is_quarantined(name))
+            })
+            .collect();
+        let blocked = regions.len().saturating_sub(free.len()) as u64;
         Arc::new(Self {
             regions,
             free: Mutex::new(free),
-            quarantined: AtomicU64::new(0),
+            quarantined: AtomicU64::new(blocked),
         })
     }
 
@@ -865,8 +894,13 @@ impl RegionLease {
 
     /// Ob noch jemand liest, ist unbekannt: der Puffer wird nie wieder
     /// vergeben. Ein Timer waere kein Nachweis, dass der Leser fertig ist.
+    ///
+    /// Die Sperre gilt fuer den ganzen Prozess, nicht nur fuer diesen Pool:
+    /// der naechste Messarm bekommt dieselbe Region und darf sie ebenso wenig
+    /// beschreiben (Review 14.09., R03).
     pub fn quarantine(mut self) {
         self.settled = true;
+        quarantine_region(self.name());
         self.pool.quarantined.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -887,6 +921,7 @@ impl RegionLease {
 impl Drop for RegionLease {
     fn drop(&mut self) {
         if !self.settled {
+            quarantine_region(self.name());
             self.pool.quarantined.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -1168,6 +1203,12 @@ pub fn report_prompt(counts: &[(String, Option<usize>)]) -> String {
               teilen sich Zustand und Ursprung; zerteilt waere der Ablauf schwerer zu pruefen"
 )]
 pub async fn run_arm(config: ArmConfig) -> Result<ArmReport, String> {
+    /// Wie lange ein Arm nach seinem Ende auf noch laufende Aufrufe wartet.
+    ///
+    /// Laeuft danach noch einer, ist die Messzelle ungueltig: die naechste
+    /// wuerde neben fremder Backendarbeit messen (Review 14.09., R03).
+    const DRAIN_LIMIT: Duration = Duration::from_secs(60);
+
     let origin = Instant::now();
     let states: Vec<Arc<Mutex<CameraState>>> = config
         .cameras
@@ -1219,6 +1260,10 @@ pub async fn run_arm(config: ArmConfig) -> Result<ArmReport, String> {
             let mut ticker = tokio::time::interval(period);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let frame_bytes = camera.size.saturating_mul(camera.size).saturating_mul(3);
+            // Jeder Aufruf wird eingesammelt. Bis zum Review vom 14.09. (R03)
+            // liefen sie frei, und der Arm kehrte zurueck, waehrend das Backend
+            // noch rechnete.
+            let mut requests = JoinSet::new();
             loop {
                 ticker.tick().await;
                 let capture = Instant::now();
@@ -1261,7 +1306,7 @@ pub async fn run_arm(config: ArmConfig) -> Result<ArmReport, String> {
                 let mut client = client.clone();
                 let camera = camera.clone();
                 let state = Arc::clone(&state);
-                tokio::spawn(async move {
+                requests.spawn(async move {
                     let _permit = permit;
                     let id = format!("{}:{global}", camera.name);
                     let request = detector_request(
@@ -1316,6 +1361,16 @@ pub async fn run_arm(config: ArmConfig) -> Result<ArmReport, String> {
                     }
                 });
             }
+            // Der Arm ist erst zu Ende, wenn keiner seiner Aufrufe mehr laeuft.
+            // Ein Puffer, dessen Aufgabe hier abgebrochen wird, bleibt gesperrt
+            // — `RegionLease::drop` sagt: unbekannt heisst nicht frei.
+            let drained = tokio::time::timeout(DRAIN_LIMIT, async {
+                while requests.join_next().await.is_some() {}
+            })
+            .await
+            .is_ok();
+            requests.shutdown().await;
+            drained
         }));
     }
 
@@ -1429,16 +1484,28 @@ pub async fn run_arm(config: ArmConfig) -> Result<ArmReport, String> {
         })
     });
 
+    // Kein pauschales Warten mehr: jede Kamera meldet, ob ihre Aufrufe
+    // tatsaechlich alle beendet sind. Ein Timer war nie ein Endnachweis.
+    let mut drained = true;
     for task in tasks {
-        let _ = task.await;
+        drained &= task.await.unwrap_or(false);
     }
-    // Offene Auftraege duerfen noch ankommen; was dann fehlt, fehlt.
-    tokio::time::sleep(Duration::from_millis(500)).await;
     let _ = checker.await;
     let llm = match reporter {
         Some(task) => task.await.unwrap_or_default(),
         None => LlmReport::default(),
     };
+
+    // Laeuft nach der Frist noch ein Aufruf, gehoert seine Rechenzeit schon
+    // der naechsten Zelle. Ein solcher Lauf wird verworfen, nicht berichtet
+    // (Review 14.09., R03).
+    if !drained {
+        return Err(format!(
+            "Messzelle ungueltig: nach {} s liefen noch Inferenzen dieses Arms; \
+             ein Timer waere kein Nachweis fuer ihr Ende",
+            DRAIN_LIMIT.as_secs()
+        ));
+    }
 
     let mut report = ArmReport {
         cameras: Vec::new(),
@@ -1712,10 +1779,21 @@ mod tests {
         assert_eq!(seq.capture_offset(25), Duration::from_millis(2_500));
     }
 
+    /// Ein Pool mit **eigenen** Regionsnamen je Aufruf.
+    ///
+    /// Die Quarantaene gilt prozessweit je Region (R03). Zwei Tests, die
+    /// dieselben Namen benutzen, wuerden sich sonst gegenseitig Puffer sperren.
     fn pool(n: usize) -> Arc<RegionPool> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
         RegionPool::new(
             (0..n)
-                .map(|k| (format!("r{k}"), PathBuf::from(format!("/dev/shm/r{k}"))))
+                .map(|k| {
+                    (
+                        format!("pool{id}-r{k}"),
+                        PathBuf::from(format!("/dev/shm/pool{id}-r{k}")),
+                    )
+                })
                 .collect(),
         )
     }
@@ -1726,6 +1804,29 @@ mod tests {
             .metadata_mut()
             .insert(REASON_HEADER, reason.parse().unwrap());
         Err(status)
+    }
+
+    /// Die Sperre gehoert der Region, nicht dem Pool (Review 14.09., R03).
+    ///
+    /// Zwischen zwei Messarmen legt `run_arm` seinen Pool neu an, ueber
+    /// dieselben registrierten Regionen. Vorher vergass der neue Pool jede
+    /// Quarantaene des vorigen und gab den Puffer sofort wieder aus.
+    #[test]
+    fn a_new_measurement_arm_does_not_forget_quarantined_regions() {
+        let regions = vec![(
+            "arm-wechsel-region".to_owned(),
+            PathBuf::from("/dev/shm/arm-wechsel-region"),
+        )];
+        let first_arm = RegionPool::new(regions.clone());
+        first_arm.lease().unwrap().quarantine();
+        assert_eq!(first_arm.free(), 0);
+
+        let next_arm = RegionPool::new(regions);
+        assert!(
+            next_arm.lease().is_none(),
+            "der naechste Arm gibt einen gesperrten Puffer wieder aus"
+        );
+        assert_eq!(next_arm.quarantined(), 1, "und meldet ihn als gesperrt");
     }
 
     /// Das Gegenbeispiel aus dem Review (R03), gegen den Pool.

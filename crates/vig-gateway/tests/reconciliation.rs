@@ -467,3 +467,72 @@ async fn evidence_counts_every_version_of_the_model() {
         "Abschluesse aller Versionen, nicht nur der ersten"
     );
 }
+
+// ---------------------------------------------------------------------------
+// R04 (Review 14.09.): ein spaet erkannter Reset beendet nur, was er belegt
+// ---------------------------------------------------------------------------
+
+/// Der Reset passiert **vor** dem Aufruf, der Governor sieht ihn danach.
+///
+/// Basislinie 100, dann startet das Backend neu (Zaehler 0), ohne dass der
+/// Governor es schon weiss. Der naechste Aufruf geht in den **neuen** Prozess
+/// und verliert dort seine Verbindung. Erst danach meldet der Poller den
+/// Abfall 100 → 0.
+///
+/// Vorher endete dieser Anspruch mit dem Reset: „abgebrochen, also lief er im
+/// alten Prozess". Das stimmt hier nicht — er lief im neuen und rechnet dort
+/// womoeglich weiter. Seit R04 entscheidet ein Beleg statt der Reihenfolge:
+/// Das Backend hat seit diesem Dispatch nie gezaehlt, also bleibt der Kredit
+/// gehalten.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delayed_reset_does_not_release_a_call_it_cannot_place() {
+    let fake = Arc::new(FakeExecutor::default());
+    fake.set_evidence(100);
+    let handle = actor_with(ONE_MODEL, &[(ENDPOINT_A, &fake)]);
+    await_baselines(&handle).await;
+
+    // Neuer Backendprozess. Der Governor hat den Reset noch nicht gesehen.
+    fake.set_evidence(0);
+    fake.expect_error("detector_main", aborted());
+    assert!(
+        !submit(&handle, 1, 0, "detector").await,
+        "der Aufruf bricht ab"
+    );
+    assert_eq!(quarantined(&handle).await, 1);
+
+    // Der Poller meldet jetzt den Abfall. Er belegt das Ende dieses Aufrufs
+    // nicht, also bleibt der Kredit gehalten.
+    assert!(
+        !settles_at(&handle, 0, Duration::from_millis(1_500)).await,
+        "ein Zaehlerabfall ohne Beleg gab den Kredit frei"
+    );
+    assert_eq!(quarantined(&handle).await, 1);
+}
+
+/// Der Gegenfall: das Backend hat nach dem Dispatch noch gezaehlt.
+///
+/// Dann lief die Epoche zur Zeit des Aufrufs nachweislich noch, und ein
+/// spaeterer Abfall belegt sein Ende. Der Kredit kommt zurueck — sonst waere
+/// der Fix eine Bremse, die nie mehr loesst.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_still_ends_a_call_the_counter_saw_alive() {
+    let fake = Arc::new(FakeExecutor::default());
+    fake.set_evidence(100);
+    fake.expect_error("detector_main", aborted());
+    let handle = actor_with(ONE_MODEL, &[(ENDPOINT_A, &fake)]);
+    await_baselines(&handle).await;
+
+    assert!(
+        !submit(&handle, 1, 0, "detector").await,
+        "der Aufruf bricht ab"
+    );
+    assert_eq!(quarantined(&handle).await, 1);
+    // Der Poller laeuft und meldet weiter 100: das Backend lebt, die Epoche
+    // auch. Danach faellt der Zaehler.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    fake.set_evidence(0);
+    assert!(
+        settles_at(&handle, 0, Duration::from_millis(2_000)).await,
+        "der belegte Neustart gab den Kredit nicht frei"
+    );
+}
