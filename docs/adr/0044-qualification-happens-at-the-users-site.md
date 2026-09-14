@@ -1,0 +1,121 @@
+# ADR-0044: Die Qualifikation findet beim Anwender statt
+
+**Status:** Akzeptiert · 2026-09-14
+**Betrifft:** `cli/autotune` (neu), `cli/init`, `cli/calibrate`, `cli/doctor`,
+`vig-bench/vig-fit`; ADR-0004 (Slots), ADR-0019 (Profilmanifest), ADR-0026
+(gerichtete Interferenz), ADR-0035 (`source: declared`), ADR-0039 (zweites
+Backend)
+**Ausloeser:** Jede veroeffentlichte Zahl dieses Projekts stammt von einer
+einzigen Maschine ([support-matrix](../support-matrix.md)). Auf der
+Telefon-GPU kehrt sich das Vorzeichen um
+([android-gpu.md](../benchmark/android-gpu.md)).
+
+## Kontext
+
+Ein Interessent stellt genau eine Frage: **Traegt meine Hardware meine Last,
+und bringt der Governor mir dabei etwas?** Wir koennen sie nicht beantworten.
+Unsere Zahlen kommen von einem RTX-3070-Laptop mit Triton 2.70 und einem
+Modellsatz, den wir ausgesucht haben. Auf einem Pixel 2 vor einem
+TFLite-Backend ist der Befund ein anderer — dort ueberlappt das Backend
+Transport- und CPU-Anteile, die wir serialisieren, und ein Slot beschreibt es
+falsch.
+
+Die ehrliche Antwort auf eine Frage, die wir nicht beantworten koennen, ist
+nicht eine vorsichtigere Zahl. Sie ist ein Werkzeug, das die Frage **dort**
+beantwortet, wo sie gestellt wird. Die Bausteine dafuer gab es einzeln:
+`vig init`, `vig calibrate`, `vig-fit`, `vig doctor`. Was fehlte, war die
+Verbindung — und die Regeln, nach der sie ein Ergebnis zusammenfasst.
+
+Denn genau daran entscheidet sich alles: Ein Werkzeug, das eine Qualifikation
+*erteilen* kann, wird benutzt, um sie zu erteilen. Aus einer Messung unter
+Fremdlast wird dann ein Datenblatt, und aus einer verworfenen Reihe eine
+geschaetzte Zahl, die in der Konfigurationsdatei aussieht wie eine gemessene.
+
+## Entscheidung
+
+**`vig autotune` misst beim Anwender und erteilt nie eine Qualifikation.**
+Es kann sie nur **verweigern** (etwas hielt nicht) oder **offenlassen**
+(nichts sprach dagegen). Ein positives Ergebnis heisst „nichts sprach
+dagegen", nicht „freigegeben", und der Bericht sagt diesen Unterschied.
+
+Daraus folgen vier Regeln, die der Code durchhaelt:
+
+1. **Eine verworfene Messreihe bleibt verworfen.** Die Groesse, die sie
+   ergeben haette, wird **nicht gesetzt**. Der Bericht nennt sie, den Grund
+   (meist ein wandernder Takt) und die Abhilfe. Die Schwelle wird nicht
+   gelockert.
+2. **Kein geratener Wert sieht aus wie ein gemessener.** Was nicht messbar
+   war, bleibt leer oder traegt sichtbar `source: declared` (ADR-0035).
+   Slots kommen aus der *gemessenen* Nebenlaeufigkeit des Backends, nicht aus
+   einer Annahme (ADR-0004).
+3. **Fremdlast entwertet die Zelle.** Lief waehrend eines Messschritts
+   anderes auf der Maschine, wird er als `contaminated` gefuehrt, und ein
+   Bericht aus verschmutzten Zellen ist keine Qualifikation.
+4. **Ein Ergebnis gegen uns ist ein normales Ergebnis.** Sagt `vig-fit`, dass
+   der Governor auf dieser Last nichts bringt, ist genau das die Schlagzeile
+   des Berichts — als Feststellung, nicht als Fussnote.
+
+**Was `autotune` nicht misst, sind Vertraege.** Periode, Frist und
+Hoechstalter sind Zusagen des Betreibers an seine Anwendung. Kein Messlauf
+kann sie herausfinden. Stehen sie nicht da, bricht `autotune` nach Schritt 1
+ab und sagt, welche Felder fehlen — statt plausible einzusetzen.
+
+**`vig-cli` haengt nicht von `vig-bench` ab.** `vig-fit` gehoert zum
+Messkasten, nicht zum Produkt. `autotune` sucht es neben dem eigenen Binary
+oder unter `VIG_FIT_BIN`; fehlt es, bleibt die Frage „lohnt es sich?"
+**offen** und der Bericht nennt den Befehl. Eine Abhaengigkeit vom Messkasten
+waere der bequemere Weg und wuerde die Grenze aufloesen, die ADR-0033 zieht.
+
+**Keine Plattformannahme.** Derselbe `vig` laeuft statisch auf `aarch64` vor
+einem TFLite-Backend. Dort gibt es kein `nvidia-smi` und deshalb keinen
+Hardwarezustand. `autotune` scheitert daran nicht und misst auch nicht still
+etwas anderes: Der Bericht fuehrt „Takt nicht beobachtbar" als eigenen
+Abschnitt und sagt, dass die Reihen nicht gegen einen wandernden Takt
+abgesichert werden konnten.
+
+## Konsequenzen
+
+- **Die Qualifikation verschiebt sich zum Anwender**, und damit auch die
+  Beweislast. Wir behaupten nichts ueber fremde Hardware; wir liefern das
+  Werkzeug, das dort misst, und ein eingefrorenes Ergebnis mit Manifest
+  (ADR-0019): Hardware, Treiber, Digests, Zeitpunkt, Identitaet des
+  Governors.
+- **Der Ausgabewert trennt Fehler von Ergebnis.** „Der Governor bringt hier
+  nichts" ist Exitcode 0. Nur ein Schritt, der nicht durchlief, und eine
+  Messung, die keine einzige Reihe behalten hat, sind ein Fehlschlag. Ein
+  Urteil gegen uns darf keine CI rot faerben.
+- **Der Lauf ist wiederaufnehmbar**, und jeder Schritt schreibt sofort auf
+  die Platte. Eine halbe Stunde Messung, die ein Abbruch vollstaendig
+  vernichtet, wird kein zweites Mal gestartet.
+- **Die Dauer ist eine Zusage.** Der Befehl schaetzt vorab und nennt, wenn
+  der volle Umfang laenger dauert als die zugesagte halbe Stunde, den
+  kuerzeren Umfang (`--quick`, `--only`). Ein Unittest haelt die Schaetzung
+  gegen die Zusage.
+- **Die Validierung gegen die eigenen Aufbauten hat drei Luecken gezeigt**
+  ([validierung-autotune.md](../benchmark/validierung-autotune.md)), die
+  offen bleiben:
+  - **Die Fremdlasterkennung ist zu grob.** Sie vergleicht `/proc/loadavg`
+    gegen eine feste Schwelle. Auf dem Telefon laufen Backend und Messklient
+    auf demselben Geraet, die gemeldete Last ist die Arbeit der Messung
+    selbst — der Lauf galt als verschmutzt, obwohl nichts Fremdes lief. Auf
+    einem Laptop unter der ueblichen Messdisziplin (gebundene Kerne, ruhige
+    Maschine) trifft sie richtig. Eine belastbare Erkennung muesste die
+    gebundenen Kerne betrachten statt der Gesamtlast, oder die Beobachtung
+    als Angabe fuehren, ohne daraus ein Urteil abzuleiten.
+  - **Die Belegungsstufe misst auf Backends mit einem Thread je Modell die
+    falsche Groesse.** Sie belegt den zweiten Slot mit demselben Modell; dort
+    wartet der Auftrag im Modellthread, statt nebenher zu laufen. Das ist
+    eine Warteschlange, keine Nebenlaeufigkeit. `autotune` uebernimmt die
+    Zahl kommentarlos.
+  - **Die eingefrorene Konfiguration unterscheidet nicht zwischen gemessen
+    und uebernommen.** Wird eine Reihe verworfen, bleibt der vorhandene Wert
+    stehen — richtig so, denn geschaetzt wird nichts. Aber er steht danach
+    mit demselben `samples:` und derselben `source:` da wie ein frisch
+    gemessener. Der Bericht sagt, wie viele Reihen verwertbar waren; die
+    Datei, die in Betrieb geht, sagt es nicht.
+- **Was offen bleibt:** `autotune` misst Versorgung, nicht Erkennungsguete;
+  es sagt nichts ueber andere Hardware als die, auf der es lief, und nichts
+  ueber Stunden — dafuer gibt es den Dauerlauf. Ob die Belegungsstufe des
+  Kalibrators fuer Backends mit einem Thread je Modell die richtige Groesse
+  misst, ist ein offener Befund aus
+  [android-gpu.md](../benchmark/android-gpu.md) und bleibt es.

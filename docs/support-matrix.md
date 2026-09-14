@@ -12,6 +12,15 @@ Three levels are used throughout, and the difference matters:
 | **Untested** | No measurement, no test run. Treat every number in this repository as inapplicable. |
 | **Not supported** | The model in the code does not represent this case. Do not deploy. |
 
+**This table describes our hardware, not yours.** Every number below the line
+"Qualified" comes from one laptop. For your machine the answer is a
+measurement, and `vig autotune` is how you take it: it measures runtimes,
+concurrency and interference on your hardware, freezes the result, and writes
+a report saying what it measured and what it explicitly does not cover. It
+never issues a qualification — it refuses one or leaves it open
+([ADR-0044](adr/0044-qualification-happens-at-the-users-site.md),
+[getting started](getting-started.md)).
+
 ## Hardware
 
 | Configuration | Level | Notes |

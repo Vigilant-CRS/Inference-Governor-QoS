@@ -7,6 +7,23 @@ bedeutet, steht in [docs/releases.md](docs/releases.md).
 
 ### Hinzugefuegt
 
+- **`vig autotune` qualifiziert die eigene Hardware — ohne uns.** Ein Befehl
+  fuehrt die vorhandenen Schritte zusammen: Modelle am Backend lesen
+  (`init`), Laufzeiten, Nebenlaeufigkeit und gerichtete Interferenz messen
+  (`calibrate`), „lohnt es sich hier?" beantworten (`vig-fit`) und die
+  entstandene Konfiguration pruefen (`doctor`). Heraus kommen eine
+  eingefrorene Konfiguration, ein Bericht als Markdown **und** JSON und ein
+  Manifest nach ADR-0019. Der Lauf schaetzt seine Dauer vorab, schreibt nach
+  jedem Schritt auf die Platte und nimmt nach einem Abbruch wieder auf;
+  `--quick` und `--only` verkleinern den Umfang.
+  **Was der Befehl nicht kann, ist eine Qualifikation zu erteilen**
+  (ADR-0044): Er kann sie nur verweigern oder offenlassen. Eine verworfene
+  Messreihe bleibt verworfen und die Groesse, die sie ergeben haette,
+  ungesetzt; ein Schritt unter Fremdlast gilt als verschmutzt; und ein Urteil
+  gegen uns — „der Governor bringt hier nichts" — ist die Schlagzeile des
+  Berichts, nicht seine Fussnote. Ohne `nvidia-smi`, etwa auf ARM vor dem
+  TFLite-Backend, scheitert nichts und wird nichts stillschweigend ersetzt:
+  der Bericht fuehrt „Takt nicht beobachtbar" als eigenen Abschnitt.
 - **`vig init` schreibt die erste Konfiguration aus einem laufenden Backend.**
   Modellnamen, Tensorformen und Datentypen liest das Werkzeug ueber OIP
   (`repository_index` und die Modellmetadaten) und traegt sie ein. Alles, was
@@ -278,6 +295,23 @@ Verbindungsgrenze am Metrikport.
 
 ### Behoben
 
+- **Die erste Messreihe traf eine kalte Karte.** `vig calibrate` verwarf je
+  Reihe zwanzig Aufrufe — genug gegen einen kalten Cache, nichts gegen einen
+  kalten Takt. Auf dem RTX-3070-Laptop lief der SM-Takt waehrend der ersten
+  Reihe von 1500 auf 1800 MHz, und die Reihe wurde deshalb verworfen; auf dem
+  Telefon gibt es keinen Taktmesser, der das haette auffangen koennen, und
+  eine Detektor-Grundlinie lag um 31,6 % daneben. Vor der ersten Reihe faehrt
+  der Kalibrator die Karte jetzt unter Dauerlast warm und wartet, **bis der
+  Takt steht**; wo der Takt lesbar ist, belegt er das mit dem erreichten
+  Wert. Wo er nicht lesbar ist — ARM, TFLite —, waermt er eine feste Zeit und
+  sagt ausdruecklich, dass er nichts belegen kann: „Vorlauf: 20 s gefahren,
+  aber nicht belegt". Ein Vorlauf ohne Nachweis ist besser als eine kalte
+  erste Reihe, aber er wird nicht als Nachweis ausgegeben. Betrifft
+  `vig calibrate` und damit auch `vig autotune`.
+- **Der Qualifikationsbericht zeigte Rust-Innereien statt des Geraets.**
+  Geraetename und Treiber standen als `Observed(Sample { value: "...",
+  source: NvidiaSmi, observed_at_ms: ... })` im Manifest. In den Bericht
+  schaut ein Interessent; jetzt steht dort der Wert oder `not observable`.
 - **Ein Pilotlauf ohne auswertbares Kriterium sah aus wie ein bestandener**
   (Review 14.09., R05). `RunStatus::NoVerdict` lieferte Exitcode 0. Jetzt
   liefert eine Teilmatrix **3**, und neben dem Status steht ein

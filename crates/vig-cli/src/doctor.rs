@@ -16,14 +16,14 @@ use vig_core::generative::{Latencies, Plan};
 
 /// Das Gesamturteil eines Laufs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Verdict {
+pub(crate) enum Verdict {
     Ready,
     ReadyWithWarnings,
     NotReady,
 }
 
 impl Verdict {
-    const fn label(self) -> &'static str {
+    pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Ready => "READY",
             Self::ReadyWithWarnings => "READY_WITH_WARNINGS",
@@ -53,13 +53,36 @@ pub(crate) async fn run(
     path: &Path,
     offline: bool,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let verdict = Box::pin(verdict_of(path, offline)).await?;
+    println!("\nRESULT {}", verdict.label());
+    Ok(match verdict {
+        Verdict::NotReady => ExitCode::FAILURE,
+        Verdict::Ready | Verdict::ReadyWithWarnings => ExitCode::SUCCESS,
+    })
+}
+
+/// Fuehrt dieselbe Pruefung aus und gibt das Urteil zurueck, statt es zu
+/// drucken.
+///
+/// `vig autotune` braucht das Urteil als Wert, nicht als Zeile auf der
+/// Standardausgabe. Ein Werkzeug, das die Ausgabe eines anderen nach Woertern
+/// durchsucht, meldet irgendwann das Falsche, weil jemand die Zeile umformuliert
+/// hat — und hier haengt an der Zeile die Aussage, ob eine Konfiguration
+/// traegt.
+///
+/// # Errors
+///
+/// Wenn die Konfigurationsdatei nicht gelesen werden kann.
+pub(crate) async fn verdict_of(
+    path: &Path,
+    offline: bool,
+) -> Result<Verdict, Box<dyn std::error::Error>> {
     let text = std::fs::read_to_string(path)?;
     let config = match Config::from_yaml(&text) {
         Ok(c) => c,
         Err(e) => {
             fail(&e.to_string());
-            println!("\nRESULT {}", Verdict::NotReady.label());
-            return Ok(ExitCode::FAILURE);
+            return Ok(Verdict::NotReady);
         }
     };
 
@@ -76,8 +99,7 @@ pub(crate) async fn run(
     }
 
     let Ok(resolved) = config.resolve() else {
-        println!("\nRESULT {}", Verdict::NotReady.label());
-        return Ok(ExitCode::FAILURE);
+        return Ok(Verdict::NotReady);
     };
 
     verdict = verdict.max(check_contracts(&resolved));
@@ -94,11 +116,7 @@ pub(crate) async fn run(
     verdict = verdict.max(check_semantics(&resolved));
     verdict = verdict.max(check_hardware(offline));
 
-    println!("\nRESULT {}", verdict.label());
-    Ok(match verdict {
-        Verdict::NotReady => ExitCode::FAILURE,
-        Verdict::Ready | Verdict::ReadyWithWarnings => ExitCode::SUCCESS,
-    })
+    Ok(verdict)
 }
 
 /// Versorgungsschutz gegen Mindestfortschritt: schliesst die eine Zusage die

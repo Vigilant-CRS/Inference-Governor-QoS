@@ -116,17 +116,44 @@ overlapping wins.</p>
 Break-even is between 100 % and 110 % offered load
 ([load ramp](docs/benchmark/load-ramp.md)).
 
-## Try it against your own setup
+## Qualify your own hardware
+
+Every number on this page comes from one laptop. We cannot tell you what
+happens on your machine — so we give you the tool that finds out, there.
+
+> **Start it, and in half an hour it has measured your machine and tells you
+> what it can carry. And if it turns out you don't need us, it says that too.**
 
 ```bash
-# 1. Point it at the Triton you already run and check the configuration.
-vig doctor -c vig.yaml
+vig autotune --endpoint 127.0.0.1:8001 -c vig.yaml -o qualification
+```
 
-# 2. Measure this machine instead of guessing about it.
-vig profile -c vig.yaml -o measured.yaml
+One command runs the whole chain on your hardware: it reads your models from
+the server you already run, measures runtimes, real backend concurrency and
+directed interference, answers whether the governor is worth it on your load,
+and checks the configuration it produced. What it leaves behind is a frozen
+configuration and a report — Markdown and JSON — stating what was measured,
+under which conditions, what was discarded and why, and what explicitly does
+not hold.
 
-# 3. Run the governor in front of Triton — the client only changes its address.
-vig serve -c measured.yaml
+**It cannot issue a qualification, only refuse one or leave it open.** That is
+deliberate. A discarded measurement series stays discarded and the value it
+would have produced stays unset; a step that ran while something else used the
+machine is marked contaminated; nothing that was not measured is made to look
+measured. And "the governor brings you nothing on this load" is one of its
+normal results, printed as the headline rather than buried
+([ADR-0044](docs/adr/0044-qualification-happens-at-the-users-site.md)).
+
+It runs wherever the governor runs, including `aarch64` in front of a TFLite
+backend. Where there is no `nvidia-smi` there is no clock to observe, and the
+report says so instead of failing or quietly measuring something else.
+
+The individual steps remain, for anyone who wants to drive them:
+
+```bash
+vig doctor  -c vig.yaml                 # check without starting anything
+vig profile -c vig.yaml -o measured.yaml # measure this machine
+vig serve   -c measured.yaml             # the client only changes its address
 ```
 
 Full walkthrough: [getting started](docs/getting-started.md). What is

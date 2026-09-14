@@ -52,6 +52,7 @@ Spec-Stelle explizit.
 | [0041](0041-the-look-ahead-protects-the-supply-not-only-the-deadline.md) | Der Look-ahead schuetzt die Versorgung, nicht nur die Deadline | Spec 10.7, NV-01, ADR-0005, ADR-0036, ADR-0038 | Akzeptiert, opt-in |
 | [0042](0042-an-end-is-proven-not-assumed.md) | Ein Ende wird belegt, nicht aus der Reihenfolge geschlossen | Review 14.09. R03/R04, ADR-0003, ADR-0040 | Akzeptiert |
 | [0043](0043-an-impossible-contract-is-reported-not-alternately-broken.md) | Ein unerfuellbarer Vertrag wird gemeldet, nicht abwechselnd gebrochen | Review 14.09. R07, Spec 19.6, ADR-0014, ADR-0035, ADR-0041 | Akzeptiert |
+| [0044](0044-qualification-happens-at-the-users-site.md) | Die Qualifikation findet beim Anwender statt (`vig autotune`) | ADR-0004, ADR-0019, ADR-0026, ADR-0035, ADR-0039 | Akzeptiert |
 
 ## Format
 

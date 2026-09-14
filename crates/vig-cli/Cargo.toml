@@ -20,7 +20,7 @@ vig-backend-triton = { path = "../vig-backend-triton", version = "0.2.0" }
 vig-gateway = { path = "../vig-gateway", version = "0.2.0" }
 vig-platform = { path = "../vig-platform", version = "0.2.0" }
 clap = { version = "4", features = ["derive"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "process"] }
 tonic = { version = "0.14.6", features = ["tls-ring"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -28,6 +28,22 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # ausgetauschte Gewichte unter gleicher Versionsnummer faengt. Ein selbst
 # gebauter Hash waere hier die falsche Sparsamkeit.
 sha2 = "0.10"
+# `vig autotune` schreibt seinen Bericht zusaetzlich als JSON, damit er sich
+# weiterverarbeiten laesst. Von Hand gebautes JSON haelt genau so lange, bis
+# ein Messgrund ein Anfuehrungszeichen enthaelt.
+serde_json = "1.0.151"
+
+[dev-dependencies]
+# Der funktionale Test von `vig autotune` bindet das OIP-Mock der
+# Gateway-Tests ueber `#[path]` ein, statt ein zweites zu schreiben, das
+# gegen das erste driftet. Dessen Streaming-Methode braucht tokio-stream —
+# Version und Features wie in vig-gateway, damit beide Crates dieselbe Datei
+# uebersetzen.
+tokio-stream = { version = "0.1.19", features = ["net"] }
+# `net` fuer den TcpListener des Mocks. Ueber tonic waere das Feature
+# ohnehin aktiv; sich auf die Vereinigung fremder Features zu verlassen,
+# bricht aber, sobald jemand tonic austauscht.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
 
 [lints]
 workspace = true

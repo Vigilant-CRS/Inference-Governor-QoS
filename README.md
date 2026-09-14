@@ -202,19 +202,33 @@ The break-even is between 100 % and 110 % offered load
 
 ## Quick start
 
+Start it, and in half an hour it has measured your machine and tells you what
+it can carry. And if it turns out you do not need us, it says that too.
+
 ```bash
-# 0. Let the machine write the first draft from your running Triton.
-#    It fills in models, shapes and types; periods and deadlines stay TODO.
-vig init --endpoint 127.0.0.1:8001 --out vig.yaml
+# Qualify your own hardware. Writes a draft config, measures runtimes,
+# concurrency and interference, asks whether the governor is worth it here,
+# and checks the result.
+vig autotune --endpoint 127.0.0.1:8001 -c vig.yaml -o qualification
 
-# 1. Point at your existing Triton and check that everything lines up.
-vig doctor -c examples/gate_m3/vig.yaml
+# Then run the governor in front of Triton, on the frozen configuration.
+vig serve -c qualification/measured.yaml --listen 127.0.0.1:9001
+```
 
-# 2. Measure this machine instead of guessing about it.
-vig calibrate -c examples/gate_m3/vig.yaml -o measured.yaml
+It leaves behind `qualification/measured.yaml` and a report in Markdown and
+JSON: what was measured, under what conditions, what was discarded and why,
+and what explicitly does not hold. **It never issues a qualification** — a
+discarded measurement series stays discarded, a run under foreign load is
+marked as such, and "the governor brings you nothing here" is one of its
+normal answers ([ADR-0044](docs/adr/0044-qualification-happens-at-the-users-site.md)).
 
-# 3. Run the governor in front of Triton.
-vig serve -c measured.yaml --listen 127.0.0.1:9001
+The individual steps are still there for anyone who wants them:
+
+```bash
+vig init --endpoint 127.0.0.1:8001 --out vig.yaml   # draft from a running server
+vig doctor   -c vig.yaml                            # check without starting anything
+vig calibrate -c vig.yaml -o measured.yaml          # measure this machine
+vig serve    -c measured.yaml --listen 127.0.0.1:9001
 ```
 
 Your client changes one line — the endpoint. Optionally it adds parameters

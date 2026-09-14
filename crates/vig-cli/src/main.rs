@@ -17,6 +17,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 mod artifact;
+mod autotune;
 mod calibrate;
 mod doctor;
 mod identity;
@@ -40,6 +41,52 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Qualify your own hardware: measure it, freeze the result, report it.
+    ///
+    /// Start it, and in half an hour it has measured your machine and tells
+    /// you what it can carry. And if it turns out you do not need us, it says
+    /// that too.
+    ///
+    /// It runs the existing steps in order — read the models from the backend,
+    /// measure runtimes and interference, ask whether the governor is worth it
+    /// here, check the result — and writes a frozen configuration plus a
+    /// report in Markdown and JSON.
+    ///
+    /// What it will not do: issue a release. A discarded measurement series
+    /// stays discarded and its value stays unset; a run under foreign load is
+    /// marked as such; nothing that was not measured is made to look measured.
+    Autotune {
+        /// Address of the inference server to measure against.
+        #[arg(short, long, default_value = "127.0.0.1:8001")]
+        endpoint: String,
+        /// The configuration with your contracts. Written as a draft if absent.
+        #[arg(short, long, value_name = "FILE", default_value = "vig.yaml")]
+        config: PathBuf,
+        /// Directory for the frozen configuration and the report.
+        #[arg(short, long, value_name = "DIR", default_value = "qualification")]
+        out: PathBuf,
+        /// Number of measurement runs per step.
+        #[arg(long, default_value_t = profile::DEFAULT_SAMPLES)]
+        samples: usize,
+        /// Release period in microseconds. Without it, back to back.
+        #[arg(long, value_name = "US")]
+        periodic_us: Option<u64>,
+        /// Measure a smaller matrix: faster, and less precise about it.
+        #[arg(long)]
+        quick: bool,
+        /// Run a single step instead of all four.
+        #[arg(long, value_enum, value_name = "STEP")]
+        only: Option<autotune::Step>,
+        /// Check the configuration only; do not contact the backend for it.
+        #[arg(long)]
+        offline: bool,
+        /// Ignore a previous run's progress and start over.
+        #[arg(long)]
+        restart: bool,
+        /// Where the numbers come from and what they are claimed valid for.
+        #[command(flatten)]
+        identity: identity::IdentityArgs,
+    },
     /// Write a starting configuration from a running inference server.
     ///
     /// Fills in what the machine knows — models, tensor names, shapes, data
@@ -184,6 +231,31 @@ async fn run() -> ExitCode {
     // Die generierten gRPC-Typen sind gross; ohne `Box::pin` landet ein
     // 90-KB-Future auf dem Stack des Aufrufers.
     let result = match cli.command {
+        Command::Autotune {
+            endpoint,
+            config,
+            out,
+            samples,
+            periodic_us,
+            quick,
+            only,
+            offline,
+            restart,
+            identity,
+        } => {
+            let options = autotune::Options {
+                endpoint,
+                config,
+                out_dir: out,
+                samples,
+                period_us: periodic_us,
+                quick,
+                only,
+                offline,
+                restart,
+            };
+            Box::pin(autotune::run(&options, &identity)).await
+        }
         Command::Init {
             endpoint,
             out,

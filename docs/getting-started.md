@@ -16,6 +16,45 @@ cargo build --release
 # binary at target/release/vig
 ```
 
+## The short path — `vig autotune`
+
+Start it, and in half an hour it has measured your machine and tells you what
+it can carry. And if it turns out you don't need us, it says that too.
+
+```bash
+vig autotune --endpoint 127.0.0.1:8001 -c vig.yaml -o qualification
+```
+
+This runs the whole chain below in one go — draft, measure, "is it worth it
+here?", check — and leaves behind:
+
+| File | What it is |
+|---|---|
+| `qualification/measured.yaml` | The frozen configuration: measured profiles, slots from the backend's **measured** concurrency, the interference table |
+| `qualification/qualification.md` | The report to read: what was measured, under what conditions, what was discarded, what does not hold |
+| `qualification/qualification.json` | The same for a machine — mail it, or hang it in CI |
+
+It prints its estimated duration before it starts, writes results to disk
+after every step, and resumes where it stopped if you interrupt it. `--quick`
+measures a smaller matrix; `--only measure` and `--only check` run a single
+step.
+
+**It never issues a qualification.** It can refuse one or leave it open, and
+the report says which. A discarded measurement series stays discarded and the
+value it would have produced stays unset — the threshold is not relaxed to
+make a run look successful. A step that ran while something else used the
+machine is marked contaminated. And if `vig-fit` finds the governor brings you
+nothing on this load, that sentence is the headline of the report
+([ADR-0044](adr/0044-qualification-happens-at-the-users-site.md)).
+
+**What it cannot measure are your contracts.** How often your camera delivers
+and how long a result stays useful is a promise you make to your application.
+If those fields are still `TODO_`, `autotune` stops after the first step and
+names them rather than inventing plausible numbers.
+
+The rest of this page is the same path by hand, one command per step. Use it
+when you want to understand or vary what `autotune` does for you.
+
 ## Step 0 — let the machine write the first draft
 
 You do not have to type the model names, tensor shapes and data types out of

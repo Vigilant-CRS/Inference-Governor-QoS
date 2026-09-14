@@ -25,7 +25,7 @@ Die Crates und ihre Zuständigkeit:
 | `vig-core` | 12 400 | Der deterministische Scheduling-Kern. Keine Uhr, kein I/O, keine Dependencies. |
 | `vig-gateway` | 6 700 | Der OIP-Server, der Single-Owner-Actor, die Backendnaht, der Prometheus-Endpunkt, die Datenpfadbudgets. |
 | `vig-bench` | 3 700 | Messläufe gegen echtes Triton: `gate-m3`, `load-ramp` (auch mit Lastspitzen), `frontier`, `soak`, `shm-latency`, `wp26`. |
-| `vig-cli` | 2 900 | `vig doctor` / `profile` / `calibrate` / `serve` / `verify`. |
+| `vig-cli` | 3 500 | `vig autotune` / `init` / `doctor` / `profile` / `calibrate` / `serve` / `verify`. |
 | `vig-config` | 2 800 | Schema, Parser, Validator. Lehnt ab, statt zu reparieren. |
 | `vig-platform` | 2 600 | Lesende Hardwarebeobachtung und der Messpfad. Stellt nichts. |
 | `vig-sim` | 2 200 | Discrete-Event-Simulator mit bitgleich reproduzierbaren Traces. |

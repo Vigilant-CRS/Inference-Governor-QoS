@@ -1468,8 +1468,10 @@ name = "vig-cli"
 version = "0.2.0"
 dependencies = [
  "clap",
+ "serde_json",
  "sha2",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tracing",
  "tracing-subscriber",

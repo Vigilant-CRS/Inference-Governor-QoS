@@ -172,6 +172,24 @@ async fn measure(
 static DISCARDED: AtomicU64 = AtomicU64::new(0);
 static QUALIFIED: AtomicU64 = AtomicU64::new(0);
 
+/// Wie viele Reihen qualifiziert und wie viele verworfen wurden.
+///
+/// `vig autotune` uebernimmt diese Zahlen in seinen Bericht. Sie aus der
+/// gedruckten Zeile zurueckzulesen waere die schlechtere Kopplung: an ihnen
+/// haengt die Aussage, ob ueberhaupt etwas gemessen wurde.
+pub(crate) fn qualification() -> (u64, u64) {
+    (
+        QUALIFIED.load(Ordering::Relaxed),
+        DISCARDED.load(Ordering::Relaxed),
+    )
+}
+
+/// Setzt die Zaehler vor einem Lauf zurueck.
+pub(crate) fn reset_qualification() {
+    QUALIFIED.store(0, Ordering::Relaxed);
+    DISCARDED.store(0, Ordering::Relaxed);
+}
+
 /// Sagt am Ende, was die Qualifikation ergeben hat.
 ///
 /// Ohne diese Zeile liest sich ein Lauf mit lauter verworfenen Reihen wie ein
@@ -205,6 +223,138 @@ fn report_qualification() {
 /// dessen Initialisierung, und sie in einer Messung zu fuehren macht die
 /// Messung zu einer Aussage ueber den Start.
 const CALIBRATE_WARMUP: usize = 20;
+
+/// Wie lange der Vorlauf hoechstens laeuft, bis der Takt steht.
+const PREWARM_MAX_SECS: u64 = 45;
+
+/// Wie lange vorgewaermt wird, wenn sich der Takt nicht beobachten laesst.
+const PREWARM_BLIND_SECS: u64 = 20;
+
+/// Wie viele aufeinanderfolgende Runden den Takt als stehend belegen.
+const PREWARM_STEADY_ROUNDS: usize = 3;
+
+/// Wie weit zwei Taktmessungen auseinanderliegen duerfen, in MHz.
+const PREWARM_TOLERANCE_MHZ: u32 = 30;
+
+/// Was der Vorlauf erreicht hat.
+enum Prewarm {
+    /// Der Takt stand, und das ist belegt.
+    Verified {
+        /// Der Takt, bei dem er stehenblieb.
+        sm_mhz: u32,
+        /// Wie lange das gedauert hat.
+        secs: u64,
+    },
+    /// Vorgewaermt, aber ohne Beleg — hier gibt es keinen Taktmesser.
+    ///
+    /// Besser als eine kalte erste Reihe, aber ausdruecklich **kein**
+    /// Nachweis: was nicht beobachtet wurde, wird auch nicht behauptet.
+    Unverified {
+        /// Warum kein Beleg moeglich war.
+        reason: String,
+        /// Wie lange vorgewaermt wurde.
+        secs: u64,
+    },
+}
+
+impl Prewarm {
+    /// Sagt dem Betreiber, worauf die folgenden Zahlen stehen.
+    fn report(&self) {
+        match self {
+            Self::Verified { sm_mhz, secs } => {
+                eprintln!("  Vorlauf: Takt steht bei {sm_mhz} MHz nach {secs} s.\n");
+            }
+            Self::Unverified { reason, secs } => {
+                eprintln!(
+                    "  Vorlauf: {secs} s gefahren, aber nicht belegt ({reason}).\n\
+                     \x20 Ein wandernder Takt faellt hier nicht auf.\n"
+                );
+            }
+        }
+    }
+}
+
+/// Faehrt die Karte warm, bevor die erste Messreihe zaehlt.
+///
+/// Der Warmlauf im Messkern verwirft zwanzig Aufrufe je Reihe. Das reicht
+/// gegen einen kalten Cache, nicht gegen einen kalten Takt: auf dem
+/// RTX-3070-Laptop lief der SM-Takt waehrend der ersten Reihe noch von 1500
+/// auf 1800 MHz, und die Reihe wurde deshalb verworfen. Wo der Takt lesbar
+/// ist, wartet dieser Vorlauf, bis er steht, und belegt das; wo er nicht
+/// lesbar ist — auf ARM etwa — laeuft er eine feste Zeit und sagt, dass er
+/// nichts belegen kann.
+async fn prewarm(client: &TritonClient, request: &ModelInferRequest) -> Prewarm {
+    use vig_platform::Collector as _;
+
+    let started = std::time::Instant::now();
+    let mut collector = vig_platform::NvidiaSmi::default();
+    let mut blind: Option<String> = None;
+    let mut stable: usize = 0;
+    let mut last: Option<u32> = None;
+
+    loop {
+        // Eine Runde Dauerlast, danach der Blick auf den Takt. Gewartet wird
+        // nicht: ein schlafender Prozess waermt keine GPU.
+        let round = std::time::Instant::now();
+        while round.elapsed() < std::time::Duration::from_secs(1) {
+            if client.infer(request.clone()).await.is_err() {
+                // Ein Fehlschlag im Vorlauf ist kein Messwert. Ob das Modell
+                // ueberhaupt antwortet, entscheidet die Reihe selbst.
+                break;
+            }
+        }
+        let secs = started.elapsed().as_secs();
+
+        let sm = collector
+            .snapshot()
+            .ok()
+            .and_then(|s| s.gpu(0).and_then(|g| g.clock_sm_mhz.value().copied()));
+
+        match sm {
+            None => {
+                if blind.is_none() {
+                    blind = Some("kein Taktmesser auf dieser Plattform".to_owned());
+                }
+                if secs >= PREWARM_BLIND_SECS {
+                    return Prewarm::Unverified {
+                        reason: blind.unwrap_or_default(),
+                        secs,
+                    };
+                }
+            }
+            Some(mhz) => {
+                stable = match last {
+                    Some(prev) if prev.abs_diff(mhz) <= PREWARM_TOLERANCE_MHZ => {
+                        stable.saturating_add(1)
+                    }
+                    _ => 0,
+                };
+                last = Some(mhz);
+                if stable >= PREWARM_STEADY_ROUNDS {
+                    return Prewarm::Verified { sm_mhz: mhz, secs };
+                }
+            }
+        }
+
+        if secs >= PREWARM_MAX_SECS {
+            return Prewarm::Unverified {
+                reason: last.map_or_else(
+                    || {
+                        blind
+                            .clone()
+                            .unwrap_or_else(|| "kein Takt lesbar".to_owned())
+                    },
+                    |mhz| {
+                        format!(
+                            "Takt stand nach {PREWARM_MAX_SECS} s nicht still (zuletzt {mhz} MHz)"
+                        )
+                    },
+                ),
+                secs,
+            };
+        }
+    }
+}
 
 /// Haelt im Hintergrund dauerhaft `count` Auftraege in Flug.
 ///
@@ -307,6 +457,9 @@ pub(crate) async fn run(
     eprintln!("Slots laut Konfiguration: {slots}; {samples} Messungen je Stufe\n");
 
     let mut measurements = Vec::new();
+    // Der Vorlauf gilt fuer den ganzen Lauf, nicht je Modell: warm ist die
+    // Karte danach fuer alle.
+    let mut warmed = false;
     for (logical, backend_models) in &models {
         for backend_model in backend_models {
             eprintln!("  {logical} -> {backend_model}");
@@ -364,7 +517,15 @@ pub(crate) async fn run(
                 crate::identity::now_rfc3339(),
             );
 
-            // Der Warmlauf steckt im Messkern; hier keiner mehr.
+            // Der Warmlauf im Messkern faengt den kalten Cache ab, nicht den
+            // kalten Takt. Deshalb vor der allerersten Reihe einmal die Karte
+            // auf einen stehenden Takt fahren — sonst beschreibt das erste
+            // Profil einen Betriebspunkt, den die Maschine im Betrieb nie
+            // hat, und wo kein Taktmesser existiert faellt das niemandem auf.
+            if !warmed {
+                Box::pin(prewarm(&client, &request)).await.report();
+                warmed = true;
+            }
             let Some(solo_run) = Box::pin(measure(
                 &client,
                 backend_model,
