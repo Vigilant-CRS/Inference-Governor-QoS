@@ -657,7 +657,14 @@ def thumbnail(path: Path) -> None:
     draw.text((80, 216), "is the only one worth", font=font(SANS_BOLD, 82), fill=TEXT)
     draw.text((80, 312), "computing.", font=font(SANS_BOLD, 82), fill=ACCENT)
     draw.line([(80, 440), (520, 440)], fill=ACCENT, width=6)
-    draw.text((80, 486), "answers in time   85 %  →  100 %", font=font(SANS_BOLD, 44),
+    # 99, nicht 100. Der Film sagt "to ninety-nine", und der Lauf, auf den die
+    # Messszene zeigt (gate-m3-r03), weist 99/99/99 % aus. Die 100 % stehen in
+    # einer anderen Messkette; sie hier zu zeigen hiesse, das Vorschaubild die
+    # guenstigere Zahl aus einem Lauf nehmen zu lassen, den das Video gar nicht
+    # belegt. Dieses Bild ist ausserdem das einzige ohne Quellenangabe und das
+    # erste, was jemand sieht - gerade hier darf nichts stehen, was der Film
+    # nicht haelt.
+    draw.text((80, 486), "answers in time   85 %  →  99 %", font=font(SANS_BOLD, 44),
               fill=OK)
     draw.text((80, 556), "one GPU · several models · measured, with the price shown",
               font=font(SANS, 30), fill=DIM)
