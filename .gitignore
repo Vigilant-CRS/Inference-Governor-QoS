@@ -10,3 +10,6 @@
 *.engine
 __pycache__/
 backends/**/target/
+
+# Die gebaute Projektseite (site/build.py) gehoert nicht ins Repository.
+/_site

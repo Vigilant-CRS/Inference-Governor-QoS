@@ -1,0 +1,3 @@
+# Die einzige Abhaengigkeit der Projektseite. Version fest, damit ein Build
+# von heute und einer in einem Jahr dieselbe Seite ergeben.
+markdown==3.7
