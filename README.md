@@ -118,6 +118,44 @@ For models that *can* be split, that changes:
 Twenty times more background progress for seven points of detector coverage —
 a visible, tunable trade instead of total starvation.
 
+### Measured again on 11–12 September, with corrected tooling
+
+Two things forced a re-measurement. The benchmark tools themselves bound their
+in-process gateway without `TCP_NODELAY`, which produced occasional 40 ms tails
+on the governor's side; and an external review found eight defects, all fixed.
+Everything below was then re-run on a quiet machine, with a watchdog that logs
+every foreign process above 30 % CPU and marks a block as contaminated.
+
+| Finding | Before | After |
+|---|---|---|
+| **Exactly at 100 % load** the governor dropped a lower-priority stream where Triton dropped nothing | 188 ‰ | **17 ‰** with `pipelining_depth: 1`, 4 ‰ together with the supply guard |
+| **Variant selection** missed cycles at 90–125 % load | up to 143 ‰ | **0 ‰** at every load point |
+| **Load bursts** looked like a loss | −3.7× | **no disadvantage** — the old number was the window view; from the consumer's side neither arm misses anything |
+| **Preemption** (XSched, two Triton processes) | untested | tuned Triton alone keeps all four streams at 100 %; the governor with a preemptible lane **draws level** — fresher detector answers, slightly older background |
+
+The cause of the first line is worth stating plainly: without pipelining the
+governor waited for each answer before sending the next request and left the
+GPU idle in between, while Triton had up to eight in flight. That was our bug,
+not a property of the approach.
+
+**And the price of preemption, which our earlier tables never showed:** the
+XSched shim itself slows the *protected* path by 17–20 % (detector p50 27.7 →
+32.5 ms). Preemption is not free, and it is paid where it hurts.
+
+**A second GPU, a second backend.** The same governor, without a single changed
+line, now runs in front of TFLite on the Adreno 540 of a Pixel 2
+([ADR-0039](docs/adr/0039-a-second-backend-proves-the-seam.md),
+[measurement](docs/benchmark/android-gpu.md)). The logic travels; the advantage
+does not. Where two thirds of a runtime are transport and CPU rather than GPU
+time, the backend's own overlapping beats our serialising — and one slot is the
+wrong description of that backend. Slot count is not tuning; it is a statement
+about the backend.
+
+Full reports: [11 September](docs/benchmark/messkette-2026-09-11.md),
+[12 September](docs/benchmark/messkette-2026-09-12.md),
+[acceptance](docs/benchmark/abnahme-2026-09-12.md),
+[pilot with preemption](docs/benchmark/pilot-praemption-2026-09-12.md).
+
 <details>
 <summary><b>What these numbers do not show</b> (click)</summary>
 
@@ -140,6 +178,8 @@ The benchmarks answer this with numbers, and the answer is not always "yes":
 | GPU below saturation | **No governor.** Triton is fine there; we cost 0.8 % of control cycles. |
 | One stream, above saturation | **Fifty lines in your client.** Keep only the newest frame. That gets most of the benefit. |
 | Several streams of different importance, above saturation | **A governor.** 47× better than the client-side do-it-yourself version, 12–28× better than tuned Triton. |
+| GPU saturated exactly (95–105 %) | **A governor with `pipelining_depth: 1`.** Without it we are too cautious and drop work Triton would still have served. |
+| Bottleneck is transport or CPU, not GPU time (a phone, a small SoC) | **No governor.** The backend overlaps its own work better than we can serialise it — measured, [on an Adreno 540](docs/benchmark/android-gpu.md). |
 
 The break-even is between 100 % and 110 % offered load
 ([`load-ramp.md`](docs/benchmark/load-ramp.md)).
@@ -284,9 +324,10 @@ decision; it does **not** mean it is better on your workload.
 | Open | Why it matters |
 |---|---|
 | Hardware beyond one machine | Every performance number here comes from one RTX 3070 Laptop. The scheduling core is built and tested for `aarch64` in CI, but **no Jetson measurement exists** — and emulation says nothing about runtime. [What you have to run first.](docs/hardware-qualification.md) |
+| A second GPU platform | The governor now drives a second backend on a second GPU (TFLite on an Adreno 540), which shows the logic is portable. It is not a Jetson qualification, and the advantage did not travel with the logic. |
 | A pilot | Release qualification is complete except for what needs a named workload and a named person: the sign-off of a pilot owner. Without one, every further extension is a guess. |
 | Output semantics across variants | You can declare a canonical `io_signature` per model, and any variant that does not meet it prevents startup. But identical shapes can still carry different meanings, and no tool can check that — only your declaration can. |
-| Preemption | A running inference is never pulled back — yet. XSched preemption now runs under the qualified Triton on this card; what looked like a CUDA 13 incompatibility was a second `libcuda` loaded into the process ([finding](docs/spikes/nv15-xsched.md)). The governor can now plan with it: a preemptible background lane uses the residual blocking that `vig calibrate` measures ([ADR-0035](docs/adr/0035-preemption-is-a-measured-backend-property.md)). Neither is measured on the GPU yet. Native preemption belongs in the backend process, not in the governor ([ADR-0033](docs/adr/0033-native-code-lives-in-the-backend-process.md)). |
+| Preemption | A running inference is never pulled back by the governor. XSched preemption runs under the qualified Triton on this card, and it is now **measured**: with it, tuned Triton alone keeps all four streams at 100 %, and the governor with a preemptible lane draws level ([report](docs/benchmark/messkette-2026-09-12.md)). Two caveats: the residual blocking R is **declared, not measured** — `vig calibrate` could not measure it on this power-capped laptop — and a declared-but-undelivered lane measurably hurts the protected path ([pilot](docs/benchmark/pilot-praemption-2026-09-12.md)). The vLLM backend does not even load under the shim. |
 | Scope of the licence grant | The provider and contact are now stated in [IMPRINT.md](IMPRINT.md). The exact boundary of "Production Purpose" in the Additional Use Grant still deserves a lawyer's eye before the first paid deployment. |
 
 The external review of 10 September came with eight runnable
@@ -302,6 +343,17 @@ payload representations, cooperative quanta that keep the client's token limit
 and extra inputs, TLS/mTLS and bearer-token authentication, and signed
 reproducible releases with an SBOM.
 
+Two further external reviews followed. The one of **11 September** found eight
+defects (execution proof after a backend restart, shared-memory lifetime in the
+pilot and the ROS 2 bridge, invalid JSON in generative decomposition, an XSched
+level that silently did nothing, a start script that reported "ready" when it
+was not); all eight are fixed. The one of **14 September** found five more: two
+are fixed (the look-ahead forecast ignored the approved variant; variant
+hysteresis could veto the one switch that saves supply), three are open and
+listed in [that review](docs/reviews/2026-09-14/REVIEW.md) — buffer lifetime
+across measurement arms, a late-detected backend restart, and the fact that a
+green pilot verdict judges scheduling, not the application.
+
 We would rather you read that list before the benchmark table.
 
 ## Build and verify
@@ -309,7 +361,7 @@ We would rather you read that list before the benchmark table.
 ```bash
 cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace          # 803 tests, six long-running checks ignored by design
+cargo test --workspace          # 807 tests, six long-running checks ignored by design
 cargo deny check licenses bans advisories sources
 ```
 
