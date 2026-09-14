@@ -47,6 +47,46 @@ const DETECTOR_MAX_AGE_MS: u64 = 66;
 const PROMPT: &str = "Beschreibe knapp, was ein mobiler Roboter in einer Lagerhalle sieht:";
 const GENERATE_TOKENS: u32 = 64;
 
+/// Eine Umgebungsvariable, sonst der bisher fest eingebaute Wert.
+///
+/// Dieses Werkzeug war auf die Modelle dieser Maschine verdrahtet. Das
+/// Reproduktionspaket (`tools/repro/`) faehrt denselben Vergleich mit
+/// oeffentlichen Modellen, und ohne diese Schalter braeuchte es dafuer eine
+/// zweite Kopie des Werkzeugs — also eine zweite Stelle, an der derselbe
+/// Vergleich auseinanderlaufen kann. Die Vorgaben sind unveraendert, damit
+/// die frueheren Messungen mit demselben Aufruf reproduzierbar bleiben.
+fn env_or(name: &str, default: &str) -> String {
+    std::env::var(name).unwrap_or_else(|_| default.to_owned())
+}
+
+fn env_u64_or(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+/// Der Triton mit dem Detektor.
+fn detector_endpoint() -> String {
+    env_or("VIG_WP26_DETECTOR_ENDPOINT", "127.0.0.1:8001")
+}
+
+/// Der Triton mit dem Sprachmodell — ein eigener Prozess, weil sich das
+/// vLLM-Backend und das onnxruntime-Backend nicht in einen legen lassen.
+fn llm_endpoint() -> String {
+    env_or("VIG_WP26_LLM_ENDPOINT", "127.0.0.1:8011")
+}
+
+/// Der Modellname **im Backend**. Die logischen Namen der Konfiguration
+/// (`detector`, `qwen`) bleiben fest: sie stehen in der Auswertung.
+fn detector_model() -> String {
+    env_or("VIG_WP26_DETECTOR_MODEL", "rfdetr")
+}
+
+fn llm_model() -> String {
+    env_or("VIG_WP26_LLM_MODEL", "qwen")
+}
+
 struct Outcome {
     label: &'static str,
     detector_covered: u64,
@@ -308,18 +348,34 @@ async fn start_gateway(config: &Config) -> (String, vig_gateway::Handle) {
 }
 
 fn config_yaml(cooperative: bool) -> String {
+    // Die Zerlegung plant mit gemessenen Groessen: Erzeugungsrate und fester
+    // Sockel je Quantum. Auf anderer Hardware und mit anderem Modell sind es
+    // andere Zahlen — `vig calibrate` misst sie, und den Sockel nennt
+    // ausserdem die Kostenprobe am Anfang dieses Laufs.
     let block = if cooperative {
-        "\n    cooperative: { tokens_per_second: 242, min_tokens: 4, max_total_tokens: 64, \
-         base_cost_us: 18000 }"
+        format!(
+            "\n    cooperative: {{ tokens_per_second: {}, min_tokens: 4, \
+             max_total_tokens: {GENERATE_TOKENS}, base_cost_us: {} }}",
+            env_u64_or("VIG_WP26_TOKENS_PER_SECOND", 242),
+            env_u64_or("VIG_WP26_BASE_COST_US", 18_000),
+        )
     } else {
-        ""
+        String::new()
     };
+    let detector_endpoint = detector_endpoint();
+    let llm_endpoint = llm_endpoint();
+    let detector_model = detector_model();
+    let llm_model = llm_model();
+    // Das Profil des Detektors gehoert zur Maschine, nicht zum Werkzeug.
+    let p50 = env_u64_or("VIG_WP26_DETECTOR_P50_US", 14_916);
+    let p95 = env_u64_or("VIG_WP26_DETECTOR_P95_US", 17_081);
+    let p99 = env_u64_or("VIG_WP26_DETECTOR_P99_US", 17_470);
     format!(
         r#"
 version: 1
 backend:
   type: triton
-  grpc_endpoint: "127.0.0.1:8001"
+  grpc_endpoint: "{detector_endpoint}"
   slots: 1
   pipelining_depth: 0
   safety_margin_percent: 110
@@ -329,22 +385,22 @@ models:
     queue: {{ policy: latest, capacity: 1 }}
     contract: {{ period_ms: 33, deadline_ms: 50, max_age_ms: 66 }}
     variants:
-      - id: rfdetr
-        backend_model: rfdetr
+      - id: detector
+        backend_model: {detector_model}
         quality: {{ value: 1.0, source: user_declared }}
-        profile: {{ p50_us: 14916, p95_us: 17081, p99_us: 17470, samples: 120 }}
+        profile: {{ p50_us: {p50}, p95_us: {p95}, p99_us: {p99}, samples: 120 }}
   qwen:
     decoupled: true
     # Getrennter Server: das vLLM-Backend braucht einen anderen
     # Bibliotheksstand als onnxruntime und laesst sich nicht in denselben
     # Prozess legen. Die Slots modellieren trotzdem die GPU, nicht den Prozess.
-    backend_endpoint: "127.0.0.1:8011"
+    backend_endpoint: "{llm_endpoint}"
     class: best_effort
     queue: {{ policy: fifo, capacity: 2, overflow: backpressure_client }}
     contract: {{ deadline_ms: 20000, max_age_ms: 40000 }}{block}
     variants:
       - id: main
-        backend_model: qwen
+        backend_model: {llm_model}
         quality: {{ value: 1.0, source: user_declared }}
         profile: {{ p50_us: 1100000, p95_us: 1400000, p99_us: 1600000, samples: 100 }}
 "#
@@ -388,7 +444,8 @@ fn main() {
 /// festen Sockel je Auftrag — Prefill, Round-Trip, Scheduling im Backend —,
 /// dann hat ein Quantum eine Mindestdauer, die keine Zerlegung unterschreitet.
 async fn probe_quantum_cost() {
-    let client = vig_backend_triton::TritonClient::new("127.0.0.1:8011");
+    let client = vig_backend_triton::TritonClient::new(llm_endpoint());
+    let model = llm_model();
     println!("  Token je Auftrag | Dauer  | davon Sockel");
     println!("  -----------------|--------|-------------");
     let mut baseline = 0_u128;
@@ -396,7 +453,7 @@ async fn probe_quantum_cost() {
         let mut total = 0_u128;
         let rounds = 5;
         for _ in 0..rounds {
-            let request = text_request("qwen", PROMPT, tokens);
+            let request = text_request(&model, PROMPT, tokens);
             let started = Instant::now();
             if client.infer_decoupled(request).await.is_ok() {
                 total += started.elapsed().as_millis();
@@ -414,17 +471,19 @@ async fn probe_quantum_cost() {
 async fn run() {
     println!("wp26: loest die Zerlegung in Quanten die Aushungerung aus ADR-0012?");
     println!(
-        "Detektor RF-DETR bei {DETECTOR_PERIOD_MS} ms, Sprachmodell Qwen3-0.6B, \
-         ein Slot, {RUN_SECONDS} s je Betriebsart\n"
+        "Detektor {} bei {DETECTOR_PERIOD_MS} ms, Sprachmodell {}, \
+         ein Slot, {RUN_SECONDS} s je Betriebsart\n",
+        detector_model(),
+        llm_model()
     );
 
-    let triton = vig_backend_triton::TritonClient::new("127.0.0.1:8001");
+    let triton = vig_backend_triton::TritonClient::new(detector_endpoint());
     let metadata = triton
         .raw()
         .await
         .expect("Backend erreichbar")
         .model_metadata(ModelMetadataRequest {
-            name: "rfdetr".to_owned(),
+            name: detector_model(),
             version: String::new(),
         })
         .await
@@ -476,10 +535,10 @@ async fn run() {
     outcomes.push(
         measure(
             "direkt zu Triton",
-            "127.0.0.1:8001",
-            "127.0.0.1:8011",
-            "rfdetr",
-            "qwen",
+            &detector_endpoint(),
+            &llm_endpoint(),
+            &detector_model(),
+            &llm_model(),
             &spec,
             false,
         )

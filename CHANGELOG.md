@@ -24,6 +24,39 @@ bedeutet, steht in [docs/releases.md](docs/releases.md).
   Berichts, nicht seine Fussnote. Ohne `nvidia-smi`, etwa auf ARM vor dem
   TFLite-Backend, scheitert nichts und wird nichts stillschweigend ersetzt:
   der Bericht fuehrt „Takt nicht beobachtbar" als eigenen Abschnitt.
+- **Ein Reproduktionspaket mit oeffentlichen Modellen** (`tools/repro/`,
+  [Anleitung](docs/benchmark/reproduce.md)). Bisher stammte jede
+  veroeffentlichte Zahl von Modellen, die niemand ausserhalb hat: einem
+  internen Detektionsmodell und ResNet-Stellvertretern mit passenden Formen
+  und Laufzeiten. Fuer die Scheduling-Aussage ist das zulaessig — der
+  Scheduler sieht Laufzeiten, keine Gewichte —, zum Nachpruefen taugte es
+  nicht. `tools/repro/run.sh` faehrt denselben Vergleich mit RT-DETR R18/R50
+  und Qwen3-0.6B, alle Apache-2.0; `fetch-models.sh` prueft jede Datei gegen
+  eine fest eingetragene SHA-256 und **bricht bei Abweichung ab**, statt gegen
+  unbekannte Gewichte zu messen. Die Laufzeitprofile werden dabei auf der
+  Maschine des Anwenders gemessen und nicht von uns uebernommen — ein Profil
+  gilt nur fuer die Hardware, auf der es entstand (Spec 13.5). Dokumentiert
+  sind auch die zwei Stolpersteine, die der Aufbau gekostet hat: Triton laedt
+  **gar kein** Modell, wenn die Ausgabedimensionen fest statt dynamisch
+  stehen, und die Klassenausgabe von RT-DETR traegt Logits und keine
+  Wahrscheinlichkeiten (nachgemessen: −9,8 bis −3,6).
+
+  **Das Ergebnis ist unbequem und steht vollstaendig in der Anleitung:** In
+  zwei der drei Lastfaelle ist der direkte Weg besser, der dritte liess sich
+  auf der Messkarte nicht kalibrieren. Der Grund ist kein Fehler, sondern der
+  Betriebspunkt — die oeffentlichen Modelle landen bei 47 % und 91 %
+  geschuetzter Auslastung, waehrend Gate M3 bei 103 % misst und
+  [`load-ramp.md`](docs/benchmark/load-ramp.md) den Knick zwischen 100 und
+  110 % verortet. Belegt ist damit, dass die Werkzeuge mit fremden Modellen
+  laufen und ihre eigene Grenze zuverlaessig anzeigen; die Kernaussage im
+  Ueberlastbereich ist mit oeffentlichen Modellen **noch offen**, und die
+  Anleitung benennt die Luecke.
+- **`wp26` laesst sich auf andere Modelle richten.** Endpunkte, Backend-
+  Modellnamen und das Detektorprofil kommen jetzt aus Umgebungsvariablen
+  (`VIG_WP26_*`) statt fest aus dem Quelltext; die Vorgaben sind unveraendert,
+  damit die frueheren Messungen mit demselben Aufruf reproduzierbar bleiben.
+  Ohne das braeuchte das Reproduktionspaket eine zweite Kopie desselben
+  Vergleichs — also eine zweite Stelle, an der er auseinanderlaufen kann.
 - **`vig init` schreibt die erste Konfiguration aus einem laufenden Backend.**
   Modellnamen, Tensorformen und Datentypen liest das Werkzeug ueber OIP
   (`repository_index` und die Modellmetadaten) und traegt sie ein. Alles, was

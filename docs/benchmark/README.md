@@ -30,6 +30,7 @@ allgemeingültige Produktleistung zu lesen.
 | [`abnahme-2026-09-12.md`](abnahme-2026-09-12.md) | Pipelining, Versorgungsschutz, Kalibrierung: was davon traegt? | Pipelining kostet nichts und behebt die Kante (188 → 17 ‰); der Versorgungsschutz wirkt, erschlaegt aber allein den Hintergrund (998 ‰) und gehoert mit der Kalibrierung zusammen; bei starker Ueberlast bleibt die feste Marge vorn |
 | [`pilot-praemption-2026-09-12.md`](pilot-praemption-2026-09-12.md) | Bekommt der Berichtspfad mit Praemption Fortschritt, ohne dass der Alarmpfad zahlt? | **auf diesem Stapel nicht** — vLLM laedt unter dem XSched-Shim nicht; der Shim kostet am geschuetzten Pfad 17–20 % Laufzeit, und eine nur angegebene Lane bringt 30 statt 2 Berichte/min und kostet 28 % Alarmzeit bei D |
 | [`scenarios.md`](scenarios.md) | Welche Lastfälle tragen die Aussagen, wogegen, mit welchem Preis? | Plan für S1–S12, darunter Detektor + LLM, zwei LLMs nebeneinander, langer Job unter Sättigung, zweite GPU |
+| [`reproduce.md`](reproduce.md) | Lässt sich die Kernaussage mit frei lizenzierten Modellen nachfahren? | Aufbau mit RT-DETR R18/R50 und Qwen3-0.6B (alle Apache-2.0, Digests gepinnt), drei Lastfälle, ein Befehl — samt der zwei Stolpersteine, die dabei Zeit kosten |
 
 ## Regeln, die für jede Zahl hier gelten
 

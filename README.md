@@ -231,6 +231,11 @@ vig calibrate -c vig.yaml -o measured.yaml          # measure this machine
 vig serve    -c measured.yaml --listen 127.0.0.1:9001
 ```
 
+No models of your own to point it at yet? `tools/repro/run.sh` runs the whole
+thing end to end on freely licensed models (Apache-2.0, digests pinned) and
+measures the profiles on your machine rather than trusting ours —
+[reproduce it](docs/benchmark/reproduce.md).
+
 Your client changes one line — the endpoint. Optionally it adds parameters
 that say how fresh its data is:
 

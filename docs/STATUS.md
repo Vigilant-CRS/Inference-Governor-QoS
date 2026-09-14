@@ -74,6 +74,33 @@ Auslastung 103 → 76 %, der Vorsprung des Governors halbiert sich (24,7x →
 13,3x). Der Engpass bleibt: bei 76 % verfehlt ein getunter Triton weiter
 jeden zehnten Detektorzyklus ([Messung](benchmark/tensorrt.md)).
 
+**Mit öffentlichen Modellen nachgefahren — und dort gewinnt der Governor
+nicht.** Alle Zahlen oben stammen von Modellen, die niemand ausserhalb hat.
+`tools/repro/run.sh` fährt dieselben Vergleiche mit RT-DETR R18/R50 und
+Qwen3-0.6B (alle Apache-2.0, Digests gepinnt,
+[Anleitung](benchmark/reproduce.md)). Das Ergebnis vom 14.09.2026, drei Läufe
+je Lastfall:
+
+| Lastfall | Ergebnis |
+|---|---|
+| Detektor + Sprachmodell | **direkt gewinnt doppelt**: 100 % gegen 33 % Detektorabdeckung *und* 26 gegen 20 Berichte |
+| vier Kameras auf einen Detektor | **nicht messbar** auf dieser Karte — 29 verworfene Messreihen |
+| zwei Detektorgrößen | **Governor verliert**: 89–94 % gegen 99–100 %, Faktor −52x bis −60x |
+
+Das widerspricht Gate M3 nicht, sondern bestätigt dessen Geltungsbereich: die
+öffentlichen Lastfälle landen bei 47 % und 91 % geschützter Auslastung, Gate
+M3 misst bei 103 %, und der Knick liegt laut [load-ramp](benchmark/load-ramp.md)
+zwischen 100 und 110 %. Unterhalb der Sättigung kostet der Governor nur
+seinen Aufwand — genau das sagen die Startseite unter „When not to use it"
+und `vig-fit` in zwei von drei Läufen wörtlich.
+
+**Belegt ist damit:** die Werkzeuge laufen mit fremden Modellen, und sie
+zeigen ihre eigene Grenze zuverlässig an. **Offen bleibt:** die Kernaussage im
+Überlastbereich mit öffentlichen Modellen. Dafür fehlt ein Paar, dessen
+Auslastung auf einer 8-GB-Laptopkarte über 100 % kommt, ohne dass die
+Profilmessung am wandernden Takt scheitert. Die Lücke ist in der Anleitung
+benannt.
+
 **Messkette vom 11.09.** ([Bericht](benchmark/messkette-2026-09-11.md)) —
 was hält und was nicht, auf dem neuen Treiber und mit `TCP_NODELAY` in den
 Werkzeugen:

@@ -1,0 +1,88 @@
+# Lastfall (b): vier Kameras auf einen Detektor, mit unterschiedlicher
+# Wichtigkeit.
+#
+# Der Fall aus S8 (docs/benchmark/scenarios.md): mehrere Stroeme teilen sich
+# **einen** Slot, und die Frage ist, ob die Summe der Reserven aufgeht. Die
+# Schranke aus NV-23 gilt fuer einen Strom; hier sind es vier.
+#
+# Alle vier fragen dasselbe Backendmodell — eine Kamera ist kein eigenes
+# Modell, sondern ein eigener Vertrag. Genau das ist der Punkt: der
+# Unterschied zwischen ihnen ist **Wichtigkeit und Takt**, nicht Rechenlast.
+#
+# ## Warum hier keine Laufzeitprofile stehen
+#
+# Diese Datei ist eine **Vorlage und laedt absichtlich nicht**, solange die
+# Profile fehlen. `tools/repro/run.sh` fuellt sie mit `vig calibrate` auf
+# deiner Maschine.
+#
+# Zahlen einer fremden Maschine hier einzutragen waere bequemer und falsch:
+# `vig calibrate` laesst ein Profil, dessen Messreihe es verworfen hat,
+# unveraendert stehen und endet trotzdem mit Erfolg. Stuenden hier Werte,
+# bekaemest du im Fehlerfall eine Konfiguration, die gemessen aussieht und
+# mit den Laufzeiten eines fremden Laptops plant — ohne jedes Anzeichen.
+# Ohne Werte fehlt das Profil hinterher weiterhin, und der Start scheitert
+# hoerbar. Das ist die Absicht (Spec 13.5).
+#
+# ## Zu den Perioden
+#
+# `vig-fit` nimmt die **Vertragsperioden dieser Datei** als 100-%-Marke und
+# streckt sie je Lastpunkt (`scale()`). Die Perioden sind deshalb so gewaehlt,
+# dass die geschuetzte serialisierte Auslastung nahe 100 % liegt — sonst
+# laegen alle vier Lastpunkte im Ueberlastbereich und die Tabelle
+# unterschiede nichts. Gezaehlt werden dabei `protected` **und** `high`
+# (`is_guarded()`); `best_effort` zaehlt nicht mit.
+#
+# Nach der Kalibrierung ist das zu pruefen: `vig doctor` nennt die
+# tatsaechliche Auslastung. Liegt sie weit von 100 %, gehoeren die Perioden
+# angepasst — nicht die Zahlen.
+version: 1
+
+backend:
+  type: triton
+  grpc_endpoint: "__ENDPUNKT__"
+  slots: 1
+  pipelining_depth: 1
+  safety_margin_percent: 110
+
+models:
+  # Der Alarmpfad. Nur dieser Strom ist geschuetzt — waeren es alle, waere
+  # keiner es.
+  kamera_tor:
+    class: protected
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 66, deadline_ms: 66, max_age_ms: 132 }
+    variants:
+      - id: r18
+        backend_model: rtdetr_r18
+        quality: { value: 1.00, source: user_declared }
+
+  # Zwei Stroeme, die wichtig sind, aber nicht den Alarm tragen.
+  kamera_halle:
+    class: high
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 66, deadline_ms: 66, max_age_ms: 132 }
+    variants:
+      - id: r18
+        backend_model: rtdetr_r18
+        quality: { value: 1.00, source: user_declared }
+
+  kamera_rampe:
+    class: high
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 66, deadline_ms: 66, max_age_ms: 132 }
+    variants:
+      - id: r18
+        backend_model: rtdetr_r18
+        quality: { value: 1.00, source: user_declared }
+
+  # Die Uebersichtskamera. Sie darf verhungern, und wenn sie es tut, steht das
+  # in der Preisspalte der Auswertung — ein Gewinn ohne seinen Preis wird in
+  # diesem Projekt nicht berichtet.
+  kamera_hof:
+    class: best_effort
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 100, deadline_ms: 100, max_age_ms: 200 }
+    variants:
+      - id: r18
+        backend_model: rtdetr_r18
+        quality: { value: 1.00, source: user_declared }

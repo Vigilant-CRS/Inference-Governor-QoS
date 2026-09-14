@@ -1,0 +1,119 @@
+# Lastfall (c): zwei Groessen desselben Detektors — Variantenwahl mit
+# echten Modellen.
+#
+# Die bisherige Variantenmessung (`frontier`) benutzt ResNet-50 gegen
+# ResNet-18 als **Laufzeitpaar**: sie erzeugen eine reproduzierbare
+# Laufzeitspreizung, sind aber auf Protokollebene nicht austauschbar — die
+# Ausgabetensoren heissen verschieden. Hier stehen zwei echte Varianten
+# desselben Detektors.
+#
+# Dass sie austauschbar sind, ist geprueft und nicht angenommen:
+#   * gleiche I/O-Signatur (tools/onnx-signature.py),
+#   * gleiche Vorverarbeitung (beide preprocessor_config.json stimmen in den
+#     wirksamen Feldern ueberein: keine Normierung, Skalierung 1/255,
+#     bilinearer Resize auf 640x640, kein Padding),
+#   * dieselben 80 COCO-Klassen in derselben Reihenfolge (beide config.json
+#     feldweise verglichen).
+# Details: docs/benchmark/reproduce.md
+#
+# ## Warum hier keine Laufzeitprofile stehen
+#
+# Diese Datei ist eine **Vorlage und laedt absichtlich nicht**, solange die
+# Profile fehlen. `tools/repro/run.sh` fuellt sie mit `vig calibrate` auf
+# deiner Maschine.
+#
+# Zahlen einer fremden Maschine hier einzutragen waere bequemer und falsch:
+# `vig calibrate` laesst ein Profil, dessen Messreihe es verworfen hat,
+# unveraendert stehen und endet trotzdem mit Erfolg. Stuenden hier Werte,
+# bekaemest du im Fehlerfall eine Konfiguration, die gemessen aussieht und
+# mit den Laufzeiten eines fremden Laptops plant — ohne jedes Anzeichen.
+# Ohne Werte fehlt das Profil hinterher weiterhin, und der Start scheitert
+# hoerbar. Das ist die Absicht (Spec 13.5).
+version: 1
+
+backend:
+  type: triton
+  grpc_endpoint: "__ENDPUNKT__"
+  slots: 1
+  # Ein Auftrag darf unterwegs sein, bevor die Antwort auf den vorigen da
+  # ist. Ohne das laeuft die GPU zwischen zwei Auftraegen leer, und genau bei
+  # 100 % Last kostet das Abdeckung (docs/benchmark/abnahme-2026-09-12.md).
+  pipelining_depth: 1
+  safety_margin_percent: 110
+
+models:
+  detektor:
+    class: protected
+    queue: { policy: latest, capacity: 1 }
+    contract:
+      period_ms: 33          # 30 Bilder je Sekunde
+      deadline_ms: 33
+      max_age_ms: 66         # aelter als zwei Bilder ist fachlich wertlos
+      # Hysterese: ohne sie wechselt die Wahl im Takt der Lastspitzen hin und
+      # her, und jeder Wechsel kostet (Spec 12.4).
+      variant_dwell_ms: 200
+    variants:
+      # Die grosse Variante zuerst: sie ist die Vorgabe, die kleine ist der
+      # Rueckfall unter Last.
+      - id: r50
+        backend_model: rtdetr_r50
+        # `user_declared` und nicht `measured`: auf einem Datensatz gemessen
+        # hat diese Qualitaet niemand. Der Governor waehlt damit nach einer
+        # **erklaerten** Rangfolge, und der Qualitaetsmix der Messung sagt,
+        # wie oft er die grosse Variante halten konnte — ueber
+        # Erkennungsgenauigkeit sagt er nichts.
+        quality: { value: 1.00, source: user_declared }
+        semantics: &rtdetr_semantik
+          input:
+            layout: nchw
+            color_space: rgb
+            # Bemerkenswert: RT-DETR normiert **nicht** nach ImageNet, obwohl
+            # `image_mean`/`image_std` in der preprocessor_config.json stehen —
+            # `do_normalize` ist dort false. Wer sie trotzdem anwendet, bekommt
+            # systematisch schlechtere Detektionen und sieht es an keiner
+            # Tensorform.
+            normalization: zero_one_after_square_bilinear_no_letterbox
+            width: 640
+            height: 640
+          outputs:
+            # Ausgabe 0 = `logits`. Die Einheit ist **gemessen**, nicht
+            # abgeschrieben: der Wertebereich liegt bei -9,8 bis -3,6 und damit
+            # ausserhalb von [0, 1]. Also Logits vor der Sigmoid-Funktion.
+            #
+            # Die Klassenliste stammt aus `id2label` der Modellkarte und ist
+            # fuer beide Groessen feldweise als gleich nachgewiesen. Die
+            # Reihenfolge *ist* die Bedeutung: dieselben Klassen anders
+            # sortiert ergeben dieselben Zahlen mit anderem Inhalt.
+            - kind: classification
+              unit: logits
+              labels: ["person", "bicycle", "car", "motorbike", "aeroplane", "bus", "train",
+                "truck", "boat", "traffic light", "fire hydrant", "stop sign", "parking meter",
+                "bench", "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear",
+                "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase",
+                "frisbee", "skis", "snowboard", "sports ball", "kite", "baseball bat",
+                "baseball glove", "skateboard", "surfboard", "tennis racket", "bottle",
+                "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+                "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake",
+                "chair", "sofa", "pottedplant", "bed", "diningtable", "toilet", "tvmonitor",
+                "laptop", "mouse", "remote", "keyboard", "cell phone", "microwave", "oven",
+                "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors",
+                "teddy bear", "hair drier", "toothbrush"]
+            # Ausgabe 1 = `pred_boxes`, Werte in [0, 1].
+            #
+            # Das Layout ist **gemessen** und nicht angenommen: von 300 Boxen
+            # erfuellen nur 40 die Bedingung e3 > e1 und e4 > e2, die bei
+            # `xyxy` fuer jede einzelne gelten muesste. Die Komponentenmittel
+            # (0,36 | 0,40 | 0,20 | 0,22) und Zeilen wie
+            # (0,167 | 0,091 | 0,023 | 0,058) sind als `xyxy` unsinnig und als
+            # `cxcywh` stimmig.
+            - kind: detections
+              coordinates: normalized
+              layout: cxcywh
+      - id: r18
+        backend_model: rtdetr_r18
+        quality: { value: 0.90, source: user_declared }
+        # Wortgleich dieselbe Beschreibung wie oben — und zwar per Anker, nicht
+        # per Kopie: eine Variantenreihe, deren Bedeutungen auseinanderlaufen,
+        # weil jemand nur eine Stelle geaendert hat, ist genau der Fehler, den
+        # die Semantikangabe verhindern soll.
+        semantics: *rtdetr_semantik

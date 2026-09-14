@@ -53,6 +53,14 @@ never issues a qualification — it refuses one or leaves it open
 | musl, Windows, macOS | Untested | No target in the release workflow. |
 | Rust toolchain | — | 1.98 or newer, edition 2024 |
 
+**Checking any of this yourself.** Every number in this repository was taken
+with models you do not have — an in-house detector and ResNet stand-ins picked
+for their shapes and runtimes. `tools/repro/run.sh` runs the same comparison on
+models anyone can download (RT-DETR R18/R50 and Qwen3-0.6B, all Apache-2.0,
+digests pinned) and measures the runtime profiles on your machine rather than
+reusing ours: [reproduce it](benchmark/reproduce.md). What that path qualifies
+is the **claim**, not your deployment — the hardware rows above still apply.
+
 ## Features
 
 Four states, not two. The review of 10 September 2026 found the difference

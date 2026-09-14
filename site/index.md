@@ -160,6 +160,34 @@ Full walkthrough: [getting started](docs/getting-started.md). What is
 qualified, what is merely built: [support matrix](docs/support-matrix.md).
 What is still missing: [status](docs/STATUS.md).
 
+## Reproduce it on your machine
+
+Every number above comes from models you do not have: an in-house detector and
+ResNet stand-ins chosen for their shapes and runtimes. That is defensible for a
+scheduling claim — the scheduler sees runtimes, not weights — and useless if
+you want to check the claim yourself.
+
+So there is a second path that uses only models anyone can download:
+
+```bash
+cargo build --release --workspace
+tools/repro/run.sh
+```
+
+RT-DETR R18 and R50 as the detector pair, Qwen3-0.6B as the language model —
+all Apache-2.0, every digest pinned, and the script refuses to measure if one
+of them does not match. It **measures the runtime profiles on your machine**
+instead of reusing ours, because a profile is only valid for the hardware it
+was taken on.
+
+What it costs you: one command and roughly a quarter of an hour. What it gives
+you: the three load cases, the consumer-side view next to the window view, and
+the same verdict tool an evaluation would use — including the verdict "you do
+not need this", which is one of its normal answers.
+
+Details, and the two pitfalls that cost us an afternoon:
+[reproduce it on your machine](docs/benchmark/reproduce.md).
+
 ## Licence and contact
 
 Free, without a time limit, for evaluation, development, testing,
