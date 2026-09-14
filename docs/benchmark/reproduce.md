@@ -22,6 +22,21 @@ Alles Weitere macht das Skript: Voraussetzungen pruefen, Modelle holen und
 gegen feste SHA-256 pruefen, Triton auf eigenen Ports starten, **die Profile
 auf dieser Maschine messen** und die Lastfaelle fahren.
 
+**Wie lange das dauert.** Gemessen am 14.09.2026 auf der oben genannten
+Maschine: die Detektor-Lastfaelle rund **15 Minuten**, davon allein acht auf
+Lastfall (b), der sich auf dieser Karte nicht kalibrieren liess und acht
+vergebliche Anlaeufe brauchte; mit `--with-llm` kommen gut **sieben Minuten**
+dazu. Auf einer Karte, auf der (b) durchlaeuft, verschiebt sich das.
+
+**Was beim ersten Mal dazukommt — und es dominiert.** Die Modelle sind mit
+258 MB harmlos (mit Sprachmodell 1,5 GB mehr). Die Container-Images sind es
+nicht: `tritonserver:26.06-py3` bringt **22,7 GB** mit, das vLLM-Image fuer
+`--with-llm` weitere **35,3 GB**. Bei uns lagen beide laengst lokal, und
+deshalb stand hier zuerst eine Viertelstunde. Wer frisch anfaengt, wartet auf
+den Download um Groessenordnungen laenger als auf die Messung. Eine
+Dauerangabe, die das verschweigt, ist von der eigenen, laengst eingerichteten
+Maschine abgelesen — und faellt genau dem auf, der uns nachrechnen wollte.
+
 ## Die Modelle
 
 Alle Apache-2.0. Die Lizenz stammt jeweils vom Basismodell: die

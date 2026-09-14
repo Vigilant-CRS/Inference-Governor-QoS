@@ -180,10 +180,16 @@ of them does not match. It **measures the runtime profiles on your machine**
 instead of reusing ours, because a profile is only valid for the hardware it
 was taken on.
 
-What it costs you: one command and roughly a quarter of an hour. What it gives
-you: the three load cases, the consumer-side view next to the window view, and
-the same verdict tool an evaluation would use — including the verdict "you do
-not need this", which is one of its normal answers.
+What it costs you: one command and about fifteen minutes of measuring for the
+detector cases, roughly twenty-two with the language model. The first run also
+pays for the downloads, and those dominate: 258 MB of models, 1.5 GB more for
+the language model, and the container images — 22.7 GB for Triton, another
+35.3 GB for vLLM. Our own quarter of an hour was measured on a machine that
+already had all of them, which is exactly the kind of number you should not
+have to discover for yourself. What it gives you: the three load cases, the
+consumer-side view next to the window view, and the same verdict tool an
+evaluation would use — including the verdict "you do not need this", which is
+one of its normal answers.
 
 **And here is what it found, so that your own machine is not the first to tell
 you.** RTX 3070 laptop, three runs per case, 14.09.2026: with a detector beside
