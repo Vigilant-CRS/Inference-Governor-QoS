@@ -22,8 +22,15 @@ SOURCES = {
     "wp26": "docs/benchmark/wp26.md",
     "android": "docs/benchmark/android-gpu.md",
     "ramp": "docs/benchmark/load-ramp.md",
-    "run": "InferenceQoS-runtime/measure-morgen-2026-09-12/a-gate-r1.txt",
+    "run": "InferenceQoS-runtime/gate-m3-r03/gate-r1.txt",
     "doctor": "InferenceQoS-runtime/measure-nachlauf-2026-09-11e/pre4-doctor.txt",
+}
+
+#: Messdaten fuer Protokolle, deren Pfad kein Datum traegt. Sie stehen im
+#: zugehoerigen Bericht — `gate-m3-r03.md` nennt den 10.09.2026 — und nicht
+#: in der Dateizeit, die ein Kopiervorgang verstellt.
+SOURCE_DATES = {
+    "run": "2026-09-10",
 }
 
 
@@ -106,13 +113,42 @@ SCENES = [
         pause=0.7,
     ),
     Scene(
+        key="usecases",
+        narration=(
+            "Two places this belongs. A humanoid robot: vision in the control "
+            "loop, a language model planning the next move, one GPU for both. "
+            "The governor keeps the thinking from blocking the seeing. Or driver "
+            "assistance in pre-development: several cameras, detection at a fixed "
+            "rate, a slower analysis beside it. Both are plausible pictures, not "
+            "customer deployments. We claim nothing about certification or hard "
+            "real time — that argument stays with the manufacturer."
+        ),
+        visual="usecases",
+        chapter="Where this belongs: robot and vehicle",
+        pause=0.8,
+    ),
+    # ------------------------------------------------------------------
+    # Die austauschbare Szene.
+    #
+    # Sie traegt die Kernzahl, und die Kernzahl haengt am gezeigten Lauf.
+    # Sobald das Reproduktionspaket mit echtem Detektor *und* echtem lokalem
+    # Sprachmodell gemessen ist, wird hier getauscht: `SOURCES["run"]` auf das
+    # neue Protokoll, `SOURCE_DATES["run"]` auf dessen Datum, und die drei
+    # Zahlen im Sprechertext auf die des neuen Laufs. Bild und Fussnote
+    # ziehen automatisch nach, weil beide aus der Datei lesen.
+    #
+    # Bis dahin gilt: Hintergrund ist ein nicht unterbrechbarer Block
+    # (ResNet-50 Batch 48, rund 95 ms, siehe docs/benchmark/gate-m3.md), kein
+    # Sprachmodell. Der Text sagt deshalb "background job", nicht "LLM".
+    # ------------------------------------------------------------------
+    Scene(
         key="measured",
         narration=(
-            "A real run on one laptop GPU, against a tuned Triton with priorities "
-            "and the same shared memory path. Coverage, the share of control "
-            "cycles where a fresh result was there, goes from eighty-five percent "
-            "to one hundred for the detector. Three runs, all of them in the "
-            "repository."
+            "One laptop GPU, against a tuned Triton with priorities and the same "
+            "shared memory path. With a real detector and a background job that "
+            "cannot be interrupted, the detector goes from eighty-five percent of "
+            "control cycles to ninety-nine. Twenty times fewer missed cycles. "
+            "Three runs, and every log is in the repository."
         ),
         visual="terminal_run",
         chapter="Measured against a tuned Triton",
@@ -123,13 +159,12 @@ SCENES = [
     Scene(
         key="price",
         narration=(
-            "And here is what it costs, because leaving this out would make the "
-            "rest worthless. In that same run the background language model gets "
-            "nothing. A ninety-five millisecond block does not fit next to a "
-            "thirty-three millisecond period, with or without us. For models that "
-            "can be split, the trade becomes visible instead. In a separate run, "
-            "two completed generations become forty, and the detector gives up "
-            "seven points of coverage."
+            "The price is in the same table. That background block never runs: "
+            "ninety-five milliseconds do not fit beside a thirty-three "
+            "millisecond period, with us or without us. For models that can be "
+            "split, the trade becomes a dial you set. In a separate run, two "
+            "completed generations become forty, and the detector moves from "
+            "ninety-eight percent to ninety-one."
         ),
         visual="price",
         chapter="What it costs",
@@ -139,11 +174,11 @@ SCENES = [
     Scene(
         key="limits",
         narration=(
-            "Three cases where we would tell you not to use it. Below saturation, "
-            "your server is fine. A single stream: fifty lines in your own client "
-            "do most of it. And where the bottleneck is transport and CPU rather "
-            "than GPU time, the backend overlaps better than we serialise. We "
-            "measured that on a phone."
+            "Three cases where we would say no. If your GPU is not busy enough "
+            "to queue, your server is already fine. A single stream? Fifty lines "
+            "in your own client do most of this. And where the bottleneck is "
+            "moving data rather than GPU time, the backend overlaps better than "
+            "we serialise — we measured that on a phone."
         ),
         visual="limits",
         chapter="When not to use it",
@@ -165,14 +200,37 @@ SCENES = [
     Scene(
         key="close",
         narration=(
-            "Vigilant Inference Governor. The numbers, the method, and the runs "
-            "that failed are all in the repository."
+            "Vigilant Inference Governor. One GPU, several models, and the "
+            "newest frame gets through. Point it at the server you already run."
         ),
         visual="close",
         chapter="Where the numbers live",
         pause=1.2,
     ),
 ]
+
+#: Vorbereitet, aber **nicht im Video** — und das ist Absicht.
+#:
+#: Der Abschnitt gehoert kurz vor "try", sobald `vig autotune` existiert. Heute
+#: existiert er nicht: im Quellbaum findet sich kein `autotune`, und `calibrate`
+#: ist eine Funktion in einem Benchmarkbinary, kein Anwenderbefehl. Diesen Text
+#: jetzt zu sprechen hiesse, in einem oeffentlichen Video eine Funktion zu
+#: versprechen, die niemand starten kann — genau der Fehler, den der Rest
+#: dieses Skripts vermeidet.
+#:
+#: Wenn der Befehl da ist: in SCENES vor der "try"-Szene einhaengen, Kapitel
+#: ergaenzen, fertig. Der Wortlaut ist abgestimmt und steht hier bereit.
+AUTOTUNE = Scene(
+    key="autotune",
+    narration=(
+        "Start it, and in half an hour it has measured your machine and tells "
+        "you what it can carry. And if it turns out you don't need us, it says "
+        "that too."
+    ),
+    visual="autotune",
+    chapter="Measuring your machine",
+    pause=0.8,
+)
 
 #: Nur fuer den Kurzschnitt: eine stumme Schlusskarte.
 #:

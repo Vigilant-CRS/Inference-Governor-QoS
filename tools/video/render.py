@@ -15,6 +15,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
+import report
 import sim
 
 W, H = 1920, 1080
@@ -244,21 +245,9 @@ def stale(_scene, progress: float) -> Image.Image:
     return image
 
 
-def _terminal(lines: list[str], title_text: str, highlights: list[str],
-              gloss: str, progress: float) -> Image.Image:
-    image = base()
-    draw = ImageDraw.Draw(image)
-    mono = font(MONO, 24)
-    line_h = 34
-    top, left = 210, 130
-    # Eine echte Ausgabe ist manchmal breiter als das Bild. Abschneiden mit
-    # sichtbarer Ellipse, wie `render_terminal.py` es tut — eine Zeile, die
-    # rechts aus dem Bild laeuft, behauptet, es stehe dort nichts mehr.
-    advance = draw.textlength("M", font=mono) or 14.4
-    budget = int((W - 2 * left - 60) / advance)
-    lines = [line if len(line) <= budget else line[:budget - 2].rstrip() + " …"
-             for line in lines]
-    height = 52 + line_h * len(lines) + 40
+def _panel(draw: ImageDraw.ImageDraw, top: int, height: int, title_text: str) -> None:
+    """Der Fensterrahmen, in dem eine echte Ausgabe steht."""
+    left = 130
     draw.rectangle([left, top, W - left, top + height], fill=PANEL)
     draw.rectangle([left, top, W - left, top + 44], fill=BAR)
     for index, colour in enumerate(("#ff5f57", "#febc2e", "#28c840")):
@@ -267,65 +256,138 @@ def _terminal(lines: list[str], title_text: str, highlights: list[str],
     draw.text((left + 110, top + 22), title_text, font=font(SANS, 20), fill=DIM,
               anchor="lm")
 
-    shown = int(min(len(lines), 2 + progress * (len(lines) + 4)))
-    y = top + 66
-    for line in lines[:shown]:
-        colour = TEXT
-        weight = mono
-        if any(h in line for h in highlights):
-            colour = ACCENT
-        elif line.strip().startswith(("OK", "exit=0")):
-            colour = OK
-        elif line.strip().startswith(("FAIL", "WARN")):
-            colour = BAD if line.strip().startswith("FAIL") else "#d0a215"
-        elif set(line.strip()) <= set("-| "):
-            colour = FAINT
-        draw.text((left + 26, y), line, font=weight, fill=colour)
-        y += line_h
-    if gloss:
-        draw.text((left, top + height + 34), gloss, font=font(SANS, 26), fill=DIM)
-    return image
 
+def _source(draw: ImageDraw.ImageDraw, path: Path, y: int, date: str = "") -> None:
+    """Quellenangabe im Bild: welche Datei, welches Datum, was uebersetzt wurde.
 
-def _read_lines(path: Path, keep: list[int]) -> list[str]:
-    raw = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    return [raw[i].rstrip() for i in keep if i < len(raw)]
+    Ohne diese Zeile waere die englische Tabelle eine Behauptung. Mit ihr kann
+    jeder die Zahl in der genannten Datei nachschlagen — und sieht zugleich,
+    dass an ihr nichts uebersetzt wurde ausser der Ueberschrift darueber.
+    """
+    draw.text((130, y),
+              f"source: {report.source_label(path, date)}  ·  numbers read from "
+              f"that file, only the German headings translated",
+              font=font(SANS, 22), fill=DIM)
 
 
 def terminal_run(scene, progress: float) -> Image.Image:
+    """Die Stromtabelle des echten Laufs, englisch beschriftet.
+
+    Auch die Zusammenfassung unten holt ihre zwei Zahlen aus der Tabelle und
+    nicht aus dem Quelltext: Wer den Lauf austauscht, bekommt eine andere
+    Zeile oder einen Abbruch, aber nie eine veraltete Behauptung.
+    """
     path = Path(scene.data["path"])
-    lines = _read_lines(path, list(range(0, 3)) + list(range(9, 15)))
-    image = _terminal(
-        lines,
-        "gate-m3 — the governor against a tuned Triton, same models, same GPU",
-        highlights=["detector"],
-        gloss="Abdeckung = coverage · Strom = stream · Antwortalter = age of the answer",
-        progress=progress)
+    date = scene.data.get("date", "")
+    rows = report.gate_rows(path)
+    image = base()
     draw = ImageDraw.Draw(image)
     kicker(draw, "measured, not claimed")
-    headline(draw, "One laptop GPU. Three runs. Every log in the repository.",
+    headline(draw, "A real detector against a block that cannot be interrupted.",
              y=112, size=46)
+
+    top = 228
+    # 214 ist kein Geschmackswert: die erste Zeile beginnt 204 Pixel unter der
+    # Panelkante, jede weitere 54 tiefer, und die letzte braucht ihre eigene
+    # Zeilenhoehe plus Rand. Mit 150 fiel die vierte Zeile aus dem Panel
+    # heraus und in die Erklaerzeile darunter.
+    height = 214 + 54 * len(rows)
+    _panel(draw, top, height, f"gate-m3  ·  {report.source_label(path, date)}")
+    draw.text((190, top + 68), report.gate_setup(path), font=font(SANS, 23),
+              fill=DIM)
+
+    group_y = top + 116
+    draw.text((800, group_y), "answers that arrived in time", font=font(SANS, 23),
+              fill=DIM, anchor="ma")
+    draw.text((1340, group_y), "age of the newest answer, p95",
+              font=font(SANS, 23), fill=DIM, anchor="ma")
+    sub_y = group_y + 32
+    for x, label in ((700, "Triton"), (900, "Vigilant"),
+                     (1240, "Triton"), (1440, "Vigilant")):
+        draw.text((x, sub_y), label, font=font(SANS_BOLD, 23), fill=DIM, anchor="ra")
+    draw.text((1680, sub_y), "fewer missed", font=font(SANS_BOLD, 23), fill=DIM,
+              anchor="ra")
+    draw.line([(190, sub_y + 36), (1680, sub_y + 36)], fill=FAINT, width=2)
+
+    shown = int(min(len(rows), 1 + progress * (len(rows) + 1)))
+    y = sub_y + 56
+    for name, triton_cov, gov_cov, triton_age, gov_age, verdict in rows[:shown]:
+        lead = name == "detector"
+        colour = ACCENT if lead else TEXT
+        fnt = font(SANS_BOLD, 30) if lead else font(SANS, 30)
+        draw.text((190, y), name, font=fnt, fill=colour)
+        for x, value in ((700, triton_cov), (900, gov_cov),
+                         (1240, triton_age), (1440, gov_age)):
+            draw.text((x, y), value, font=fnt, fill=colour, anchor="ra")
+        # Ein negativer Faktor ist ein Verlust und wird auch so gefaerbt —
+        # `depth` steht in diesem Lauf bei -1.7x, und das bleibt rot.
+        draw.text((1680, y), verdict, font=fnt, anchor="ra",
+                  fill=BAD if verdict.startswith("-") else OK)
+        y += 54
+
+    below = top + height + 28
+    draw.text((130, below),
+              "\"in time\" = the control loop looked every 33 ms and found an "
+              "answer younger than its limit",
+              font=font(SANS, 25), fill=DIM)
+    _source(draw, path, below + 40, date)
     if progress > 0.6:
-        draw.text((130, 760), "detector: 85 % → 100 % of control cycles covered",
-                  font=font(SANS_BOLD, 40), fill=OK)
-        draw.text((130, 820), "three runs, one laptop GPU, raw logs in the repository",
-                  font=font(SANS, 28), fill=DIM)
+        # Auch der Faktor kommt aus der Zeile darueber und nicht aus dem
+        # Quelltext: gesprochene Zahl und gezeigte Zahl koennen so nicht
+        # auseinanderlaufen.
+        detector = next(r for r in rows if r[0] == "detector")
+        draw.text((130, below + 100),
+                  f"detector: {detector[1]} → {detector[2]} of control cycles "
+                  f"answered in time  ·  {detector[5]} fewer missed",
+                  font=font(SANS_BOLD, 38), fill=OK)
     return image
 
 
 def terminal_doctor(scene, progress: float) -> Image.Image:
     path = Path(scene.data["path"])
-    lines = _read_lines(path, [0, 1, 4, 5, 6, 7, 8, 9, 11])
-    image = _terminal(
-        lines,
-        "vig doctor — checked before anything runs",
-        highlights=[],
-        gloss="It refuses to pretend: an overloaded configuration is reported, not smoothed over.",
-        progress=progress)
+    lines = report.doctor_lines(path)
+    image = base()
     draw = ImageDraw.Draw(image)
     kicker(draw, "try it on your own machine")
     headline(draw, "It says what will not work — before you start.", y=112, size=46)
+
+    mono = font(MONO, 24)
+    line_h = 34
+    top, left = 228, 130
+    # Eine echte Ausgabe ist manchmal breiter als das Bild. Abschneiden mit
+    # sichtbarer Ellipse, wie `render_terminal.py` es tut — eine Zeile, die
+    # rechts aus dem Bild laeuft, behauptet, es stehe dort nichts mehr.
+    advance = draw.textlength("M", font=mono) or 14.4
+    budget = int((W - 2 * left - 60) / advance)
+    lines = [line if len(line) <= budget else line[:budget - 2].rstrip() + " …"
+             for line in lines]
+    height = 52 + line_h * len(lines) + 26
+    _panel(draw, top, height,
+           f"vig doctor  ·  {report.source_label(path, scene.data.get('date', ''))}")
+
+    shown = int(min(len(lines), 2 + progress * (len(lines) + 4)))
+    y = top + 62
+    for line in lines[:shown]:
+        colour = TEXT
+        if line.startswith("OK"):
+            colour = OK
+        elif line.startswith("FAIL") or line.startswith("RESULT"):
+            colour = BAD
+        elif line.startswith("WARN"):
+            colour = "#d0a215"
+        draw.text((left + 26, y), line, font=mono, fill=colour)
+        y += line_h
+
+    below = top + height + 26
+    draw.text((left, below),
+              "It refuses to pretend: an overloaded configuration is reported, "
+              "not smoothed over.",
+              font=font(SANS, 25), fill=DIM)
+    _source(draw, path, below + 38, scene.data.get("date", ""))
     if progress > 0.55:
+        # Nicht tiefer als hier: ab rund 930 liegt das Band des eingebrannten
+        # Untertitels. Eine Fassung mit 856/958 verdeckte die Lizenzzeile
+        # vollstaendig — in der Fassung ohne Untertitel sah man das nicht.
         commands = ["vig doctor -c vig.yaml", "vig profile", "vig serve"]
         x = 160
         for command in commands:
@@ -344,11 +406,12 @@ def price(_scene, progress: float) -> Image.Image:
     image = base()
     draw = ImageDraw.Draw(image)
     kicker(draw, "and what it costs")
-    headline(draw, "The background pays for it. We say so.", y=118, size=54)
+    headline(draw, "The background block pays for it.", y=118, size=54)
 
-    draw.text((200, 300), "Same run, the background language model:",
+    draw.text((200, 300),
+              "Same run, the background block (ResNet-50, 95 ms, not interruptible):",
               font=font(SANS, 32), fill=DIM)
-    draw.text((200, 356), "0 % coverage", font=font(SANS_BOLD, 56), fill=BAD)
+    draw.text((200, 356), "0 % answered in time", font=font(SANS_BOLD, 56), fill=BAD)
     draw.text((200, 436),
               "A 95 ms block does not fit next to a 33 ms period — with or without us.",
               font=font(SANS, 28), fill=DIM)
@@ -358,7 +421,7 @@ def price(_scene, progress: float) -> Image.Image:
         draw.text((200, 556), "For models that can be split, the trade becomes visible:",
                   font=font(SANS, 30), fill=TEXT)
         rows = [
-            ("", "detector coverage", "background progress"),
+            ("", "detector, answers in time", "background progress"),
             ("no decomposition", "98 %", "2 generations"),
             ("cooperative quanta", "91 %", "40 generations"),
         ]
@@ -388,8 +451,8 @@ def limits(_scene, progress: float) -> Image.Image:
     headline(draw, "Three cases where we would tell you no.", y=118, size=54)
 
     cards = [
-        ("Below saturation",
-         "Your server is fine. We would only cost you overhead."),
+        ("A GPU with room left",
+         "Your server already delivers. Come back when it queues."),
         ("A single stream",
          "Keep the newest frame in your own client. Fifty lines get most of it."),
         ("Transport-bound",
@@ -414,6 +477,60 @@ def limits(_scene, progress: float) -> Image.Image:
     return image
 
 
+def usecases(_scene, progress: float) -> Image.Image:
+    """Zwei Einsatzbilder — und was wir ausdruecklich nicht behaupten.
+
+    Die Abgrenzung steht im selben Bild wie die Bilder selbst und nicht im
+    Kleingedruckten. Wer das hier einem Sicherheitsverantwortlichen zeigt,
+    soll die Grenze sehen, bevor er fragen muss.
+    """
+    image = base()
+    draw = ImageDraw.Draw(image)
+    kicker(draw, "where this belongs")
+    headline(draw, "Two pictures — and what we are not claiming.", y=118, size=54)
+
+    cards = [
+        ("Humanoid robot",
+         "Vision in the control loop. A local language model plans the next "
+         "move on the same GPU. The governor keeps the thinking from blocking "
+         "the seeing."),
+        ("Driver assistance, pre-development",
+         "Several cameras, object detection at a fixed rate, and a slower "
+         "scene analysis beside it on the same accelerator."),
+    ]
+    width, gap, pad = 780, 60, 40
+    shown = int(min(len(cards), 1 + progress * 3))
+    x = 160
+    head_font = font(SANS_BOLD, 34)
+    body_font = font(SANS, 28)
+    for head, body in cards[:shown]:
+        draw.rectangle([x, 300, x + width, 668], fill=PANEL)
+        draw.line([(x, 300), (x + width, 300)], fill=ACCENT, width=4)
+        y = 352
+        # Auch die Ueberschrift wird umgebrochen: "Driver assistance,
+        # pre-development" passt bei 34 Punkt nicht in eine Kartenzeile.
+        for line in wrap(draw, head, head_font, width - 2 * pad):
+            draw.text((x + pad, y), line, font=head_font, fill=TEXT)
+            y += 46
+        y += 18
+        for line in wrap(draw, body, body_font, width - 2 * pad):
+            draw.text((x + pad, y), line, font=body_font, fill=DIM)
+            y += 42
+        x += width + gap
+
+    if progress > 0.5:
+        draw.text((160, 740), "Plausible pictures, not customer deployments.",
+                  font=font(SANS_BOLD, 32), fill=TEXT)
+        draw.text((160, 796),
+                  "We claim nothing about certification or hard real time. "
+                  "We are one component —",
+                  font=font(SANS, 28), fill=DIM)
+        draw.text((160, 838),
+                  "the safety argument stays with the manufacturer.",
+                  font=font(SANS, 28), fill=DIM)
+    return image
+
+
 def close(_scene, progress: float) -> Image.Image:
     image = base()
     draw = ImageDraw.Draw(image)
@@ -423,7 +540,7 @@ def close(_scene, progress: float) -> Image.Image:
               fill=ACCENT, width=5)
     lines = [
         ("github.com/Vigilant-CRS/Inference-Governor-QoS", TEXT),
-        ("The numbers, the method, and the runs that failed.", DIM),
+        ("Same protocol, same models — in your client, only the address changes.", DIM),
         ("Vigilant e.K., Stuttgart · vigilant-crs.de · info@vigilant-crs.de", DIM),
     ]
     y = 570
@@ -441,14 +558,14 @@ def short_tail(_scene, progress: float) -> Image.Image:
     kicker(draw, "the other half")
     headline(draw, "And the background pays for it.", y=150, size=58)
     draw.text((160, 360),
-              "In the same run, the background language model got 0 % coverage.",
+              "In the same run, the background block never ran.",
               font=font(SANS, 34), fill=DIM)
     draw.text((160, 416),
               "A 95 ms block does not fit next to a 33 ms period — with or without us.",
               font=font(SANS, 34), fill=DIM)
     draw.line([(160, 520), (160 + int(520 * min(1.0, progress * 2)), 520)],
               fill=ACCENT, width=5)
-    draw.text((160, 580), "The numbers, the method, and the runs that failed:",
+    draw.text((160, 580), "The measurements, the method, and the reports:",
               font=font(SANS, 32), fill=DIM)
     draw.text((160, 644), "github.com/Vigilant-CRS/Inference-Governor-QoS",
               font=font(SANS_BOLD, 40), fill=TEXT)
@@ -461,6 +578,7 @@ RENDERERS = {
     "timeline_fifo": timeline_fifo,
     "stale": stale,
     "timeline_governor": timeline_governor,
+    "usecases": usecases,
     "terminal_run": terminal_run,
     "price": price,
     "limits": limits,
@@ -470,8 +588,9 @@ RENDERERS = {
 
 #: Szenen, deren Bild sich bewegt. Alles andere wird einmal gerendert und
 #: stehen gelassen — das spart Platz und Zeit, ohne dass man es sieht.
-ANIMATED = {"title", "timeline_fifo", "stale", "timeline_governor", "terminal_run",
-            "price", "limits", "terminal_doctor", "close", "short_tail"}
+ANIMATED = {"title", "timeline_fifo", "stale", "timeline_governor", "usecases",
+            "terminal_run", "price", "limits", "terminal_doctor", "close",
+            "short_tail"}
 
 
 def render(scene, progress: float) -> Image.Image:
@@ -486,7 +605,7 @@ def thumbnail(path: Path) -> None:
     draw.text((80, 216), "is the only one worth", font=font(SANS_BOLD, 82), fill=TEXT)
     draw.text((80, 312), "computing.", font=font(SANS_BOLD, 82), fill=ACCENT)
     draw.line([(80, 440), (520, 440)], fill=ACCENT, width=6)
-    draw.text((80, 486), "detector coverage  85 %  →  100 %", font=font(SANS_BOLD, 44),
+    draw.text((80, 486), "answers in time   85 %  →  100 %", font=font(SANS_BOLD, 44),
               fill=OK)
     draw.text((80, 556), "one GPU · several models · measured, with the price shown",
               font=font(SANS, 30), fill=DIM)

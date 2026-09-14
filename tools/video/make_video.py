@@ -33,10 +33,16 @@ import script  # noqa: E402
 FPS = 30
 PIPER = Path.home() / ".local/bin/piper"
 VOICE = Path.home() / ".local/opt/piper/en_US-lessac-high.onnx"
-#: 1.15 statt 1.0: die Stimme trifft damit rund 134 Woerter je Minute, das
-#: Tempo, das das Skript verlangt. Schneller klingt gehetzt, langsamer traege.
-LENGTH_SCALE = "1.15"
-SENTENCE_SILENCE = "0.35"
+#: Tempo und Atem — und die beiden sind nicht dasselbe.
+#:
+#: 1.15 streckte jede einzelne Silbe. Das Ergebnis war nicht ruhig, sondern
+#: zaeh: gedehnte Vokale klingen nach Muehe, nicht nach Bedacht. Mit 1.0
+#: spricht das Modell in seinem eigenen Takt, und die Ruhe wandert dorthin,
+#: wo sie hingehoert — in die Pause zwischen zwei Saetzen. Das ist der
+#: "breath between beats" aus dem Nachbarprojekt: nicht langsamer reden,
+#: sondern seltener.
+LENGTH_SCALE = "1.0"
+SENTENCE_SILENCE = "0.5"
 
 
 def run(argv: list[str], **kwargs) -> subprocess.CompletedProcess:
@@ -145,6 +151,14 @@ def srt_chunks(text: str, limit: int = 84) -> list[str]:
         if len(sentence) <= limit:
             parts.append(sentence)
             continue
+        # Knapp zu lange Saetze nicht am Komma zerlegen. "One laptop GPU,
+        # against a tuned Triton ..." hat 86 Zeichen und zerfiel so in einen
+        # Vierzehn-Zeichen-Fetzen plus volle Zeile; der Fetzen stand 0,9
+        # Sekunden. Der mittige Umbruch weiter unten teilt solche Saetze in
+        # zwei lesbare Haelften.
+        if len(sentence) <= int(limit * 1.25):
+            parts.append(sentence)
+            continue
         current = ""
         for piece in sentence.split(", "):
             candidate = (current + ", " + piece) if current else piece
@@ -233,6 +247,10 @@ def main() -> int:
         if scene.source in ("run", "doctor"):
             relative = Path(script.SOURCES[scene.source]).relative_to(runtime.name)
             scene.data["path"] = str(runtime / relative)
+            # Manche Protokollverzeichnisse tragen kein Datum im Namen; dann
+            # kommt es aus dem Bericht (script.SOURCE_DATES), nie aus der
+            # Dateizeit — die verstellt schon ein Kopiervorgang.
+            scene.data["date"] = script.SOURCE_DATES.get(scene.source, "")
 
     segments, audio_parts, srt_entries, chapters = [], [], [], []
     clock = 0.0
@@ -336,13 +354,20 @@ def main() -> int:
              "computing. This is what the Vigilant Inference Governor does, what it",
              "measured on one laptop GPU, and the three cases where we would tell you",
              "not to use it.", "",
-             "For you if several models share one GPU on an edge box or a robot and",
-             "a late answer is worth less than no answer: perception loops, ROS 2",
-             "nodes, Triton or TensorRT behind a controller that cannot wait.",
+             "For you if several models share one GPU on an edge box or a robot",
+             "and a late answer is worth less than no answer: a humanoid robot",
+             "whose seeing must not wait behind its thinking, driver assistance in",
+             "pre-development, perception loops, ROS 2 nodes, Triton or TensorRT",
+             "behind a controller that cannot wait.",
              "",
-             "Not for you if your GPU is not saturated, if you run a single stream,",
-             "or if your bottleneck is transport and CPU rather than GPU time. Those",
-             "three cases are in the video, with the measurement that found them.",
+             "Not for you if your GPU is not busy enough to queue, if you run a",
+             "single stream, or if your bottleneck is moving data rather than GPU",
+             "time. Those three cases are in the video, with the measurement that",
+             "found them.",
+             "",
+             "The repository carries the method, the raw logs of every run shown",
+             "here, and the runs that did not work out — including the ones that",
+             "made us rewrite a number.",
              "",
              "Repository: https://github.com/Vigilant-CRS/Inference-Governor-QoS",
              "Licence: BUSL-1.1 — free for evaluation and for up to three devices in production.",
