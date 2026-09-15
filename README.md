@@ -228,8 +228,10 @@ configuration we had tuned by hand. It now arrives at the same structure: the
 same serialised model pair, the same two interference entries (within 6.4 %),
 solo profiles within 3.5 % — twelve of twelve series, not contaminated, and a
 clear answer: *on that load the governor is not worth it*. One occupancy level
-of the detector differs, in the cautious direction
-([comparison](docs/benchmark/validierung-autotune.md)).
+of the detector differs, in the cautious direction. On a second device, a
+Pixel 5 with a different SoC and no hand-tuned reference, it derived the same
+structure with that phone's own, slower numbers — again twelve of twelve
+series, clean ([comparison](docs/benchmark/validierung-autotune.md)).
 
 It leaves behind `qualification/measured.yaml` and a report in Markdown and
 JSON: what was measured, under what conditions, what was discarded and why,

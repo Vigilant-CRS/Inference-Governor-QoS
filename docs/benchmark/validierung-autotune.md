@@ -484,16 +484,67 @@ discarded" statt mit dem Urteil; das Urteil steht englisch in seinem
 Abschnitt: geschuetzter Strom ab 90 % direkt 996 ‰, Governor 0 ‰, nachrangige
 Stroeme 559 ‰ → 1000 ‰.
 
-### Pixel 5: kein Ergebnis
+### Pixel 5: ein zweites Geraet, dieselbe Struktur
 
 Zweites Geraet ohne Handkonfiguration (Snapdragon 765G, Adreno 620),
-dieselben Modelle und dieselbe Eingabe, `taskset c0`. `discover` lief, die
-Soloprofile und drei von sechs Paaren auch — dann verschwand das Geraet vom
-USB (`adb: device not found`), das Skript endete mit 255, und kein Bericht
-wurde abgeholt. **Daraus folgt nichts**, auch nicht fuer die schon gedruckten
-Zahlen. Festgehalten sei nur, was fuer eine Wiederholung zaehlt: Die Tiefe
-lag neben sich selbst bei 1,83x, knapp ueber der Warteschlangen-Grenze von
-1,80x — die Schwelle hat hier eine Kante.
+dieselben Modelle, dieselbe Eingabe, dieselben Binaries (`2c1f3d0`),
+`taskset c0` (die beiden A76-Kerne). Lauf
+`InferenceQoS-runtime/autotune-pixel5-2026-09-15/`, 13:01–13:13, 33 °C zu
+Beginn, 35 °C am Ende.
+
+Ein erster Versuch um 12:02 brach ab, weil das Geraet mitten in der
+Paarmessung vom USB verschwand; seine Rohdaten liegen unter
+`…-abgebrochen/` und gehen in nichts hier ein.
+
+| | |
+|---|---|
+| Schritte | alle vier `done` |
+| Messreihen | **12 von 12** verwertbar |
+| `contaminated` | false — fremde Rechenzeit 0,02 Kerne vor, 0,03 nach `vig-fit` |
+| Freigabe | **not issued** |
+| `vig-fit` | „Up to 125 % offered load the direct path loses nothing either … the governor is not worth it" |
+| `doctor` | `READY_WITH_WARNINGS` |
+
+**Gegen den Pixel-2-Lauf desselben Stands** (verschiedene Geraete, also keine
+Uebereinstimmung der Zahlen erwartet — verglichen wird, ob `autotune` dieselbe
+Art Konfiguration ableitet):
+
+| Modell | Pixel 2 p50 us | Pixel 5 p50 us | Abweichung | Pixel 2 Laststufe | Pixel 5 Laststufe |
+|---|---:|---:|---:|---|---|
+| depth | 193 969 | 215 138 | +10,9 % | keine | keine |
+| detector | 220 582 | 264 316 | +19,8 % | 273 106 | 432 192 |
+| pose | 92 918 | 93 801 | +1,0 % | 92 918 | 106 054 |
+
+| `no_corun` | Pixel 2 | Pixel 5 |
+|---|---|---|
+| [depth, pose] | ja | ja |
+
+| Interferenz (Opfer ← Nachbar) | Pixel 2 added_us | Pixel 5 added_us |
+|---|---:|---:|
+| depth ← detector | 47 865 | 15 325 |
+| detector ← depth | 121 562 | 194 195 |
+
+Was das heisst:
+
+- **Dieselbe Struktur auf einem anderen SoC.** Dasselbe serialisierte Paar
+  (`pose` leidet 2,42x unter `depth`, auf dem Pixel 2 dokumentiert 2,64x), dieselben
+  zwei Interferenzeintraege, dasselbe Urteil. Die Zahlen darin gehoeren dem
+  Geraet: Das Pixel 5 ist hier **langsamer** als das Pixel 2 — die Adreno 620
+  ist eine Mittelklasse-GPU, die Adreno 540 war eine Flaggschiff-GPU.
+- **Die Warteschlangen-Grenze hat eine Kante, und sie ist zweimal getroffen
+  worden.** Die Tiefe lag neben sich selbst bei **1,82x** (im abgebrochenen
+  Versuch 1,83x), die Grenze ist 1,80x. Beide Male als Warteschlange erkannt;
+  ein etwas schnellerer Lauf haette eine Laststufe geschrieben. Das ist ein
+  Grund, die Schwelle nicht als belegt zu betrachten, sondern als Heuristik mit
+  genau diesem Messpunkt daneben.
+- **Der Detektor schreibt auf beiden Geraeten eine Laststufe** (1,23x und
+  1,63x), die die Handkonfiguration des Pixel 2 nicht hat. Auf beiden in der
+  vorsichtigen Richtung.
+- **Wiederholbarkeit auf demselben Geraet:** Tiefe und Detektor liegen im
+  abgebrochenen Versuch und in diesem Lauf innerhalb von 1 % (215 181 /
+  215 138 und 266 803 / 264 316 us), `pose` weicht um 4,4 % ab (89 826 /
+  93 801 us). Das ist ein Hinweis, kein Beleg: der erste Versuch ist
+  unvollstaendig.
 
 ### Nebenbefund: `vig-fit` hatte denselben Fehler
 
