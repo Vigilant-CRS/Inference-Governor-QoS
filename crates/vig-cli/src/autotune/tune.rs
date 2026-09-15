@@ -315,6 +315,26 @@ impl Evaluation {
     }
 }
 
+/// Warum `vig-fit` kein Ergebnis hat, aus `inconclusive_reason` und
+/// `invalid_cells`; bei einem aelteren `vig-fit` der alte Grund.
+pub(crate) fn inconclusive_detail(parsed: &serde_json::Value) -> String {
+    let reason = parsed
+        .get("inconclusive_reason")
+        .and_then(serde_json::Value::as_str);
+    let invalid = parsed
+        .get("invalid_cells")
+        .and_then(serde_json::Value::as_u64);
+    match (reason, invalid) {
+        (Some("invalid_cells"), Some(count)) => {
+            format!(
+                "{count} measurement cell(s) invalid — an integration error, see vig-fit's output"
+            )
+        }
+        (Some(other), _) => other.replace('_', " "),
+        (None, _) => "no stream delivered".to_owned(),
+    }
+}
+
 /// Liest die Bewertung aus dem JSON von `vig-fit`.
 ///
 /// # Errors
@@ -327,7 +347,10 @@ pub(crate) fn evaluation_from_fit_json(parsed: &serde_json::Value) -> Result<Eva
         .and_then(serde_json::Value::as_bool)
         == Some(false)
     {
-        return Err("vig-fit saw no stream deliver; that is no evaluation".to_owned());
+        return Err(format!(
+            "vig-fit found no valid measurement ({}); that is no evaluation",
+            inconclusive_detail(parsed)
+        ));
     }
     let cells = parsed
         .get("cells")
@@ -336,6 +359,16 @@ pub(crate) fn evaluation_from_fit_json(parsed: &serde_json::Value) -> Result<Eva
     let mut points: Vec<LoadPoint> = Vec::new();
     for cell in cells {
         let incomplete = || format!("an evaluation cell is incomplete: {cell}");
+        // Eine ungueltige Zelle ist ein Integrationsfehler, keine Messung
+        // (Review 15.09., R04). Die ganze Bewertung faellt: Mit einer Luecke
+        // verglichen zwei Fassungen verschiedene Matrizen. Ein `vig-fit` vor
+        // dem Feld kennt `valid` nicht; dann gilt die Zelle wie bisher.
+        if cell.get("valid").and_then(serde_json::Value::as_bool) == Some(false) {
+            return Err(format!(
+                "vig-fit marked a measurement cell invalid (integration error, not a result): \
+                 {cell}"
+            ));
+        }
         let load_percent = cell
             .get("load_percent")
             .and_then(serde_json::Value::as_u64)
@@ -1718,7 +1751,38 @@ pub(crate) fn from_json(value: &serde_json::Value) -> Option<Tuning> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::{Evaluation, LoadPoint, Objective, StreamMiss, decide, protected_regression};
+    use super::{
+        Evaluation, LoadPoint, Objective, StreamMiss, decide, evaluation_from_fit_json,
+        protected_regression,
+    };
+
+    /// Eine ungueltige Zelle ist keine Messung: Die ganze Bewertung faellt
+    /// (Review 15.09., R04). Ohne das Feld — ein aelteres `vig-fit` — zaehlt
+    /// die Zelle wie bisher.
+    #[test]
+    fn an_invalid_fit_cell_is_no_evaluation() {
+        let cell = |valid: Option<bool>| {
+            let mut cell = serde_json::json!({
+                "load_percent": 100, "stream": "detector", "protected": true,
+                "governed_uncovered_permille": 1000, "governed_samples": 200,
+            });
+            if let (Some(valid), Some(map)) = (valid, cell.as_object_mut()) {
+                map.insert("valid".to_owned(), serde_json::Value::Bool(valid));
+            }
+            cell
+        };
+        let run = |c| serde_json::json!({ "conclusive": true, "cells": [c] });
+        let refused = evaluation_from_fit_json(&run(cell(Some(false)))).unwrap_err();
+        assert!(refused.contains("invalid"), "{refused}");
+        assert!(evaluation_from_fit_json(&run(cell(Some(true)))).is_ok());
+        assert!(evaluation_from_fit_json(&run(cell(None))).is_ok());
+        let inconclusive = serde_json::json!({
+            "conclusive": false, "cells": [], "inconclusive_reason": "invalid_cells",
+            "invalid_cells": 3,
+        });
+        let why = evaluation_from_fit_json(&inconclusive).unwrap_err();
+        assert!(why.contains("3 measurement cell(s) invalid"), "{why}");
+    }
 
     /// Ein besseres Maximum darf keinen einzelnen geschuetzten Strom
     /// verschlechtern (Review 15.09., R03).

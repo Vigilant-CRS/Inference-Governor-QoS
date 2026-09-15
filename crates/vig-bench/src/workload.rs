@@ -434,8 +434,16 @@ async fn run_stream(
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut next = tokio::time::Instant::now();
     let mut frame = 0_u64;
+    // Jeder Request ist eine eigene Aufgabe. Frueher wurde keine davon
+    // abgewartet: `drive` kehrte zurueck, waehrend Requests noch liefen, las die
+    // Zaehler vor ihnen, und noch laufende Requests des direkten Arms belegten
+    // das Backend, waehrend schon der Governor-Arm oder der naechste Lastpunkt
+    // mass (Befund beim Review-Fix R04, 15.09.; dieselbe Klasse wie R03 vom
+    // 14.09. in `pilot::run_arm`).
+    let mut inflight = tokio::task::JoinSet::new();
 
     loop {
+        while inflight.try_join_next().is_some() {}
         // Ohne Spitzen der feste Takt wie immer. Mit Spitzen richtet sich der
         // naechste Takt danach, ob gerade eine laeuft; verpasste Takte werden
         // wie bei `Skip` nicht nachgeholt.
@@ -472,7 +480,7 @@ async fn run_stream(
         let model = stream.model;
         let input = stream.input.clone();
         let text = stream.text.clone();
-        tokio::spawn(async move {
+        inflight.spawn(async move {
             let _permit = permit;
             let age = capture.elapsed();
             let Some(request) = build_request(
@@ -511,7 +519,21 @@ async fn run_stream(
             }
         });
     }
+    // Die offenen Requests zu Ende kommen lassen, begrenzt: Ein haengendes
+    // Backend darf den Lauf nicht unbegrenzt aufhalten. Was danach noch laeuft,
+    // wird abgebrochen und fehlt im Bericht — genau wie vorher, aber nicht
+    // mehr still im naechsten Messfenster.
+    let drained = tokio::time::timeout(DRAIN_AFTER_WINDOW, async {
+        while inflight.join_next().await.is_some() {}
+    })
+    .await;
+    if drained.is_err() {
+        inflight.abort_all();
+    }
 }
+
+/// Wie lange `run_stream` nach dem Messfenster auf offene Requests wartet.
+const DRAIN_AFTER_WINDOW: Duration = Duration::from_secs(30);
 
 /// Der Eigenbau: LATEST-Semantik im Client.
 ///

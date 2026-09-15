@@ -1173,7 +1173,10 @@ impl Steps for Live {
             .and_then(serde_json::Value::as_bool)
             == Some(false)
         {
-            return Err("vig-fit saw no stream deliver; that is no verdict".to_owned());
+            return Err(format!(
+                "vig-fit found no valid measurement ({}); that is no verdict",
+                tune::inconclusive_detail(&parsed)
+            ));
         }
         // Die englische Fassung, wo es sie gibt: der Bericht ist englisch.
         parsed
