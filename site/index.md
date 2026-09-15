@@ -10,7 +10,7 @@ still be useful when it is finished.</p>
 
 <p class="zeile"><code>vig autotune</code> tunes it for your hardware: it
 measures your models, tries the governor's settings against your contracts and
-keeps the configuration that serves your protected streams best.</p>
+keeps only what holds up in a back-to-back rerun.</p>
 
 <div class="marken">
 <span>Qualifies itself on your hardware</span>
@@ -148,7 +148,10 @@ because the power-capped GPU changed state mid-series, and therefore **refused
 to sign off**. On a Pixel 2 and a Pixel 5 it ran clean, twelve of twelve series
 each, derived the same configuration structure on both, and said the opposite
 for that test load — slow contracts at about 35 % planned utilisation: **no
-governor needed there**
+governor needed there**. On a saturated but schedulable load the same Pixel 2
+shows the other side: the protected stream misses **208 ‰** of its cycles on
+the direct path and **0 ‰** under the governor, paid for by the lower-priority
+streams
 ([report](docs/benchmark/validierung-autotune.md)).
 
 ```bash

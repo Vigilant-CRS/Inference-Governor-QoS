@@ -612,6 +612,57 @@ Die Datei nimmt deshalb alle drei Perioden von Overload mal 0,74 (Detektor
 READY_WITH_WARNINGS**. `vig-fit` faehrt davon 100 bis 125 % und saettigt die
 zwei Slots.
 
+### Pixel 2, gesaettigt und planbar: der Governor gewinnt, das Tuning haelt dicht
+
+`messungen/autotune-pixel2-2026-09-15-tuned-saturated/`, Eingabe
+`vig-slots2-saturated.yaml` (95 % geschuetzt, READY_WITH_WARNINGS), Binary mit
+Machbarkeitspruefung und Bestaetigung. 15:09–15:28, 35 → 39 °C.
+
+| | |
+|---|---|
+| Schritte | alle fuenf `done` (measure 591 s, tune 381 s, fit 90 s) |
+| Messreihen | 12 von 12 verwertbar |
+| `contaminated` | false |
+| Freigabe | **not issued** |
+| `doctor` | READY_WITH_WARNINGS |
+
+**Der Governor gegen den direkten Weg** (`fit`, beide Arme): ab 90 % Last
+verfehlt der direkte Weg **208 ‰** der Takte des geschuetzten Stroms, der
+Governor **0 ‰**. Der Preis steht daneben: Die nachrangigen Stroeme verlieren
+direkt 270 ‰, unter dem Governor 1000 ‰. Das ist der Gegenbefund zu den beiden
+ungesaettigten Telefonlaeufen oben: Ob der Governor auf einem Telefon etwas
+bringt, haengt an der Last, nicht am Geraet.
+
+**Das Tuning.** Die Suche fand eine Einstellung, die besser aussah:
+
+| # | Einstellung | geschuetzt, schlechtester ‰ | nachrangig, Mittel ‰ | Entscheidung |
+|---:|---|---:|---:|---|
+| 0 | ungetunt | 0 | 515 | Ausgangspunkt |
+| 1 | `pipelining_depth → 1` | 0 | 482 | im Rauschen |
+| 2 | `protect_supply → true` | 30 | 515 | schlechter als ungetunt |
+| 3 | `margin_learning → an` | 0 | 508 | im Rauschen |
+| 4 | `safety_margin_percent → 125` | 37 | 488 | schlechter als ungetunt |
+| 5 | `safety_margin_percent → 100` | 0 | 376 | behalten |
+
+**Die Bestaetigung hat sie verworfen**, abwechselnd gemessen:
+
+| Paar | ungetunt geschuetzt / nachrangig ‰ | getunt geschuetzt / nachrangig ‰ | haelt |
+|---:|---:|---:|---|
+| 1 | 34 / 489 | 37 / 485 | nein — geschuetzt schlechter |
+| 2 | 0 / 508 | 0 / 469 | nein — im Rauschen |
+
+`measured.yaml` blieb ungetunt. Das ist der Fall, fuer den die Bestaetigung
+gebaut wurde: Auf dem Heavy-Lauf haette dieselbe Art Suchgewinn eine
+Einstellung festgeschrieben, die im naechsten Lauf nicht mehr galt. Hier sagt
+das Werkzeug stattdessen, dass sie nicht haelt, und laesst die Konfiguration,
+wie sie ist.
+
+**Was damit belegt ist:** `vig autotune` laeuft auf dem Telefon mit allen fuenf
+Schritten durch, erkennt eine unerfuellbare Last (Heavy) und schreibt nichts
+auf Grund von Rauschen fest. **Was nicht belegt ist:** ein bestaetigter
+Tuning-Gewinn. Auf keiner der gemessenen Lasten hat eine andere Einstellung als
+die gemessene zweimal hintereinander gehalten.
+
 ### Laptop: die Verweigerung steht vorn
 
 Lauf `InferenceQoS-runtime/messungen/autotune-laptop-2026-09-15f/`, gleiche Bedingungen

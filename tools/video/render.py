@@ -539,7 +539,7 @@ def close(_scene, progress: float) -> Image.Image:
               fill=ACCENT, width=5)
     lines = [
         ("github.com/Vigilant-CRS/Inference-Governor-QoS", TEXT),
-        ("vig autotune — one command tells you whether you need it.", DIM),
+        ("vig autotune — one command tunes it for your machine.", DIM),
         ("Same protocol, same models — in your client, only the address changes.", DIM),
         ("Vigilant e.K., Stuttgart · vigilant-crs.de · info@vigilant-crs.de", DIM),
     ]
@@ -730,8 +730,8 @@ def devices(scene, progress: float) -> Image.Image:
                 y += 40
             y += 8
         x += width + gap
-    footnote(draw, "read from qualification.json and measured.yaml of "
-                   + ", ".join(Path(p).parent.name for p in scene.data["paths"]))
+    footnote(draw, "read from qualification.json and measured.yaml of each "
+                   "vig autotune run listed in tools/video/script.py")
     return image
 
 
@@ -769,17 +769,33 @@ def tuning(scene, progress: float) -> Image.Image:
         draw.text((1740, y), decision, font=body, fill=colour, anchor="ra")
         y += 52
     below = top + height + 30
-    if progress > 0.5:
+    # Frueh genug: der Sprechertext nennt die Zahlen in der zweiten Haelfte
+    # der Szene, und das Bild darf ihnen nicht hinterherlaufen.
+    if progress > 0.3:
         (up, ub), (tp, tb) = t["untuned"], t["tuned"]
         if t["improved"] and t["applied"]:
-            text = (f"protected streams miss at worst {tp} ‰ instead of {up} ‰ "
-                    f"· lower-priority {tb} ‰ instead of {ub} ‰")
+            text = (f"kept and confirmed: protected streams miss at worst {tp} ‰ "
+                    f"instead of {up} ‰ · lower-priority {tb} ‰ instead of {ub} ‰")
             colour = OK
+        elif t["improved"]:
+            held = sum(1 for p in t["pairs"] if p[3])
+            text = (f"best setting of the search did not hold up in a rerun "
+                    f"({held} of {len(t['pairs'])} pairs) — nothing written")
+            colour = TEXT
         else:
             text = "the measured configuration was already the best setting tried"
             colour = TEXT
-        draw.text((left, below), text, font=font(SANS_BOLD, 32), fill=colour)
-    _source(draw, path, below + 56, treatment="shown unchanged")
+        draw.text((left, below), text, font=font(SANS_BOLD, 30), fill=colour)
+    if progress > 0.5 and t["fit"]:
+        load, direct, governed, bg_direct, bg_governed = t["fit"]
+        draw.text((left, below + 52),
+                  f"governor against the direct path, from {load} % load: "
+                  f"protected stream misses {direct} ‰ → {governed} ‰",
+                  font=font(SANS_BOLD, 28), fill=OK)
+        draw.text((left, below + 92),
+                  f"paid for by the lower-priority streams: {bg_direct} ‰ → {bg_governed} ‰",
+                  font=font(SANS, 26), fill=DIM)
+    _source(draw, path, below + 140, treatment="shown unchanged")
     return image
 
 

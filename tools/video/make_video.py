@@ -370,7 +370,14 @@ def main() -> int:
     attach_sources(script.SCENES, runtime)
     attach_sources(script.PROMO_SCENES, runtime)
 
-    summary = {"voice": VOICE.name, "length_scale": LENGTH_SCALE, "fps": args.fps}
+    # Ergaenzen statt ersetzen: `--only promo` darf die Angaben zum
+    # Erklaervideo nicht loeschen, und umgekehrt.
+    summary_path = out / "build.json"
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        summary = {}
+    summary.update({"voice": VOICE.name, "length_scale": LENGTH_SCALE, "fps": args.fps})
     if args.only in ("", "explainer"):
         explainer = build_cut(script.SCENES, "vigilant-inference-governor", out,
                               work / "explainer", args.fps, args.keep_frames)
@@ -398,7 +405,7 @@ def main() -> int:
             "promo_srt": str(promo["srt"]), "promo_duration_s": round(promo["duration"], 2),
         })
 
-    (out / "build.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(json.dumps(summary, indent=2))
     return 0
 

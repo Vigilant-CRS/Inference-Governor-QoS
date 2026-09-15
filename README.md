@@ -7,9 +7,9 @@ or TensorFlow Lite — and decides before every dispatch whether a result will
 still be useful when it is finished.
 
 **`vig autotune` tunes it for your hardware:** it measures your models on your
-machine, tries the governor's settings against your contracts, and keeps the
-configuration that serves your protected streams best — and says plainly when
-your load does not need a governor at all.
+machine, tries the governor's settings against your contracts, and keeps only
+what holds up in a back-to-back rerun — and says plainly when your load does
+not need a governor at all.
 
 > **Stop computing the past.** A faster GPU computes stale frames faster. The
 > governor stops computing them.
@@ -26,7 +26,9 @@ where they are; your client changes one line, the address.
 
 **Measured:** against a tuned Triton on the same GPU, the detector answers in
 time in **99 %** of control cycles instead of 85 % — twenty times fewer
-misses. Tested on an NVIDIA GPU and on the Adreno GPUs of two Android devices.
+misses. On a saturated Pixel 2 the protected stream goes from **208 ‰** of
+cycles missed to **0 ‰**, paid for by the lower-priority streams. Tested on an
+NVIDIA GPU and on the Adreno GPUs of two Android devices.
 
 **Find out whether it is for you:**
 

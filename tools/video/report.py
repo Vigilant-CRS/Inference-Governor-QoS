@@ -315,14 +315,30 @@ def tuning_summary(path: Path) -> dict:
     untuned, tuned = objective(tuning.get("untuned")), objective(tuning.get("tuned"))
     if untuned is None or tuned is None:
         raise SystemExit(f"{path}: tuning.untuned/tuned fehlen")
-    rows = []
+    # Zeile 0 ist der Ausgangspunkt: ohne ihn sieht niemand, wogegen die
+    # probierten Einstellungen verglichen wurden.
+    rows = [("untuned (as measured)", f"{untuned[0]} ‰", f"{untuned[1]} ‰", "baseline")]
     for candidate in tuning.get("candidates", []):
         o = objective(candidate.get("objective"))
         rows.append((assert_english(candidate.get("change") or "untuned", path),
                      "—" if o is None else f"{o[0]} ‰",
                      "—" if o is None else f"{o[1]} ‰",
                      candidate.get("decision", "?")))
+    confirmation = tuning.get("confirmation") or {}
+    pairs = []
+    for pair in confirmation.get("pairs", []):
+        u, t = objective(pair.get("untuned")), objective(pair.get("tuned"))
+        pairs.append((pair.get("pair"), u, t, bool(pair.get("held"))))
+    # Der Vergleich mit dem direkten Weg (vig-fit, beide Arme): nur die Zahlen,
+    # nie der Satz. Ohne Urteil bleibt die Zeile weg.
+    fit = None
+    verdict = data.get("fit_verdict") or ""
+    if verdict.strip() and not any(p in verdict for p in _NOT_WORTH):
+        load = _LOAD.search(verdict)
+        numbers = fit_numbers(verdict, path)
+        if load and numbers:
+            fit = (load.group(1), *numbers)
     return {"untuned": untuned, "tuned": tuned, "improved": bool(tuning.get("improved")),
-            "applied": bool(tuning.get("applied")), "rows": rows,
-            "series": data.get("series") or {}}
+            "applied": bool(tuning.get("applied")), "rows": rows, "pairs": pairs,
+            "fit": fit, "series": data.get("series") or {}}
 

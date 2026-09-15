@@ -30,7 +30,7 @@ DEVICES = [
     {"name": "Laptop GPU", "chip": "NVIDIA GeForce RTX 3070",
      "backend": "NVIDIA Triton 2.70", "run": "autotune-laptop-2026-09-15f"},
     {"name": "Pixel 2", "chip": "Snapdragon 835 · Adreno 540",
-     "backend": "TensorFlow Lite, GPU delegate", "run": "autotune-pixel2-2026-09-15"},
+     "backend": "TensorFlow Lite, GPU delegate", "run": "autotune-pixel2-2026-09-15-tuned-saturated"},
     {"name": "Pixel 5", "chip": "Snapdragon 765G · Adreno 620",
      "backend": "TensorFlow Lite, GPU delegate", "run": "autotune-pixel5-2026-09-15"},
 ]
@@ -42,7 +42,7 @@ SOURCES = {
     "doctor": "InferenceQoS-runtime/messungen/measure-nachlauf-2026-09-11e/pre4-doctor.txt",
     "autotune": "InferenceQoS-runtime/messungen/autotune-laptop-2026-09-15f/qualification.json",
     # Der Tuning-Lauf mit dem Stand, der autotune den tune-Schritt gibt.
-    "tuned": "InferenceQoS-runtime/messungen/autotune-laptop-2026-09-15-tuned/qualification.json",
+    "tuned": "InferenceQoS-runtime/messungen/autotune-pixel2-2026-09-15-tuned-saturated/qualification.json",
     "devices": ", ".join(f"InferenceQoS-runtime/messungen/{d['run']}/qualification.json"
                          for d in DEVICES),
 }
@@ -179,9 +179,10 @@ SCENES = [
         narration=(
             "You do not have to take our numbers, or our settings. One command, "
             "vig autotune, measures your models on your machine, tries the "
-            "governor's settings against your contracts, and keeps the "
-            "configuration that serves your protected streams best. And if your "
-            "load does not need a governor, it tells you that too."
+            "governor's settings against your contracts, and only keeps what "
+            "holds up when it runs again. On a saturated Pixel 2, the governor "
+            "took the protected stream from missing two hundred and eight per "
+            "mille of its cycles to none, paid for by the lower-priority streams."
         ),
         visual="tuning",
         chapter="vig autotune: tuned for your machine",
@@ -267,10 +268,20 @@ PROMO_SCENES = [
         pause=0.6,
     ),
     Scene(
+        key="devices",
+        narration=(
+            "Tested on an NVIDIA GPU, and on the Adreno GPUs of two Android "
+            "phones."
+        ),
+        visual="devices",
+        source="devices",
+        pause=0.8,
+    ),
+    Scene(
         key="autotune",
         narration=(
-            "And vig autotune tunes it for your machine, in one command, against "
-            "your own contracts."
+            "And vig autotune tunes it for your machine, in one command, and only "
+            "keeps what holds up."
         ),
         visual="tuning",
         source="tuned",
