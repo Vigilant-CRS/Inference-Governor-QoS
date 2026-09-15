@@ -23,6 +23,7 @@ keeps only what holds up in a back-to-back rerun.</p>
 <div class="knoepfe">
 <a class="knopf" href="#video">Watch the video</a>
 <a class="knopf leer" href="#qualify-your-own-hardware">Measure your machine: vig autotune</a>
+<a class="knopf leer" href="docs/use-cases.md">Use cases</a>
 <a class="knopf leer" href="docs/getting-started.md">Getting started</a>
 <a class="knopf leer" href="docs/benchmark/README.md">Read the measurements</a>
 <a class="knopf leer" href="https://github.com/Vigilant-CRS/Inference-Governor-QoS">GitHub</a>
@@ -146,13 +147,14 @@ the governor **0 ‰** — and the lower-priority streams pay for all of it
 (559 ‰ → 1000 ‰). It kept two of four measurement series, threw two away
 because the power-capped GPU changed state mid-series, and therefore **refused
 to sign off**. On a Pixel 2 and a Pixel 5 it ran clean, twelve of twelve series
-each, derived the same configuration structure on both, and said the opposite
-for that test load — slow contracts at about 35 % planned utilisation: **no
-governor needed there**. On a saturated but schedulable load the same Pixel 2
-shows the other side: the protected stream misses **208 ‰** of its cycles on
-the direct path and **0 ‰** under the governor, paid for by the lower-priority
-streams
-([report](docs/benchmark/validierung-autotune.md)).
+each, and derived the same configuration structure on both. What the governor
+is worth there depends on the load: with slow contracts at about 35 % planned
+utilisation, **no governor needed**. With a delivery-robot load that saturates
+the phone, the detector misses **293 ‰** of its cycles on the direct path and
+**99 ‰** under the governor on the Pixel 2 (**497 ‰ → 208 ‰** on the Pixel 5),
+paid for by the lower-priority streams — and at the highest load point on the
+Pixel 5 the governor is the worse choice for the detector
+([use cases](docs/use-cases.md), [report](docs/benchmark/validierung-autotune.md)).
 
 ```bash
 vig autotune --endpoint 127.0.0.1:8001 -c vig.yaml -o qualification

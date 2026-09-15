@@ -26,9 +26,11 @@ where they are; your client changes one line, the address.
 
 **Measured:** against a tuned Triton on the same GPU, the detector answers in
 time in **99 %** of control cycles instead of 85 % — twenty times fewer
-misses. On a saturated Pixel 2 the protected stream goes from **208 ‰** of
-cycles missed to **0 ‰**, paid for by the lower-priority streams. Tested on an
-NVIDIA GPU and on the Adreno GPUs of two Android devices.
+misses. On two phones carrying a delivery-robot load, it cuts the detector's
+missed cycles where the phone loses them — **293 ‰ → 99 ‰** on a Pixel 2,
+**497 ‰ → 208 ‰** on a Pixel 5 — paid for by the lower-priority streams, and
+not at every load point ([use cases](docs/use-cases.md)). Tested on an NVIDIA
+GPU and on the Adreno GPUs of two Android devices.
 
 **Find out whether it is for you:**
 
@@ -36,10 +38,13 @@ NVIDIA GPU and on the Adreno GPUs of two Android devices.
 vig autotune --endpoint 127.0.0.1:8001 -c vig.yaml -o qualification
 ```
 
+Where your contracts come from — freshness from motion, class from consequence
+— and the loads we measured: [use cases](docs/use-cases.md).
+
 [![Watch the video: Stop computing the past (2½ min)](site/assets/video-poster.png)](https://vigilant-crs.github.io/Inference-Governor-QoS/#video)
 
 [![Status](https://img.shields.io/badge/status-pre--production-orange)](#status-what-works-and-what-does-not)
-[![Tests](https://img.shields.io/badge/tests-863%20passing-brightgreen)](#build-and-verify)
+[![Tests](https://img.shields.io/badge/tests-884%20passing-brightgreen)](#build-and-verify)
 [![License](https://img.shields.io/badge/license-BUSL--1.1-blue)](LICENSE)
 
 ---

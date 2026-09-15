@@ -30,9 +30,9 @@ DEVICES = [
     {"name": "Laptop GPU", "chip": "NVIDIA GeForce RTX 3070",
      "backend": "NVIDIA Triton 2.70", "run": "autotune-laptop-2026-09-15f"},
     {"name": "Pixel 2", "chip": "Snapdragon 835 · Adreno 540",
-     "backend": "TensorFlow Lite, GPU delegate", "run": "autotune-pixel2-2026-09-15-tuned-saturated"},
+     "backend": "TensorFlow Lite, GPU delegate", "run": "autotune-pixel2-2026-09-15-usecase-fenster"},
     {"name": "Pixel 5", "chip": "Snapdragon 765G · Adreno 620",
-     "backend": "TensorFlow Lite, GPU delegate", "run": "autotune-pixel5-2026-09-15"},
+     "backend": "TensorFlow Lite, GPU delegate", "run": "autotune-pixel5-2026-09-15-usecase-fenster"},
 ]
 
 #: Wo die Zahlen herkommen. Der Schluessel steht in `Scene.source`.
@@ -41,8 +41,10 @@ SOURCES = {
     "run": "InferenceQoS-runtime/messungen/gate-m3-r03/gate-r1.txt",
     "doctor": "InferenceQoS-runtime/messungen/measure-nachlauf-2026-09-11e/pre4-doctor.txt",
     "autotune": "InferenceQoS-runtime/messungen/autotune-laptop-2026-09-15f/qualification.json",
-    # Der Tuning-Lauf mit dem Stand, der autotune den tune-Schritt gibt.
-    "tuned": "InferenceQoS-runtime/messungen/autotune-pixel2-2026-09-15-tuned-saturated/qualification.json",
+    # Der Tuning-Lauf mit Fenstern in Takten (mindestens 200 je Punkt), auf dem
+    # Anwendungsfall Lieferroboter (docs/use-cases.md). Der fruehere Lauf
+    # `…-tuned-saturated` mass mit 10-s-Fenstern, also 24 bis 27 Takten.
+    "tuned": "InferenceQoS-runtime/messungen/autotune-pixel2-2026-09-15-usecase-fenster/qualification.json",
     "devices": ", ".join(f"InferenceQoS-runtime/messungen/{d['run']}/qualification.json"
                          for d in DEVICES),
 }
@@ -180,9 +182,9 @@ SCENES = [
             "You do not have to take our numbers, or our settings. One command, "
             "vig autotune, measures your models on your machine, tries the "
             "governor's settings against your contracts, and only keeps what "
-            "holds up when it runs again. On a saturated Pixel 2, the governor "
-            "took the protected stream from missing two hundred and eight per "
-            "mille of its cycles to none, paid for by the lower-priority streams."
+            "holds up when it runs again. On a Pixel 2 carrying a delivery "
+            "robot's load, the governor cut the detector's missed cycles by two "
+            "thirds, paid for by the lower-priority streams."
         ),
         visual="tuning",
         chapter="vig autotune: tuned for your machine",

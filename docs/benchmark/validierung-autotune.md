@@ -749,3 +749,51 @@ auf einer unruhigen Maschine". Es las ebenfalls `loadavg`. Beide Werkzeuge
 messen jetzt dieselbe Groesse aus `vig_platform::cpu`; das JSON von `vig-fit`
 traegt `foreign_cores_centi_before` und `_after` statt `loadavg_before` und
 `_after`.
+
+## Nachmessung mit Fenstern in Takten, 15.09.2026 abends
+
+Anwendungsfall „Lieferroboter mit Telefon-SoC" (docs/use-cases.md), Eingabe
+`vig-slots2-saturated.yaml`, beide Telefone gleichzeitig, Binaries aus dem
+Arbeitsstand, der als `90f517c` committet wurde. `tune` misst 74 s je Punkt
+(200 Takte), `fit` 83 s je Arm und Punkt (201 Takte am 90-%-Punkt). Laeufe
+`messungen/autotune-pixel2-2026-09-15-usecase-fenster/` und
+`…-pixel5-…/`, 16:35–17:35, alle fuenf Schritte `done`, Exitcode 0, fremde
+Rechenzeit 0,04 bis 0,08 Kerne.
+
+**`fit`, Detektor (geschuetzt), verfehlte Takte direkt / Governor:**
+
+| Last | Pixel 2 | Pixel 5 |
+|---:|---:|---:|
+| 90 % | **293 / 99 ‰** | **497 / 208 ‰** |
+| 100 % | 4 / 4 ‰ | 4 / 4 ‰ |
+| 110 % | 4 / 0 ‰ | 4 / 4 ‰ |
+| 125 % | 3 / 3 ‰ | 3 / **32 ‰** |
+
+**Der Preis (nachrangig, direkt / Governor):** `pose` bei 90 % 272 / 363 ‰
+(Pixel 2) und 222 / 413 ‰ (Pixel 5); `depth` bei 125 % 0 / 328 ‰ und
+0 / 571 ‰.
+
+**`tune`:** Auf keinem Telefon wurde etwas behalten. Pixel 2: ungetunt 5 ‰
+geschuetzt, alle Fassungen 5 bis 12 ‰. Pixel 5: ungetunt 28 ‰, bester Versuch
+`protect_supply → true` mit 16 ‰ — die gezaehlte Schwelle verlangte 35 ‰
+Vorsprung, also keine Bestaetigung.
+
+Was daraus folgt:
+
+- **Die alte Zahl ist ersetzt.** „208 → 0 ‰" aus dem 10-s-Fenster (fuenf von
+  24 Takten) wird nirgends mehr genannt; mit 201 Takten sind es 293 → 99 ‰ auf
+  dem Pixel 2.
+- **Der direkte Weg verliert fast nur am 90-%-Punkt.** Ab 100 % liegen beide
+  Arme beim Detektor bei hoechstens 4 ‰. Das war schon im 10-s-Lauf so (208 ‰
+  bei 90 %, 37 ‰ bei 100 %, 0 ‰ bei 110 %) und ist **nicht erklaert**.
+  Verdacht: die Phasenlage der drei Perioden gegen die rund 220 ms Rechenzeit
+  des Detektors. Bevor diese Zahl als „der Governor bringt auf Telefonen X"
+  verallgemeinert wird, gehoert der Punkt zwischen 85 und 100 % feiner
+  abgetastet.
+- **Ein Punkt gegen uns:** Pixel 5 bei 125 %, Governor 32 ‰ gegen direkt 3 ‰.
+  `vig-fit` nennt im Urteilssatz nur den ersten Punkt, an dem der direkte Weg
+  verliert; dieser Punkt steht nur in der Tabelle. Offen: das Urteil sollte
+  auch einen spaeteren Punkt nennen, an dem der Governor schlechter ist.
+- **Tuning:** Mit Fenstern, die einzelne Takte zaehlen, gab es auf diesem
+  Anwendungsfall nichts zu gewinnen. Ein bestaetigter Tuning-Gewinn liegt
+  weiterhin auf keiner Last vor.

@@ -164,6 +164,13 @@ older, run the bridge with `send_capture_id: false` unless a downstream node
 actually fuses results; freshness, supersession and the shared-memory path do
 not depend on it.
 
+Live run on 15 September 2026 (`integrations/ros2/scripts/live-smoke.sh`,
+ROS 2 Jazzy container, `vig serve` in front of Triton 2.70 on an RTX 3070
+Laptop GPU, `send_capture_id` on): **296 of 296 frames delivered over shared
+memory** (round trip p50 4.5 ms) and **297 of 297 over the copy path** (p50
+9.7 ms), no refusals, no errors — past the 256 captures where the old graph
+filled up.
+
 ## What the bridge does not do
 
 - **No preprocessing beyond resize and scale.** Nearest-neighbour resize,
