@@ -43,6 +43,10 @@ in time in **99 %** of control cycles instead of 84–85 %, pose 99 % instead of
 91 % ([acceptance run](benchmark/abnahme-2026-09-12.md)). `vig autotune` on
 this load: the hand-tuned settings were already the best of the settings tried.
 
+Seen as a video — head, chest and two wrist cameras plus a vision-language model
+on one laptop GPU: the head camera stays fresh in 99.8 % of cycles instead of
+0.1 %, and the language model waits ([humanoid demo](benchmark/demo-2026-09-15.md)).
+
 ## 2. Indoor service or delivery robot on a phone-class SoC
 
 *Two GPU slots on an Adreno GPU, three vision models, walking pace near people.*
@@ -87,6 +91,9 @@ What this says, and what it does not:
   contract is at the edge of what it carries.
 - **Tuning kept nothing.** With windows long enough to count single cycles, the
   measured configuration was already the best of six on both phones.
+
+The same robot with four cameras on a laptop GPU, as a video: the front camera
+stays fresh in 100 % of cycles instead of 0.2 % ([sidewalk demo](benchmark/demo-2026-09-15.md)).
 
 ## 3. Industrial safety camera with event analysis (pilot proposal, not measured)
 

@@ -18,6 +18,14 @@ bedeutet, steht in [docs/releases.md](docs/releases.md).
   unter dem Governor 100 %; das Sprachmodell wartet. Dazu die Laeufe ohne
   Ueberlast, in denen der Governor nicht half oder schadete. Video auf der
   Projektseite.
+- **Zwei weitere Szenarien mit derselben Last:** Gehweg-Roboter (Edinburgh,
+  CC BY 3.0) Frontkamera 0,2 % → 100 %, humanoider Roboter (TUM RGB-D, CC BY
+  4.0) Kopfkamera 0,1 % → 99,8 %; das Sprachmodell wartet in beiden.
+- **Renderer:** Die BLIND-Anzeige blitzte fuer einzelne Bilder auf, wenn ein
+  Ergebnis genau `max_age` alt war — das sah wie Kameraaussetzer aus. Jetzt
+  1 ms Toleranz und BLIND erst nach einem ganzen Kamerabild; die Zaehler
+  bleiben exakt. Die Sprachmodell-Karte war an jeder Haltegrenze ein Bild lang
+  leer; behoben.
 
 ### Behoben (externer Review vom 15.09., docs/reviews/2026-09-15)
 

@@ -40,23 +40,43 @@ keeps only what holds up in a back-to-back rerun.</p>
 
 ## See it: four cameras, one GPU
 
-Four cameras run RF-DETR at 30 frames per second next to a vision-language
-model on one laptop GPU — more work than the chip can do. Left, NVIDIA Triton
-computes every frame in arrival order, and each result is a third of a second
-old when it arrives. Right, the governor keeps the front camera fresh in every
-cycle, serves the other cameras with what is left — and the language model
-waits. Recorded back to back with the same frames; boxes are drawn where the
-detector saw the objects.
+A vehicle, a sidewalk robot and a humanoid each run four cameras through
+RF-DETR at 30 frames per second next to a vision-language model — on one laptop
+GPU, more work than the chip can do. Left, NVIDIA Triton computes every frame in
+arrival order, and each result is a third of a second old when it arrives.
+Right, the governor keeps the camera that matters fresh in every cycle, serves
+the other cameras with what is left — and the language model waits. Each pair is
+recorded back to back with the same frames; boxes are drawn where the detector
+saw the objects.
+
+### Vehicle, city driving — front camera fresh in 100 % of cycles instead of 0.2 %
 
 <div class="video">
-<video controls preload="metadata" playsinline poster="assets/demo-four-cameras.jpg">
+<video controls preload="none" playsinline poster="assets/demo-four-cameras.jpg">
 <source src="assets/demo-four-cameras.mp4" type="video/mp4">
 </video>
 </div>
 
+### Sidewalk robot — front camera fresh in 100 % of cycles instead of 0.2 %
+
+<div class="video">
+<video controls preload="none" playsinline poster="assets/demo-sidewalk-robot.jpg">
+<source src="assets/demo-sidewalk-robot.mp4" type="video/mp4">
+</video>
+</div>
+
+### Humanoid robot — head camera fresh in 99.8 % of cycles instead of 0.1 %
+
+<div class="video">
+<video controls preload="none" playsinline poster="assets/demo-humanoid-robot.jpg">
+<source src="assets/demo-humanoid-robot.mp4" type="video/mp4">
+</video>
+</div>
+
 Where the GPU is not overloaded, the governor does not help — one camera plus
-the language model ran as well or better without it. Both results, with their
-configurations: [demo measurements](docs/benchmark/demo-2026-09-15.md).
+the language model ran as well or better without it. All results, the price for
+the other cameras and the language model, and the configurations:
+[demo measurements](docs/benchmark/demo-2026-09-15.md).
 
 ## The problem
 

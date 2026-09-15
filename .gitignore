@@ -22,4 +22,6 @@ backends/**/target/
 !site/assets/vigilant-inference-governor.mp4
 # und die Demo "four cameras, one GPU" (docs/benchmark/demo-2026-09-15.md).
 !site/assets/demo-four-cameras.mp4
+!site/assets/demo-sidewalk-robot.mp4
+!site/assets/demo-humanoid-robot.mp4
 tools/video/build/

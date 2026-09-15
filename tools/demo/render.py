@@ -123,11 +123,24 @@ COCO_NAMES = {1: "person", 2: "bicycle", 3: "car", 4: "motorcycle",
               5: "airplane", 6: "bus", 7: "train", 8: "truck", 9: "boat",
               10: "traffic light", 11: "fire hydrant", 13: "stop sign",
               14: "parking meter", 15: "bench", 16: "bird", 17: "cat",
-              18: "dog", 27: "backpack", 28: "umbrella", 31: "handbag"}
+              18: "dog", 27: "backpack", 28: "umbrella", 31: "handbag",
+              32: "tie", 33: "suitcase", 44: "bottle", 46: "wine glass",
+              47: "cup", 62: "chair", 63: "couch", 64: "potted plant",
+              65: "bed", 67: "table", 70: "toilet", 72: "tv", 73: "laptop",
+              74: "mouse", 75: "remote", 76: "keyboard", 77: "phone",
+              78: "microwave", 79: "oven", 81: "sink", 82: "refrigerator",
+              84: "book", 85: "clock", 86: "vase", 87: "scissors"}
 MIN_SCORE = 0.5
 TYPEWRITER_MS = 400.0
 # The caption card changes at most this often, so fast answers stay readable.
 CAPTION_HOLD_MS = 1500.0
+# Timelines store milliseconds with one decimal; a result sampled exactly at
+# max_age (e.g. 100.03 ms at a 33.3 ms frame grid) is not stale.
+STALE_TOLERANCE_MS = 1.0
+# The BLIND overlay appears only once a side has been stale for one camera
+# frame. Shorter gaps flashed single dimmed frames that looked like camera
+# dropouts; the counters still include them.
+BLIND_ONSET_MS = 34.0
 SUMMARY_MS = 2000.0
 DIM_FACTOR = 0.45
 DEFAULT_LABEL = {"direct": "NVIDIA Triton alone", "governed": "with Vigilant"}
@@ -315,7 +328,7 @@ class ArmState:
             raw.append((-math.inf, self.det_t[0]))
             for i, r in enumerate(self.det_r):
                 seg_end = self.det_t[i + 1] if i + 1 < len(self.det_t) else math.inf
-                stale_at = max(self.det_t[i], r["capture"] + self.max_age)
+                stale_at = max(self.det_t[i], r["capture"] + self.max_age + STALE_TOLERANCE_MS)
                 if stale_at < seg_end:
                     raw.append((stale_at, seg_end))
         merged = []
@@ -343,12 +356,20 @@ class ArmState:
         cur = min(b, t) - a
         return max(cur, self.blind_prefmax[j - 2] if j >= 2 else 0.0)
 
+    def blind_since(self, t: float):
+        """How long the side has been stale at t (ms), or None if it is fresh."""
+        j = bisect.bisect_right(self.blind_starts, t) - 1
+        if j < 0:
+            return None
+        a, b = self.blind[j]
+        return t - a if a <= t < b else None
+
     def _build_cycles(self, end_ms: float):
         self.cycle_prefix = [0]
         s = self.eval_start
         while s <= end_ms + 1e-6:
             r = self.detection_at(s)
-            fresh = r is not None and s - r["capture"] <= self.max_age
+            fresh = r is not None and s - r["capture"] <= self.max_age + STALE_TOLERANCE_MS
             self.cycle_prefix.append(self.cycle_prefix[-1] + (1 if fresh else 0))
             s += self.period
 
@@ -610,10 +631,13 @@ class Renderer:
         age = t - det["capture"] if det else None
         if tl.no_data:
             state = "nodata"
-        elif det is None:
-            state = "blind" if t >= self.max_age else "waiting"
+        elif det is None and t < self.max_age:
+            state = "waiting"
         else:
-            state = "blind" if age > self.max_age else "live"
+            since = arm.blind_since(t)
+            state = "blind" if since is not None and since >= BLIND_ONSET_MS else "live"
+            if det is None and state == "live":
+                state = "waiting"
 
         # video (dimmed when blind / no data / summary)
         if summary:
@@ -754,7 +778,13 @@ class Renderer:
         d.text((right, cy0 + S(26)), f"describes a frame {age_s:.1f} s old",
                font=f.card_age, fill=SUBTLE, anchor="rm")
         lines = self.wrap(r["text"] or "(empty answer)", f.caption, self.VW - S(44), 3)
-        reveal = t - max(r["done"], t_hold)
+        # Typewriter only for an answer that is new at this hold boundary, and
+        # one frame ahead so the first frame already shows text (a reveal of 0
+        # left the card empty for one frame every CAPTION_HOLD_MS).
+        if r["done"] > t_hold - CAPTION_HOLD_MS:
+            reveal = t - max(r["done"], t_hold) + 1000.0 / self.fps
+        else:
+            reveal = TYPEWRITER_MS
         if reveal < TYPEWRITER_MS:
             budget = int(sum(len(ln) for ln in lines) * max(0.0, reveal) / TYPEWRITER_MS)
         else:
