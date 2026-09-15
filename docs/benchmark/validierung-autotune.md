@@ -474,6 +474,42 @@ Was das heisst:
   zu geplanten 138 % keinen Einbruch des Backends; `vig-fit` sagt fuer 90 bis
   125 % dasselbe in einem Satz: hier lohnt sich der Governor nicht.
 
+### Pixel 2, zweiter Lauf: wie gut wiederholt sich das?
+
+Lauf `InferenceQoS-runtime/autotune-pixel2-2026-09-15b/`, 13:21–13:33, gleiches
+Geraet, gleiche Eingabe, Binaries auf dem Stand `2c1f3d0` (mit der
+gemeinsamen CPU-Messung). Wieder **vollstaendig und unverschmutzt**: 12 von 12
+Reihen, fremde Rechenzeit 0,02 Kerne vor und 0,06 nach `vig-fit`, Freigabe
+„not issued", dasselbe Urteil.
+
+| Modell | Lauf 1 (12:00) p50 us | Lauf 2 (13:21) p50 us | Abweichung | Lauf 1 Laststufe | Lauf 2 Laststufe |
+|---|---:|---:|---:|---|---|
+| depth | 193 969 | 195 410 | +0,7 % | keine | keine |
+| detector | 220 582 | 220 927 | +0,2 % | 273 106 | 242 826 |
+| pose | 92 918 | 89 967 | −3,2 % | 92 918 | 89 967 |
+
+| Interferenz (Opfer ← Nachbar) | Lauf 1 added_us | Lauf 2 added_us | von Hand |
+|---|---:|---:|---:|
+| depth ← detector | 47 865 | 59 123 (+23,5 %) | 51 155 |
+| detector ← depth | 121 562 | 122 610 (+0,9 %) | 116 347 |
+
+`no_corun` in beiden Laeufen und in der Handkonfiguration: [depth, pose]
+(`pose` neben `depth` 2,65x, von Hand 2,64x).
+
+Was das heisst:
+
+- **Die Struktur wiederholt sich exakt:** dasselbe serialisierte Paar,
+  dieselben zwei Interferenzeintraege, die Tiefe wieder als Warteschlange
+  erkannt (2,13x), dasselbe Urteil.
+- **Die Soloprofile wiederholen sich innerhalb von 3,2 %** und liegen im
+  zweiten Lauf innerhalb von 2,1 % der Handmessung.
+- **Am meisten streut der kleinere Aufschlag** (`depth ← detector`, 47 865 →
+  59 123 us). Die Handmessung liegt zwischen beiden Laeufen. Wer mit dieser
+  Zahl plant, sollte mehrere Laeufe haben — ein einzelner autotune-Lauf ist
+  eine Messung, kein Mittelwert.
+- **Die Laststufe des Detektors** liegt diesmal bei 1,09x (242 826 us) statt
+  1,23x, beide unter der Warteschlangen-Grenze; die Handkonfiguration hat keine.
+
 ### Laptop: die Verweigerung steht vorn
 
 Lauf `InferenceQoS-runtime/autotune-laptop-2026-09-15f/`, gleiche Bedingungen
