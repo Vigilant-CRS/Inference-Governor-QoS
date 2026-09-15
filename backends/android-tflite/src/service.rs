@@ -64,14 +64,20 @@ fn uses_shared_memory(parameters: &HashMap<String, InferParameter>) -> bool {
 
 /// Ordnet die Rohpuffer eines Requests der Interpreterreihenfolge zu.
 ///
-/// Zuordnung ueber den Namen, wie OIP es vorsieht; Datentyp und Bytezahl
-/// muessen stimmen. Die Puffer werden aus dem Request genommen, nicht kopiert.
+/// Zuordnung ueber den Namen, wie OIP es vorsieht; Datentyp, Form und
+/// Bytezahl muessen stimmen. Die Puffer werden aus dem Request genommen, nicht
+/// kopiert.
+///
+/// Die Form wird exakt verglichen: der Interpreter ist mit fester Form belegt
+/// (`TfLiteTensorDim` nach `AllocateTensors`), ein Resize gibt es hier nicht.
+/// Gleiche Bytezahl bei anderer Form waere ein anderes Layout, still falsch
+/// gelesen.
 ///
 /// # Errors
 ///
 /// `InvalidArgument` bei Shared Memory, typisierten `contents`, fehlenden,
-/// doppelten oder unbekannten Eingaben, falschem Datentyp oder falscher
-/// Groesse.
+/// doppelten oder unbekannten Eingaben, falschem Datentyp, falscher Form oder
+/// falscher Groesse.
 pub(crate) fn prepare_inputs(
     info: &ModelInfo,
     request: &mut ModelInferRequest,
@@ -116,6 +122,12 @@ pub(crate) fn prepare_inputs(
             return Err(Status::invalid_argument(format!(
                 "{}: Datentyp {}, erwartet {}",
                 expected.name, given.datatype, expected.datatype
+            )));
+        }
+        if given.shape != expected.shape {
+            return Err(Status::invalid_argument(format!(
+                "{}: Form {:?}, erwartet {:?}",
+                expected.name, given.shape, expected.shape
             )));
         }
         let bytes = raw
@@ -617,6 +629,20 @@ mod tests {
         let inference = s.inference_stats.unwrap();
         assert_eq!(inference.success.unwrap().count, 0);
         assert_eq!(inference.fail.unwrap().count, 0);
+    }
+
+    /// Gleiche Bytezahl heisst nicht gleiches Layout: NCHW `[1,3,2,2]` traegt
+    /// wie NHWC `[1,2,2,3]` 12 Bytes, wuerde aber still falsch gelesen.
+    #[test]
+    fn a_different_shape_with_the_same_byte_count_is_refused() {
+        for shape in [vec![1, 3, 2, 2], vec![12], vec![1, 2, 2, 3, 1]] {
+            let mut req = request(vec![0; 12]);
+            req.inputs[0].shape.clone_from(&shape);
+            let error = prepare_inputs(&detector_info(), &mut req).unwrap_err();
+            assert_eq!(error.code(), tonic::Code::InvalidArgument, "{shape:?}");
+        }
+        let mut req = request(vec![0; 12]);
+        assert_eq!(prepare_inputs(&detector_info(), &mut req).unwrap().len(), 1);
     }
 
     #[tokio::test]

@@ -38,7 +38,8 @@ struct Job {
 ///
 /// Der Abschlusszaehler ist der Nachweis, mit dem der Governor einen
 /// gehaltenen Slotkredit zurueckgibt (NV-00): er steigt erst, **nachdem** der
-/// Interpreter fertig ist.
+/// Interpreter fertig ist, und zwar im Modellthread selbst. Ob noch jemand auf
+/// die Antwort wartet, spielt dafuer keine Rolle (ADR-0042).
 #[derive(Debug, Default)]
 pub(crate) struct Stats {
     pub(crate) success: AtomicU64,
@@ -100,8 +101,13 @@ impl ModelHandle {
     where
         L: FnOnce() -> Result<(ModelInfo, Runner), String> + Send + 'static,
     {
+        // Unbeschraenkt, wie die Schlange einer Triton-Instanz: der Arm
+        // "Backend direkt" soll Ueberlast als Wartezeit zeigen, nicht als
+        // Ablehnung. Begrenzt wird davor, im Governor.
         let (tx, rx) = std::sync::mpsc::channel::<Job>();
         let (report, outcome) = std::sync::mpsc::channel::<Result<ModelInfo, String>>();
+        let stats = Arc::<Stats>::default();
+        let thread_stats = Arc::clone(&stats);
         std::thread::Builder::new()
             .name(format!("tflite-{name}"))
             .spawn(move || {
@@ -119,25 +125,29 @@ impl ModelHandle {
                     let start = Instant::now();
                     let outputs = runner(&job.inputs);
                     let end = Instant::now();
-                    let _ = job.reply.send(outputs.map(|outputs| Done {
+                    let result = outputs.map(|outputs| Done {
                         outputs,
                         queue: start.saturating_duration_since(job.enqueued),
                         compute: end.saturating_duration_since(start),
-                    }));
+                    });
+                    // Erst zaehlen, dann zustellen: ist der Aufrufer schon
+                    // abgebrochen, hat die GPU trotzdem gerechnet, und genau
+                    // dieses Ende braucht der Governor als Nachweis.
+                    thread_stats.record(&result, end.saturating_duration_since(job.enqueued));
+                    let _ = job.reply.send(result);
                 }
             })
             .map_err(|e| format!("{name}: Thread startet nicht: {e}"))?;
         let info = outcome
             .recv()
             .map_err(|_| format!("{name}: Modellthread endete beim Laden"))??;
-        Ok(Self {
-            info,
-            stats: Arc::default(),
-            tx,
-        })
+        Ok(Self { info, stats, tx })
     }
 
     /// Reiht eine Inferenz ein und wartet auf ihr Ende.
+    ///
+    /// Gezaehlt wird im Modellthread; wird dieses Future abgebrochen, zaehlt
+    /// der Auftrag trotzdem, sobald er gerechnet ist.
     ///
     /// # Errors
     ///
@@ -145,16 +155,19 @@ impl ModelHandle {
     pub(crate) async fn infer(&self, inputs: Vec<Vec<u8>>) -> Result<Done, String> {
         let started = Instant::now();
         let (reply, rx) = oneshot::channel();
-        let result = match self.tx.send(Job {
+        let job = Job {
             inputs,
             enqueued: started,
             reply,
-        }) {
-            Ok(()) => rx
-                .await
-                .unwrap_or_else(|_| Err("Modellthread beendet".to_owned())),
-            Err(_) => Err("Modellthread beendet".to_owned()),
         };
+        if self.tx.send(job).is_ok()
+            && let Ok(result) = rx.await
+        {
+            return result;
+        }
+        // Kein Modellthread mehr, der zaehlen koennte: der Auftrag ist nie
+        // gerechnet worden und zaehlt hier als Fehler, wie bisher.
+        let result = Err("Modellthread beendet".to_owned());
         self.stats.record(&result, started.elapsed());
         result
     }
@@ -241,5 +254,41 @@ mod tests {
         let (a, b) = (a.await.unwrap(), b.await.unwrap());
         let waited = a.queue.max(b.queue);
         assert!(waited >= Duration::from_millis(20), "gewartet: {waited:?}");
+    }
+
+    /// Bricht der wartende Aufruf ab, rechnet der Modellthread trotzdem zu
+    /// Ende. Dieses Ende muss im Abschlusszaehler stehen, sonst fehlt dem
+    /// Governor der Nachweis und der Slotkredit bleibt gehalten (ADR-0042).
+    #[tokio::test]
+    async fn a_cancelled_call_still_counts_the_job_that_finished() {
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let handle = Arc::new(
+            ModelHandle::spawn("m", move || {
+                let mut started = Some(started_tx);
+                let runner: Runner = Box::new(move |_: &[Vec<u8>]| {
+                    // Nur der erste Auftrag haelt an, bis der Test ihn freigibt.
+                    if let Some(tx) = started.take() {
+                        let _ = tx.send(());
+                        let _ = release_rx.recv();
+                    }
+                    Ok(Vec::new())
+                });
+                Ok((ModelInfo::default(), runner))
+            })
+            .unwrap(),
+        );
+        let first = tokio::spawn({
+            let h = Arc::clone(&handle);
+            async move { h.infer(Vec::new()).await }
+        });
+        started_rx.await.unwrap();
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        release_tx.send(()).unwrap();
+        handle.infer(Vec::new()).await.unwrap();
+        // Zwei Auftraege sind durch den Interpreter gelaufen, also zwei Enden.
+        assert_eq!(handle.stats.success.load(Ordering::Acquire), 2);
+        assert_eq!(handle.stats.fail.load(Ordering::Acquire), 0);
     }
 }
