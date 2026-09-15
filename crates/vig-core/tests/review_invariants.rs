@@ -73,6 +73,7 @@ fn contract(class: Criticality, policy: QueuePolicy, runtimes_ms: &[u64]) -> Mod
         variants,
         cooperative: None,
         extension: None,
+        min_runtime: None,
     }
 }
 

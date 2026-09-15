@@ -418,6 +418,37 @@ fn render_per_model_series(out: &mut String, metrics: &Metrics) {
         &metrics.weakly_hard_misses_left,
         metrics.models,
     );
+    // ADR-0046: gewaehrt gegen gebraucht. Bleibt `used` bei wartender Arbeit
+    // unter `granted`, hat das Budget keine Luecke gefunden.
+    render_per_model(
+        out,
+        "vig_runtime_budget_granted_us",
+        "Vereinbartes Mindestlaufzeitbudget je Fenster und Modell; 0 ohne Budget.",
+        &metrics.runtime_budget_granted_us,
+        metrics.models,
+    );
+    render_per_model(
+        out,
+        "vig_runtime_budget_window_us",
+        "Laenge des gleitenden Budgetfensters je Modell.",
+        &metrics.runtime_budget_window_us,
+        metrics.models,
+    );
+    render_per_model(
+        out,
+        "vig_runtime_budget_used_us",
+        "Im laufenden Fenster gebuchte Ausfuehrungszeit je Modell mit Budget.",
+        &metrics.runtime_budget_used_us,
+        metrics.models,
+    );
+    render_per_model_as(
+        out,
+        "vig_runtime_budget_dispatches_total",
+        "Dispatches mit verbleibendem Budget, ueber normal eingeordnet, je Modell.",
+        "counter",
+        &metrics.runtime_budget_dispatches,
+        metrics.models,
+    );
     render_per_model(
         out,
         "vig_weakly_hard_violated",

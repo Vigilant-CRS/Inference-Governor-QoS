@@ -54,6 +54,7 @@ Spec-Stelle explizit.
 | [0043](0043-an-impossible-contract-is-reported-not-alternately-broken.md) | Ein unerfuellbarer Vertrag wird gemeldet, nicht abwechselnd gebrochen | Review 14.09. R07, Spec 19.6, ADR-0014, ADR-0035, ADR-0041 | Akzeptiert |
 | [0044](0044-qualification-happens-at-the-users-site.md) | Die Qualifikation findet beim Anwender statt (`vig autotune`) | ADR-0004, ADR-0019, ADR-0026, ADR-0035, ADR-0039 | Akzeptiert |
 | [0045](0045-autotune-tunes-within-the-contracts.md) | `autotune` stellt ein — innerhalb der Vertraege | ADR-0002, ADR-0004, ADR-0034, ADR-0038, ADR-0041, ADR-0044 | Akzeptiert |
+| [0046](0046-a-minimum-runtime-is-paid-by-lower-classes.md) | Eine Mindestlaufzeit wird von den nachrangigen Klassen bezahlt | Spec 10.6, ADR-0012, ADR-0014, ADR-0027, ADR-0043 | Akzeptiert, opt-in |
 
 ## Format
 

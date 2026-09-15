@@ -1085,6 +1085,25 @@ pub struct ContractConfig {
     /// Konfigurationsdateien bleiben unveraendert nutzbar.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extension: Option<ContractExtensionConfig>,
+    /// Mindestlaufzeit fuer nachrangige Arbeit (ADR-0046).
+    ///
+    /// „Mindestens `budget_ms` Ausfuehrungszeit je `window_ms`": solange das
+    /// Budget im gleitenden Fenster nicht aufgebraucht ist, steht wartende
+    /// Arbeit dieses Modells ueber `normal` und unter `high`. Nur fuer
+    /// `normal` und `best_effort`; bezahlt wird es von den nachrangigen
+    /// Klassen, nie von bewachter Arbeit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_runtime: Option<MinRuntimeConfig>,
+}
+
+/// Das Mindestlaufzeitbudget in der Konfiguration (ADR-0046).
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MinRuntimeConfig {
+    /// So viel Ausfuehrungszeit steht dem Modell je Fenster mindestens zu.
+    pub budget_ms: u64,
+    /// Die Laenge des gleitenden Fensters, hoechstens 60000.
+    pub window_ms: u64,
 }
 
 /// Der Vertragszusatz in der Konfiguration (NV-02).
@@ -1665,6 +1684,26 @@ impl Resolved {
     /// uebersteigen — dann bleibt fuer Best-Effort-Arbeit strukturell nichts
     /// uebrig, und der Look-ahead wird jeden Start verhindern.
     ///
+    /// Der Anteil der Slots, den die Mindestlaufzeitbudgets belegen, in
+    /// Promille (ADR-0046).
+    ///
+    /// `Summe(budget_i / window_i)` ueber alle Modelle mit Budget, geteilt
+    /// durch die regulaeren Slots — in derselben Einheit wie
+    /// [`Self::protected_utilization_permille`]. Beides zusammen ueber 1000
+    /// heisst: die Budgets koennen nur aus Zeit bedient werden, die der
+    /// bewachten Arbeit gehoert, und das tun sie nicht.
+    #[must_use]
+    pub fn runtime_budget_permille(&self) -> u64 {
+        let total = self
+            .contracts
+            .iter()
+            .filter_map(|c| c.min_runtime)
+            .map(|b| b.slot_share_permille())
+            .fold(0_u64, u64::saturating_add);
+        let slots = u64::try_from(self.slots.regular_len()).unwrap_or(1).max(1);
+        total.checked_div(slots).unwrap_or(0)
+    }
+
     /// Diese Rechnung gehoert hierher und nicht nur ins CLI: wer eine
     /// Konfiguration programmatisch aufloest, braucht dieselbe Warnung.
     #[must_use]
@@ -1817,6 +1856,34 @@ fn quality_from_f64(value: f64) -> Result<Quality, ConfigError> {
     Quality::from_milli(milli).ok_or(ConfigError::OutOfRange {
         expected: "quality.value zwischen 0.0 und 1.0",
     })
+}
+
+/// Ob die Slots jedes Mindestlaufzeitbudget in einem Fenster rechnen koennen
+/// (ADR-0046).
+///
+/// Dieselbe Pruefung macht der Scheduler beim Bau; hier steht sie, damit der
+/// Befund eine Fundstelle hat. Mit Domaenen prueft die Aufloesung jeder
+/// Domaene gegen deren Slots.
+fn check_runtime_budgets(
+    model_names: &[String],
+    contracts: &ArrayVec<ModelContract, MAX_MODELS>,
+    slots: &SlotSet,
+    findings: &mut Vec<Located>,
+) {
+    let regular = slots.regular_len();
+    for (name, contract) in model_names.iter().zip(contracts.iter()) {
+        if let Some(budget) = contract.min_runtime
+            && !budget.fits_slots(regular)
+        {
+            findings.push(
+                ConfigError::Contract(
+                    vig_core::runtime_budget::RuntimeBudgetError::BeyondSlots { slots: regular }
+                        .into(),
+                )
+                .at(format!("models.{name}.contract.min_runtime")),
+            );
+        }
+    }
 }
 
 fn duration_ms(value: u64, what: &'static str) -> Result<Duration, ConfigError> {
@@ -2121,6 +2188,7 @@ impl Config {
                 findings,
             );
             interference = resolve_interference(&self.backend.interference, &model_names, findings);
+            check_runtime_budgets(&model_names, &contracts, &slots, findings);
         }
 
         // Die Grenzen vor den Domaenen: deren Aufloesung meldet dieselben
@@ -2891,6 +2959,30 @@ impl ModelConfig {
         if failed { Err(()) } else { Ok(Some(extension)) }
     }
 
+    /// Das Mindestlaufzeitbudget aus `contract.min_runtime` (ADR-0046).
+    ///
+    /// Null, zu lang und die falsche Klasse prueft der Vertrag; die Slotzahl
+    /// kennt erst die Aufloesung.
+    fn build_min_runtime(
+        &self,
+        path: &str,
+        findings: &mut Vec<Located>,
+    ) -> Option<vig_core::runtime_budget::RuntimeBudget> {
+        let raw = self.contract.min_runtime?;
+        match (
+            duration_ms(raw.budget_ms, "min_runtime.budget_ms"),
+            duration_ms(raw.window_ms, "min_runtime.window_ms"),
+        ) {
+            (Ok(budget), Ok(window)) => {
+                Some(vig_core::runtime_budget::RuntimeBudget { budget, window })
+            }
+            (Err(e), _) | (_, Err(e)) => {
+                findings.push(e.at(format!("{path}.contract.min_runtime")));
+                None
+            }
+        }
+    }
+
     fn to_contract(
         &self,
         path: &str,
@@ -2981,6 +3073,8 @@ impl ModelConfig {
             return None;
         };
 
+        let min_runtime = self.build_min_runtime(path, findings);
+
         let contract = ModelContract {
             // Bis das Backend etwas anderes sagt.
             variants_interchangeable: true,
@@ -2999,6 +3093,7 @@ impl ModelConfig {
             variants,
             cooperative,
             extension,
+            min_runtime,
         };
 
         if let Err(e) = contract.validate() {

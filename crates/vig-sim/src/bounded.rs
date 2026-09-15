@@ -408,6 +408,7 @@ fn contract(
         variants,
         cooperative: None,
         extension: None,
+        min_runtime: None,
     }
 }
 

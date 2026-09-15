@@ -63,6 +63,7 @@ fn contract(period_us: u64, deadline_us: u64, max_age_us: u64) -> ModelContract 
         variants,
         cooperative: None,
         extension: None,
+        min_runtime: None,
     }
 }
 

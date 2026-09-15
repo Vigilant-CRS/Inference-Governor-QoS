@@ -126,6 +126,8 @@ models:
     class: best_effort    # may use spare capacity, must not endanger detector
     queue: { policy: fifo, capacity: 4, overflow: backpressure_client }
     contract: { deadline_ms: 800, max_age_ms: 1500 }
+    # Needs progress next to lower-priority streams? Add to the contract
+    # min_runtime: { budget_ms: 300, window_ms: 1000 } (ADR-0046).
     variants:
       - id: main
         backend_model: vlm_main
@@ -469,6 +471,7 @@ The numbers worth watching:
 | `vig_protected_overlapped_total` | protected jobs started while a preemptible job was running |
 | `vig_protected_overlap_extra_us_total` | what those overlaps actually cost against the solo profile; divided by the count above, compare it with the calibrated residual |
 | `vig_protected_deadline_misses_total` | the number that should stay at zero |
+| `vig_runtime_budget_granted_us` / `vig_runtime_budget_used_us` | per model with `contract.min_runtime`: the budget per window against the execution time booked in the current sliding window. If `used` stays below `granted` while work is waiting, the budget found no gap next to the protected work — it never takes time from guarded classes ([ADR-0046](adr/0046-a-minimum-runtime-is-paid-by-lower-classes.md)); `vig_runtime_budget_dispatches_total` counts the dispatches it ranked above `normal` |
 | `vig_quarantined_slots` | slot credits held because the execution end is not yet proven |
 | `vig_execution_reconciled_total` | ends the governor proved via the backend's own statistics rather than a timer |
 | `vig_generative_prefill_us_total` | work spent re-computing the prompt of a split job — this produces **no tokens** |

@@ -37,7 +37,8 @@ use crate::predictor::{Mode, Predictor, ShadowLedger, StateClass};
 use crate::profile::SafetyMargin;
 use crate::queue::{DropReason, MAX_QUEUE_CAPACITY, ModelQueue, QueueConfigError};
 use crate::request::{Criticality, RequestDescriptor, RequestState};
-use crate::slots::SlotSet;
+use crate::runtime_budget::{RuntimeBudgetError, RuntimeLedger};
+use crate::slots::{ModelMask, SlotSet};
 use crate::time::{Duration, Instant};
 use crate::variant::{PlanningContext, Resolution, VariantState, resolve};
 
@@ -348,6 +349,11 @@ pub struct Scheduler {
     /// er erzwingt nichts. Die Kritikalitaetsklasse `Protected` ist noch kein
     /// Weakly-hard-Vertrag.
     miss_windows: [Option<MissWindow>; MAX_MODELS],
+    /// Die Buchfuehrung je Mindestlaufzeitbudget (ADR-0046).
+    ///
+    /// `None`, wo kein Budget vereinbart ist — dann aendert sich an der
+    /// Kandidatenwahl nichts.
+    runtime_ledgers: [Option<RuntimeLedger>; MAX_MODELS],
     inflight: ArrayVec<Dispatched, MAX_INFLIGHT>,
     metrics: Metrics,
 }
@@ -406,6 +412,33 @@ impl Scheduler {
             }
         }
 
+        // ADR-0046: je Mindestlaufzeitbudget eine Buchfuehrung. Ob die Slots
+        // das Budget ueberhaupt rechnen koennen, steht erst hier fest — der
+        // Vertrag allein kennt sie nicht.
+        let mut runtime_ledgers: [Option<RuntimeLedger>; MAX_MODELS] = [None; MAX_MODELS];
+        for (i, contract) in contracts.iter().enumerate() {
+            let Some(budget) = contract.min_runtime else {
+                continue;
+            };
+            let regular = slots.regular_len();
+            if !budget.fits_slots(regular) {
+                return Err(SchedulerError::Contract {
+                    model: i,
+                    error: RuntimeBudgetError::BeyondSlots { slots: regular }.into(),
+                });
+            }
+            if let Some(cell) = runtime_ledgers.get_mut(i) {
+                *cell = Some(RuntimeLedger::new(budget));
+            }
+            let micros = |d: Duration| u32::try_from(d.as_micros()).unwrap_or(u32::MAX);
+            if let Some(cell) = metrics.runtime_budget_granted_us.get_mut(i) {
+                *cell = micros(budget.budget);
+            }
+            if let Some(cell) = metrics.runtime_budget_window_us.get_mut(i) {
+                *cell = micros(budget.window);
+            }
+        }
+
         // Die Prognosetabelle bekommt die Form der Konfiguration, nicht die
         // des Maximums: vier Modelle mit je einer Variante brauchen 24 Zellen
         // und nicht zwoelftausend.
@@ -441,6 +474,7 @@ impl Scheduler {
             usable_until: [None; MAX_MODELS],
             consecutive_misses: [0; MAX_MODELS],
             miss_windows,
+            runtime_ledgers,
             predictor: Predictor::with_shape(models, variants, slot_count),
             hardware_state: StateClass::default(),
             profile_revision: 0,
@@ -694,6 +728,7 @@ impl Scheduler {
             compute,
         );
         self.observe_for_predictor(&entry, compute);
+        self.settle_runtime(&entry, compute, now);
         // ADR-0035: was die Ueberlappung tatsaechlich gekostet hat, gegen das
         // Alleinprofil. Die Beobachtung selbst liegt schon im Schaetzer —
         // unter dem Belegungsgrad mit belegter Spur, getrennt vom Alleinlauf.
@@ -802,6 +837,9 @@ impl Scheduler {
                 .metrics
                 .total_compute_nanos
                 .saturating_add(compute.as_nanos());
+            // Auch ein gescheiterter Aufruf hat die Karte belegt; gebucht
+            // wird, was er tatsaechlich gedauert hat.
+            self.settle_runtime(&entry, compute, now);
             self.observe_pressure(now, entry.descriptor.criticality, true);
         }
         sink.emit(Action::Terminate {
@@ -1308,6 +1346,7 @@ impl Scheduler {
                 break;
             }
         }
+        self.publish_runtime_budgets(now);
         if let Some(wake) = self.next_wakeup(now) {
             sink.emit(Action::WakeAt(wake));
         }
@@ -1419,9 +1458,13 @@ impl Scheduler {
         // Belegungszustand von jetzt, nicht gegen den nach dem naechsten
         // Dispatch.
         let mut deferred = crate::slots::ModelMask::NONE;
+        // ADR-0046: welche Modelle im Fenster noch Budget haben. Einmal je
+        // Dispatch: erst ein Dispatch bucht, und nach ihm kehrt diese
+        // Funktion zurueck.
+        let boosted = self.budget_boost(now);
 
         loop {
-            let Some((model, id)) = self.best_candidate(blocked.union(deferred)) else {
+            let Some((model, id)) = self.best_candidate(blocked.union(deferred), boosted) else {
                 return false;
             };
             // Kein Kredit heisst: **dieses** Modell kann jetzt nicht starten.
@@ -1532,6 +1575,7 @@ impl Scheduler {
                 overlapped,
             });
             self.metrics.forwarded = self.metrics.forwarded.saturating_add(1);
+            self.charge_runtime(model, now, predicted_runtime, boosted.contains(model));
             self.count_preemption(residual.is_some(), overlapped);
             self.metrics.count_variant(variant);
             if !feasible {
@@ -1931,14 +1975,104 @@ impl Scheduler {
             .unwrap_or(start)
     }
 
+    /// Die Modelle, deren Mindestlaufzeitbudget im Fenster noch nicht
+    /// aufgebraucht ist (ADR-0046).
+    ///
+    /// Ohne Budget leer. Ein Weckruf fuer den Zeitpunkt, an dem ein Budget
+    /// wieder frei wird, braucht es nicht: wartet Arbeit neben einem freien
+    /// Slot, laeuft sie auch ohne Vorrang, und ein Veto des Look-ahead weckt
+    /// selbst.
+    fn budget_boost(&self, now: Instant) -> ModelMask {
+        let mut mask = ModelMask::NONE;
+        for (i, ledger) in self
+            .runtime_ledgers
+            .iter()
+            .enumerate()
+            .take(self.contracts.len())
+        {
+            if let Some(ledger) = ledger
+                && ledger.remaining(now)
+                && let Ok(raw) = u16::try_from(i)
+            {
+                mask = mask.with(ModelIdx(raw));
+            }
+        }
+        mask
+    }
+
+    /// Bucht die geplante Laufzeit eines Dispatches auf das Budget seines
+    /// Modells (ADR-0046).
+    ///
+    /// Jeder Dispatch zaehlt, auch einer ohne Vorrang: vereinbart ist
+    /// Ausfuehrungszeit je Fenster, nicht Ausfuehrungszeit mit Vorrang.
+    fn charge_runtime(&mut self, model: ModelIdx, now: Instant, planned: Duration, boosted: bool) {
+        let Some(ledger) = self
+            .runtime_ledgers
+            .get_mut(model.get())
+            .and_then(Option::as_mut)
+        else {
+            return;
+        };
+        ledger.charge(now, planned);
+        if boosted && let Some(cell) = self.metrics.runtime_budget_dispatches.get_mut(model.get()) {
+            *cell = cell.saturating_add(1);
+        }
+    }
+
+    /// Ersetzt die geplante durch die gemessene Laufzeit (ADR-0046).
+    fn settle_runtime(&mut self, entry: &Dispatched, measured: Duration, now: Instant) {
+        if let Some(ledger) = self
+            .runtime_ledgers
+            .get_mut(entry.descriptor.logical_model.get())
+            .and_then(Option::as_mut)
+        {
+            ledger.settle(entry.at, entry.predicted, measured, now);
+        }
+    }
+
+    /// Schreibt die gebuchte Zeit je Budget in den Metrikabzug.
+    fn publish_runtime_budgets(&mut self, now: Instant) {
+        for (ledger, cell) in self
+            .runtime_ledgers
+            .iter()
+            .zip(self.metrics.runtime_budget_used_us.iter_mut())
+        {
+            if let Some(ledger) = ledger {
+                *cell = u32::try_from(ledger.used(now).as_micros()).unwrap_or(u32::MAX);
+            }
+        }
+    }
+
+    /// Die im laufenden Fenster gebuchte Ausfuehrungszeit eines Modells
+    /// (ADR-0046); `None` ohne Budget.
+    #[must_use]
+    pub fn runtime_budget_used(&self, model: ModelIdx, now: Instant) -> Option<Duration> {
+        self.runtime_ledgers
+            .get(model.get())
+            .and_then(Option::as_ref)
+            .map(|ledger| ledger.used(now))
+    }
+
     /// Der beste wartende Kandidat nach lexikographischer Ordnung (Spec 10.6).
-    fn best_candidate(&self, vetoed: crate::slots::ModelMask) -> Option<(ModelIdx, RequestId)> {
-        // Der Schluessel ist (Kritikalitaet, Pflichtzyklus, Deadline,
-        // Generationszeit). Der Pflichtzyklus steht **nach** der
-        // Kritikalitaet: er ordnet innerhalb einer Klasse um, nie ueber
-        // Klassengrenzen (NV-24). Ist die Policy aus, ist er fuer alle
-        // Modelle gleich und faellt damit heraus.
-        let mut best: Option<(Criticality, bool, Instant, Instant, ModelIdx, RequestId)> = None;
+    ///
+    /// `boosted` sind die Modelle mit verbleibendem Mindestlaufzeitbudget
+    /// (ADR-0046). Sie stehen zwischen `normal` und `high`; leer ist die
+    /// Ordnung die bisherige.
+    fn best_candidate(
+        &self,
+        vetoed: crate::slots::ModelMask,
+        boosted: ModelMask,
+    ) -> Option<(ModelIdx, RequestId)> {
+        // Der Schluessel ist (Rang, Pflichtzyklus, Deadline, Generationszeit).
+        // Der Rang ist die Kritikalitaet, zwischen `normal` und `high` um die
+        // Stufe fuer ein verbleibendes Budget erweitert (ADR-0046). Ohne
+        // Budget bildet er die Kritikalitaet streng monoton ab — die Ordnung
+        // ist dann bitgleich die alte.
+        //
+        // Der Pflichtzyklus steht **nach** dem Rang: er ordnet innerhalb einer
+        // Klasse um, nie ueber Klassengrenzen (NV-24). Ist die Policy aus, ist
+        // er fuer alle Modelle gleich und faellt damit heraus.
+        let mut best: Option<(u8, bool, Instant, Instant, ModelIdx, RequestId)> = None;
 
         for (i, queue) in self.queues.iter().enumerate() {
             let model = ModelIdx(u16::try_from(i).unwrap_or(u16::MAX));
@@ -1959,7 +2093,7 @@ impl Scheduler {
                     .unwrap_or(Instant::from_nanos(u64::MAX));
                 let mandatory = self.miss_aware_policy && self.next_cycle_is_mandatory(model);
                 let key = (
-                    descriptor.criticality,
+                    rank(descriptor.criticality, boosted.contains(model)),
                     mandatory,
                     deadline,
                     descriptor.generation_time,
@@ -2217,6 +2351,22 @@ fn forecast_deadline(
     let slack =
         Duration::from_nanos_unbounded(deadline.as_nanos().saturating_sub(transport.as_nanos()));
     arrival.checked_add(slack.max(runtime))
+}
+
+/// Der Rang eines Kandidaten in der Kandidatenwahl (Spec 10.6, ADR-0046).
+///
+/// Die Kritikalitaet, mit einer Stufe zwischen `normal` und `high` fuer ein
+/// Modell mit verbleibendem Mindestlaufzeitbudget. Eine bewachte Klasse
+/// bekommt diese Stufe nie — sie steht ohnehin darueber, und der Vertrag
+/// lehnt ein Budget dort ab.
+const fn rank(criticality: Criticality, boosted: bool) -> u8 {
+    match criticality {
+        Criticality::BestEffort | Criticality::Normal if boosted => 2,
+        Criticality::BestEffort => 0,
+        Criticality::Normal => 1,
+        Criticality::High => 3,
+        Criticality::Protected => 4,
+    }
 }
 
 /// Rechnet die gemessene Interferenz auf eine Prognose.

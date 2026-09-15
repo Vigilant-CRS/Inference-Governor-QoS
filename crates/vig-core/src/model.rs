@@ -6,6 +6,7 @@ use crate::ids::{MAX_VARIANTS, VariantIdx};
 use crate::profile::VariantProfile;
 use crate::queue::{QueueConfig, QueueConfigError};
 use crate::request::Criticality;
+use crate::runtime_budget::{RuntimeBudget, RuntimeBudgetError};
 use crate::semantics::SemanticConflict;
 use crate::time::Duration;
 
@@ -156,11 +157,19 @@ pub enum ContractError {
     Queue(QueueConfigError),
     /// Der Vertragszusatz ist unzulaessig (NV-02).
     Extension(crate::contract_ext::ExtensionError),
+    /// Das Mindestlaufzeitbudget ist unzulaessig (ADR-0046).
+    RuntimeBudget(RuntimeBudgetError),
 }
 
 impl From<crate::contract_ext::ExtensionError> for ContractError {
     fn from(e: crate::contract_ext::ExtensionError) -> Self {
         Self::Extension(e)
+    }
+}
+
+impl From<RuntimeBudgetError> for ContractError {
+    fn from(e: RuntimeBudgetError) -> Self {
+        Self::RuntimeBudget(e)
     }
 }
 
@@ -198,6 +207,7 @@ impl core::fmt::Display for ContractError {
             Self::ZeroDeadline => write!(f, "die relative Deadline muss groesser als null sein"),
             Self::Queue(e) => write!(f, "Queue-Konfiguration: {e}"),
             Self::Extension(e) => write!(f, "Vertragszusatz: {e}"),
+            Self::RuntimeBudget(e) => write!(f, "{e}"),
         }
     }
 }
@@ -416,6 +426,12 @@ pub struct ModelContract {
     /// der Zusatz, verhaelt sich der Vertrag wie vor NV-02 — es gibt kein
     /// zweites, paralleles Auftragsmodell.
     pub extension: Option<ContractExtension>,
+    /// Das Mindestlaufzeitbudget, falls eines vereinbart ist (ADR-0046).
+    ///
+    /// Solange es im Fenster nicht aufgebraucht ist, steht wartende Arbeit
+    /// dieses Modells ueber `normal` und unter `high`. `None` ist die
+    /// bisherige Ordnung, bitgleich.
+    pub min_runtime: Option<RuntimeBudget>,
 }
 
 impl ModelContract {
@@ -471,6 +487,10 @@ impl ModelContract {
             {
                 return Err(ContractError::MinQualityUnreachable);
             }
+        }
+
+        if let Some(budget) = self.min_runtime {
+            budget.validate(self.criticality)?;
         }
 
         if let Some(cooperative) = self.cooperative {

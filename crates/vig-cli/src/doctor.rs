@@ -623,10 +623,18 @@ fn check_capacity(resolved: &Resolved) -> Verdict {
 /// Keine vollstaendige Schedulability-Garantie — bei realer GPU-Konkurrenz und
 /// nicht-praeemptiven Abschnitten waere das falsch. Aber sehr nuetzlich, um
 /// offensichtlich unmoegliche Vertraege vor dem Start zu erkennen.
+///
+/// Mindestlaufzeitbudgets (ADR-0046) zaehlen dazu: sie werden aus der Zeit
+/// bedient, die die bewachte Arbeit uebrig laesst. Passen beide zusammen nicht
+/// in die Slots, ist das Budget eine Zusage, die niemand haelt — die bewachte
+/// Arbeit gibt dafuer nichts ab.
 fn check_utilization(resolved: &Resolved) -> Verdict {
     let utilization = resolved.protected_utilization_permille();
     let percent = utilization.checked_div(10).unwrap_or(0);
     let slots = resolved.slots.regular_len();
+    let budgets = resolved.runtime_budget_permille();
+    let budget_percent = budgets.checked_div(10).unwrap_or(0);
+    let reserved = utilization.saturating_add(budgets);
 
     if utilization > 1_000 {
         fail(&format!(
@@ -635,6 +643,27 @@ fn check_utilization(resolved: &Resolved) -> Verdict {
              strukturell nie zum Zug."
         ));
         Verdict::NotReady
+    } else if budgets > 0 && reserved > 1_000 {
+        fail(&format!(
+            "RUNTIME_BUDGET_UNSCHEDULABLE: geschuetzte Auslastung {percent} % plus \
+             Mindestlaufzeitbudgets {budget_percent} % ueber {slots} Slot(s) nicht \
+             tragbar. Die Budgets werden nur aus dem Rest der bewachten Arbeit \
+             bedient und bleiben so unerfuellt (ADR-0046)."
+        ));
+        Verdict::NotReady
+    } else if budgets > 0 && reserved > 800 {
+        warn(&format!(
+            "geschuetzte serialisierte Auslastung {percent} % plus \
+             Mindestlaufzeitbudgets {budget_percent} %; fuer die uebrige \
+             nachrangige Arbeit bleibt kaum Reserve"
+        ));
+        Verdict::ReadyWithWarnings
+    } else if budgets > 0 {
+        ok(&format!(
+            "geschuetzte serialisierte Auslastung {percent} % plus \
+             Mindestlaufzeitbudgets {budget_percent} %"
+        ));
+        Verdict::Ready
     } else if utilization > 800 {
         warn(&format!(
             "geschuetzte serialisierte Auslastung {percent} %; fuer Best-Effort \
@@ -1094,6 +1123,55 @@ mod tests {
         Verdict, check_capacity, check_decomposition_cost, check_preemption, check_security,
         check_supply_guard_vs_background,
     };
+
+    /// ADR-0046: Mindestlaufzeitbudgets zaehlen zur geschuetzten Auslastung.
+    ///
+    /// Zwei Slots, geschuetzt 30 ms konservativ je 50 ms (600 ‰ eines Slots,
+    /// 300 ‰ ueber beide). 600 ms je Sekunde passen noch (300 + 300 = 600 ‰),
+    /// 1500 ms nicht (300 + 750 = 1050 ‰).
+    #[test]
+    fn runtime_budgets_count_against_the_slots() {
+        let yaml = |budget_ms: u64| {
+            format!(
+                r#"
+version: 1
+backend:
+  type: triton
+  grpc_endpoint: "127.0.0.1:9201"
+  slots: 2
+models:
+  front:
+    class: protected
+    queue: {{ policy: latest, capacity: 1 }}
+    contract: {{ period_ms: 50, deadline_ms: 50, max_age_ms: 100 }}
+    variants:
+      - id: main
+        backend_model: front_main
+        quality: {{ value: 1.0, source: measured }}
+        profile: {{ p50_us: 27272, p95_us: 27272, p99_us: 27272, samples: 100 }}
+  vlm:
+    class: best_effort
+    queue: {{ policy: fifo, capacity: 2 }}
+    contract:
+      deadline_ms: 5000
+      max_age_ms: 8000
+      min_runtime: {{ budget_ms: {budget_ms}, window_ms: 1000 }}
+    variants:
+      - id: main
+        backend_model: vlm_main
+        quality: {{ value: 1.0, source: measured }}
+        profile: {{ p50_us: 120000, p95_us: 150000, p99_us: 170000, samples: 100 }}
+"#
+            )
+        };
+        let resolve = |y: String| Config::from_yaml(&y).unwrap().resolve().unwrap();
+        let fits = resolve(yaml(600));
+        assert_eq!(fits.runtime_budget_permille(), 300);
+        assert_eq!(check_capacity(&fits), Verdict::Ready);
+        let too_much = resolve(yaml(1_500));
+        assert_eq!(too_much.runtime_budget_permille(), 750);
+        assert_eq!(check_capacity(&too_much), Verdict::NotReady);
+    }
 
     /// ADR-0043: Zwei Zusagen, die sich ausschliessen, sollen beim Start
     /// auffallen und nicht im Betrieb abwechselnd gebrochen werden.

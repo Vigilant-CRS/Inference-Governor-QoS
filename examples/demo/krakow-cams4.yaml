@@ -59,6 +59,10 @@ models:
     backend_endpoint: "127.0.0.1:9601"
     queue: { policy: fifo, capacity: 2, overflow: backpressure_client }
     contract: { deadline_ms: 5000, max_age_ms: 8000 }
+    # Vorschlag, nicht gemessen (ADR-0046): mit dieser Zeile statt der
+    # darueber bekommt das Sprachmodell mindestens 300 ms Rechenzeit je
+    # Sekunde, bezahlt von links, rechts und hinten — nie von der Front.
+    # contract: { deadline_ms: 5000, max_age_ms: 8000, min_runtime: { budget_ms: 300, window_ms: 1000 } }
     variants:
       - id: main
         backend_model: smolvlm

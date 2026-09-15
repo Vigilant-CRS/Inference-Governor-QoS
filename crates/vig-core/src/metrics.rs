@@ -84,6 +84,22 @@ pub struct Metrics {
     /// die Groesse, an der eine Policy entscheidet und ein Betreiber sieht,
     /// wie eng es zugeht.
     pub weakly_hard_misses_left: [u32; MAX_MODELS],
+    /// Das vereinbarte Mindestlaufzeitbudget je Modell, in Mikrosekunden je
+    /// Fenster (ADR-0046). Null, wo keines vereinbart ist.
+    pub runtime_budget_granted_us: [u32; MAX_MODELS],
+    /// Die Fensterlaenge dieses Budgets, in Mikrosekunden.
+    pub runtime_budget_window_us: [u32; MAX_MODELS],
+    /// Die im laufenden Fenster gebuchte Ausfuehrungszeit, in Mikrosekunden.
+    ///
+    /// Geplant beim Dispatch, gemessen ab der Fertigstellung. Bleibt sie
+    /// dauerhaft unter `runtime_budget_granted_us`, obwohl Arbeit wartet, hat
+    /// das Budget keine Luecke gefunden — etwa weil ein unteilbarer Block
+    /// neben der geschuetzten Arbeit nicht passt. Das ist ein Befund, keine
+    /// Stoerung: die bewachten Klassen zahlen nie dafuer.
+    pub runtime_budget_used_us: [u32; MAX_MODELS],
+    /// Dispatches, die mit verbleibendem Budget ueber `normal` eingeordnet
+    /// waren, je Modell (Zaehler).
+    pub runtime_budget_dispatches: [u32; MAX_MODELS],
     /// Wie oft die zustandsabhaengige Prognose mit dem bisherigen Weg
     /// verglichen wurde (NV-06).
     pub predictor_comparisons: u64,
@@ -412,6 +428,10 @@ impl Metrics {
             weakly_hard_misses,
             weakly_hard_violated,
             weakly_hard_misses_left,
+            runtime_budget_granted_us,
+            runtime_budget_window_us,
+            runtime_budget_used_us,
+            runtime_budget_dispatches,
             predictor_comparisons,
             predictor_fallbacks,
             predictor_more_conservative,
@@ -535,6 +555,19 @@ impl Metrics {
             (&mut self.weakly_hard_misses, &weakly_hard_misses),
             (&mut self.weakly_hard_violated, &weakly_hard_violated),
             (&mut self.weakly_hard_misses_left, &weakly_hard_misses_left),
+            (
+                &mut self.runtime_budget_granted_us,
+                &runtime_budget_granted_us,
+            ),
+            (
+                &mut self.runtime_budget_window_us,
+                &runtime_budget_window_us,
+            ),
+            (&mut self.runtime_budget_used_us, &runtime_budget_used_us),
+            (
+                &mut self.runtime_budget_dispatches,
+                &runtime_budget_dispatches,
+            ),
             (&mut self.variant_upgrades, &variant_upgrades),
             (&mut self.variant_downgrades, &variant_downgrades),
             (&mut self.arrival_period_us, &arrival_period_us),

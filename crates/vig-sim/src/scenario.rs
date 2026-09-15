@@ -147,6 +147,7 @@ impl StreamSpec {
             // Der Simulator beschreibt Lastszenarien, keine Vertragszusaetze.
             // Ein Zusatz haette hier keine Beobachtungsquelle (NV-02).
             extension: None,
+            min_runtime: None,
         }
     }
 }

@@ -5,6 +5,31 @@ bedeutet, steht in [docs/releases.md](docs/releases.md).
 
 ## [Unveroeffentlicht]
 
+### Neu (Mindestlaufzeit fuer nachrangige Arbeit, ADR-0046)
+
+- **`contract.min_runtime: { budget_ms, window_ms }`** an einem `normal`- oder
+  `best_effort`-Modell: solange das Budget im gleitenden Fenster nicht
+  aufgebraucht ist, steht seine wartende Arbeit ueber `normal` und unter
+  `high`. Gebucht wird die geplante Laufzeit beim Dispatch, ersetzt durch die
+  gemessene bei Fertigstellung. Der Look-ahead prueft den Auftrag weiter gegen
+  jede bewachte Ankunft; an `high`/`protected` wird ein Budget abgelehnt, ein
+  Budget ueber `window × Slots` ebenso. Ohne Budget ist die Ordnung bitgleich
+  die alte.
+- **`vig doctor`** rechnet die Budgets zur geschuetzten Auslastung und meldet
+  `RUNTIME_BUDGET_UNSCHEDULABLE`, wenn beides zusammen die Slots uebersteigt.
+- **Metriken je Modell:** `vig_runtime_budget_granted_us`,
+  `vig_runtime_budget_window_us`, `vig_runtime_budget_used_us`,
+  `vig_runtime_budget_dispatches_total`.
+- **Simulator, Form der Demo** (Front `protected`, drei `normal`-Kameras mit
+  19/22 ms, Sprachmodell 150/170 ms, zwei Slots, Marge 110 %, 40 s, drei
+  Seeds): mit 300 ms je Sekunde rechnet das Sprachmodell 362–384 statt 11 ms je
+  Sekunde (96–103 statt 3 Aufrufe). Die Front bleibt in jedem Takt frisch
+  (0 ‰ in beiden Laeufen, keine verpasste Deadline); Fenster ohne neue
+  Lieferung steigen bei ihr von 104–108 auf 155–164 ‰, das Antwortalter p99
+  von 36–37 auf 39 ms. Die `normal`-Kameras zahlen: 86–88 → 287–299 ‰ nicht
+  frisch. Auf der GPU nicht gemessen; `examples/demo/krakow-cams4.yaml` traegt
+  den Vorschlag als Kommentar.
+
 ### Neu (Demo, 15.09. abends)
 
 - **`demo-record`** (vig-bench): spielt einen Clip als Kamera ab, schickt

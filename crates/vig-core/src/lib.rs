@@ -42,6 +42,7 @@ pub mod predictor;
 pub mod profile;
 pub mod queue;
 pub mod request;
+pub mod runtime_budget;
 pub mod scheduler;
 pub mod semantics;
 pub mod slots;

@@ -69,6 +69,7 @@ fn contract(
         variants: list,
         cooperative: None,
         extension: None,
+        min_runtime: None,
     }
 }
 
