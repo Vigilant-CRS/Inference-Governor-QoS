@@ -510,6 +510,65 @@ fn min_gain(floor: u64, best: u64, candidate: u64, samples: u64) -> u64 {
     )
 }
 
+/// Verschlechtert `candidate` einen geschuetzten Strom an einem Lastpunkt
+/// gegenueber `reference` ueber die Rauschschwelle hinaus?
+///
+/// [`decide`] sieht nur die Zielgroesse, und die verdichtet alle
+/// geschuetzten Stroeme zum schlechtesten. Der Review vom 15.09. (R03) zeigte,
+/// was dabei durchrutscht: A 200 → 100 ‰, B 0 → 100 ‰ — das Maximum sinkt,
+/// und B verliert neu jeden zehnten Takt. Die Zusage „kein geschuetzter Strom
+/// wird schlechter" gilt deshalb je Strom und Lastpunkt, mit derselben
+/// gezaehlten Schwelle wie ein Gewinn ([`min_gain`]).
+///
+/// `Some` mit der Begruendung, wenn ja; eine Zelle, die in `reference` fehlt,
+/// wird nicht verglichen — die Vergleichbarkeit der Zellen prueft der Aufrufer.
+pub(crate) fn protected_regression(
+    candidate: &Evaluation,
+    reference: &Evaluation,
+) -> Option<String> {
+    for point in &candidate.points {
+        let Some(before_point) = reference
+            .points
+            .iter()
+            .find(|p| p.load_percent == point.load_percent)
+        else {
+            continue;
+        };
+        for stream in point.streams.iter().filter(|s| s.protected) {
+            let Some(before) = before_point
+                .streams
+                .iter()
+                .find(|s| s.stream == stream.stream)
+            else {
+                continue;
+            };
+            let worse = stream
+                .governed_permille
+                .saturating_sub(before.governed_permille);
+            if worse == 0 {
+                continue;
+            }
+            let noise = min_gain(
+                PROTECTED_MIN_GAIN_PERMILLE,
+                before.governed_permille,
+                stream.governed_permille,
+                common_samples(before.samples, stream.samples),
+            );
+            if worse >= noise {
+                return Some(format!(
+                    "protected stream `{}` at {} % load misses {} ‰ instead of {} ‰ — worse beyond \
+                     the noise threshold ({noise} ‰), even if the worst protected stream improves",
+                    stream.stream,
+                    point.load_percent,
+                    stream.governed_permille,
+                    before.governed_permille
+                ));
+            }
+        }
+    }
+    None
+}
+
 /// Behalten oder nicht — mit Begruendung in beiden Faellen.
 ///
 /// Behalten wird eine Fassung, wenn sie
@@ -983,11 +1042,15 @@ async fn confirmation_objective<S: Steps + ?Sized>(
     path: &Path,
     expected: &BTreeSet<(u64, String)>,
     quick: bool,
-) -> Result<Objective, String> {
+) -> Result<Evaluation, String> {
     match steps.evaluate(path, quick).await {
-        Ok(evaluation) if evaluation.cells() == *expected => evaluation
-            .objective()
-            .ok_or_else(|| "the evaluation has no load point".to_owned()),
+        Ok(evaluation) if evaluation.cells() == *expected => {
+            if evaluation.objective().is_some() {
+                Ok(evaluation)
+            } else {
+                Err("the evaluation has no load point".to_owned())
+            }
+        }
         Ok(_) => Err("not comparable: other streams or load points than the search".to_owned()),
         Err(Unevaluated::Missing) => Err("vig-fit is no longer found".to_owned()),
         Err(Unevaluated::Refused { reason }) => {
@@ -1032,11 +1095,17 @@ async fn confirm<S: Steps + ?Sized>(
             .next()
             .unwrap_or_else(|| Err("not evaluated".to_owned()));
         let (held, reason) = match (&untuned, &tuned) {
-            // Dieselbe Regel wie in der Suche, mit der unverstellten Fassung
-            // dieses Paars als bisher bester und als unverstellter.
-            (Ok(before), Ok(after)) => match decide(*after, *before, *before) {
-                Ok(why) => (true, why),
-                Err(why) => (false, why),
+            // Dieselben Regeln wie in der Suche, mit der unverstellten Fassung
+            // dieses Paars als bisher bester und als unverstellter: erst kein
+            // geschuetzter Strom schlechter, dann die Zielgroesse.
+            (Ok(before), Ok(after)) => match (before.objective(), after.objective()) {
+                (Some(b), Some(a)) => {
+                    match protected_regression(after, before).map_or_else(|| decide(a, b, b), Err) {
+                        Ok(why) => (true, why),
+                        Err(why) => (false, why),
+                    }
+                }
+                _ => (false, "the evaluation has no load point".to_owned()),
             },
             (Err(why), _) => (false, format!("untuned not evaluated: {why}")),
             (_, Err(why)) => (false, format!("tuned not evaluated: {why}")),
@@ -1047,8 +1116,8 @@ async fn confirm<S: Steps + ?Sized>(
         );
         pairs.push(ConfirmationPair {
             pair,
-            untuned: untuned.ok(),
-            tuned: tuned.ok(),
+            untuned: untuned.ok().as_ref().and_then(Evaluation::objective),
+            tuned: tuned.ok().as_ref().and_then(Evaluation::objective),
             held,
             reason,
         });
@@ -1223,7 +1292,10 @@ async fn search<S: Steps + ?Sized>(
                         }
                         Ok(evaluation) => match evaluation.objective() {
                             Some(objective) if evaluation.cells() == expected_cells => {
-                                match decide(objective, best_objective, untuned_objective) {
+                                match protected_regression(&evaluation, &baseline).map_or_else(
+                                    || decide(objective, best_objective, untuned_objective),
+                                    Err,
+                                ) {
                                     Ok(why) => {
                                         best = candidate;
                                         best_objective = objective;
@@ -1347,7 +1419,9 @@ fn method_markdown(tuning: &Tuning, out: &mut String) {
          lower-priority mean by at least {} ‰; in both cases also by at least {} standard \
          deviations of the missed cycles counted in both runs (the square root of their sum), \
          and never by fewer than {} cycles. Misses come in bursts, so this is a lower bound on \
-         the scatter, which is why the confirmation below still runs. Nothing worse for the protected streams than the untuned configuration is ever kept. \
+         the scatter, which is why the confirmation below still runs. No setting is kept \
+         that makes any single protected stream worse at any load point beyond that threshold, \
+         even if the worst protected stream improves. Nothing worse for the protected streams than the untuned configuration is ever kept. \
          A kept setting is written only if it also holds up in back-to-back confirmation: the \
          untuned and the tuned configuration run again, interleaved, in {} pairs, and the tuned \
          one must beat that pair's untuned one by the same rule in every pair — one measuring \
@@ -1644,7 +1718,56 @@ pub(crate) fn from_json(value: &serde_json::Value) -> Option<Tuning> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::{Evaluation, LoadPoint, Objective, StreamMiss, decide};
+    use super::{Evaluation, LoadPoint, Objective, StreamMiss, decide, protected_regression};
+
+    /// Ein besseres Maximum darf keinen einzelnen geschuetzten Strom
+    /// verschlechtern (Review 15.09., R03).
+    #[test]
+    fn a_better_maximum_does_not_hide_a_protected_stream_that_got_worse() {
+        let eval = |a, b| Evaluation {
+            points: vec![LoadPoint {
+                load_percent: 110,
+                streams: vec![
+                    StreamMiss {
+                        stream: "A".into(),
+                        protected: true,
+                        governed_permille: a,
+                        samples: 10_000,
+                    },
+                    StreamMiss {
+                        stream: "B".into(),
+                        protected: true,
+                        governed_permille: b,
+                        samples: 10_000,
+                    },
+                ],
+            }],
+        };
+        let before = eval(200, 0);
+        let after = eval(100, 100);
+        let (b, a) = (before.objective().unwrap(), after.objective().unwrap());
+        assert!(
+            decide(a, b, b).is_ok(),
+            "die Zielgroesse allein sieht die Verschlechterung nicht"
+        );
+        let why = protected_regression(&after, &before).unwrap();
+        assert!(why.contains("`B` at 110 %"), "{why}");
+        // Beide besser: keine Verschlechterung.
+        assert!(protected_regression(&eval(100, 0), &before).is_none());
+        // Innerhalb der gezaehlten Schwelle: 0 → 5 ‰ bei 200 Takten ist ein Takt.
+        let small = |b| Evaluation {
+            points: vec![LoadPoint {
+                load_percent: 100,
+                streams: vec![StreamMiss {
+                    stream: "B".into(),
+                    protected: true,
+                    governed_permille: b,
+                    samples: 200,
+                }],
+            }],
+        };
+        assert!(protected_regression(&small(5), &small(0)).is_none());
+    }
 
     /// Mit gezaehlten Takten: null gegen einen verfehlten Takt ist kein
     /// Gewinn, null gegen sieben von 200 schon.

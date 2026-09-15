@@ -1013,7 +1013,8 @@ fn foreign_load_reason(before: Option<u64>, after: Option<u64>) -> String {
 /// Was der Befehl ausfuehren soll.
 #[derive(Debug, Clone)]
 pub(crate) struct Options {
-    pub(crate) endpoint: String,
+    /// `None`, wenn `--endpoint` nicht angegeben wurde ([`effective_endpoint`]).
+    pub(crate) endpoint: Option<String>,
     pub(crate) config: PathBuf,
     pub(crate) out_dir: PathBuf,
     pub(crate) samples: usize,
@@ -1320,7 +1321,11 @@ impl Steps for Live {
         if let Err(e) = std::fs::write(&md_path, markdown(&q, &self.endpoint)) {
             eprintln!("    Bericht nicht schreibbar: {e}");
         }
-        if let Err(e) = std::fs::write(&state_path, state_json(&q, &self.fingerprint)) {
+        let artifact = file_sha256(&self.out_dir.join("measured.yaml"));
+        if let Err(e) = std::fs::write(
+            &state_path,
+            state_json(&q, &self.fingerprint, artifact.as_deref()),
+        ) {
             eprintln!("    Zustand nicht schreibbar: {e}");
         }
     }
@@ -1428,12 +1433,106 @@ fn run_shape(config: &Path, samples: usize) -> RunShape {
 /// Schritte trotzdem als erledigt angerechnet — `fit` und `check` liefen dann
 /// gegen eine `measured.yaml` von einer anderen Maschine, ohne ein Wort
 /// darueber. Der Fingerabdruck macht daraus einen erkennbaren Fall.
-fn fingerprint_of(endpoint: &str, config: &Path) -> String {
+///
+/// Seit dem Review vom 15.09. (R08) gehoeren auch die Messparameter und die
+/// Fassung des Werkzeugs dazu: Wer mit `--quick` oder anderen `--samples`
+/// fortsetzt oder ein neueres `vig` benutzt, bekommt keinen Stand angerechnet,
+/// der unter anderen Bedingungen gemessen wurde.
+fn fingerprint_of(endpoint: &str, config: &Path, options: &Options) -> String {
     use sha2::Digest as _;
     let bytes = std::fs::read(config).unwrap_or_default();
     let digest = sha2::Sha256::digest(&bytes);
     let short: String = format!("{digest:x}").chars().take(16).collect();
-    format!("{endpoint}|{short}")
+    format!(
+        "{endpoint}|{short}|samples={}|quick={}|period_us={}|vig={}",
+        options.samples,
+        options.quick,
+        options
+            .period_us
+            .map_or_else(|| "-".to_owned(), |p| p.to_string()),
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+/// SHA-256 einer Datei als Hex; `None`, wo sie fehlt oder unlesbar ist.
+fn file_sha256(path: &Path) -> Option<String> {
+    use sha2::Digest as _;
+    let bytes = std::fs::read(path).ok()?;
+    Some(format!("{:x}", sha2::Sha256::digest(&bytes)))
+}
+
+/// Der Standard, wenn weder `--endpoint` noch eine Konfiguration einen nennt.
+const DEFAULT_ENDPOINT: &str = "127.0.0.1:8001";
+
+/// Welcher Server vermessen wird.
+///
+/// Vorher nannte `--endpoint` den Server in Bericht und Fingerabdruck, waehrend
+/// `calibrate` den aus `backend.grpc_endpoint` der Datei mass (Review 15.09.,
+/// R05). Jetzt gibt es genau einen: den der Datei, wenn sie lesbar ist; ein
+/// abweichendes `--endpoint` wird verweigert, statt still verschieden zu
+/// bleiben. Ohne lesbare Datei — etwa ein Entwurf mit Platzhaltern — gilt
+/// `--endpoint` oder der Standard.
+///
+/// Weitere Domaenen (`backend.domains`) tragen eigene Endpunkte; verglichen
+/// wird hier nur der Standardendpunkt.
+///
+/// # Errors
+///
+/// Wenn `--endpoint` und die Konfiguration verschiedene Server nennen.
+fn effective_endpoint(explicit: Option<&str>, config: &Path) -> Result<String, String> {
+    let from_config = std::fs::read_to_string(config)
+        .ok()
+        .and_then(|text| vig_config::Config::from_yaml(&text).ok())
+        .map(|parsed| parsed.backend.grpc_endpoint);
+    match (explicit, from_config) {
+        (Some(given), Some(configured)) if given != configured => Err(format!(
+            "--endpoint {given} differs from backend.grpc_endpoint {configured} in {}. autotune \
+             measures the server the configuration names; change one of them so both name the \
+             same server.",
+            config.display()
+        )),
+        (_, Some(configured)) => Ok(configured),
+        (Some(given), None) => Ok(given.to_owned()),
+        (None, None) => Ok(DEFAULT_ENDPOINT.to_owned()),
+    }
+}
+
+/// Darf ein gespeicherter Stand fortgesetzt werden?
+///
+/// `Err` mit dem Grund, wenn nicht. Neben dem Fingerabdruck zaehlt die
+/// eingefrorene Konfiguration selbst: Vorher meldete ein Lauf mit lauter
+/// erledigten Schritten „Nothing left to do", obwohl `measured.yaml` fehlte
+/// (Review 15.09., R08). Ein Stand, der schon gemessen hat, gilt nur, wenn die
+/// Datei da ist und — wo der Zustand ihren Hash kennt — unveraendert.
+fn resumable(prior: &PriorRun, fingerprint: &str, out_config: &Path) -> Result<(), String> {
+    if prior
+        .fingerprint
+        .as_ref()
+        .is_none_or(|seen| seen != fingerprint)
+    {
+        return Err(
+            "The saved state belongs to a different endpoint, configuration, measurement \
+             setting or vig version; measuring again from the start."
+                .to_owned(),
+        );
+    }
+    let measured = prior.done.iter().any(|step| *step != Step::Discover);
+    if measured {
+        let current = file_sha256(out_config);
+        let lost = match (&current, &prior.artifact) {
+            (None, _) => true,
+            (Some(now), Some(then)) => now != then,
+            (Some(_), None) => false,
+        };
+        if lost {
+            return Err(format!(
+                "The frozen configuration {} is missing or was changed since the saved state; \
+                 measuring again from the start.",
+                out_config.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Was ein frueherer Lauf hinterlassen hat.
@@ -1444,6 +1543,9 @@ struct PriorRun {
     qualification: Qualification,
     /// Der Fingerabdruck, unter dem er lief.
     fingerprint: Option<String>,
+    /// SHA-256 der eingefrorenen Konfiguration beim letzten Schreiben des
+    /// Zustands; `None` in einem Zustand von vor diesem Feld.
+    artifact: Option<String>,
 }
 
 /// Liest den Stand eines frueheren Laufs.
@@ -1509,6 +1611,7 @@ fn prior_state(state_path: &Path) -> PriorRun {
         done: Vec::new(),
         qualification: Qualification::default(),
         fingerprint: None,
+        artifact: None,
     };
     let Ok(text) = std::fs::read_to_string(state_path) else {
         return empty;
@@ -1572,6 +1675,10 @@ fn prior_state(state_path: &Path) -> PriorRun {
             .get("fingerprint")
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned),
+        artifact: parsed
+            .get("artifact_sha256")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
     }
 }
 
@@ -1580,7 +1687,7 @@ fn prior_state(state_path: &Path) -> PriorRun {
 /// Er traegt den **ganzen** bisherigen Stand und nicht nur die Schrittnamen:
 /// Ein Lauf, der fortsetzt, muss den Bericht vervollstaendigen koennen und
 /// nicht bei null anfangen.
-fn state_json(q: &Qualification, fingerprint: &str) -> String {
+fn state_json(q: &Qualification, fingerprint: &str, artifact: Option<&str>) -> String {
     let steps: Vec<serde_json::Value> = q
         .steps
         .iter()
@@ -1597,6 +1704,7 @@ fn state_json(q: &Qualification, fingerprint: &str) -> String {
     serde_json::json!({
         "done": q.done_keys(),
         "fingerprint": fingerprint,
+        "artifact_sha256": artifact,
         "steps": steps,
         "series": {
             "qualified": q.series.qualified,
@@ -1662,27 +1770,33 @@ pub(crate) async fn run(
     identity: &IdentityArgs,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&options.out_dir)?;
+    let endpoint = match effective_endpoint(options.endpoint.as_deref(), &options.config) {
+        Ok(endpoint) => endpoint,
+        Err(reason) => {
+            eprintln!("{reason}");
+            return Ok(ExitCode::from(2));
+        }
+    };
     let state_path = options.out_dir.join("state.json");
-    let fingerprint = fingerprint_of(&options.endpoint, &options.config);
+    let out_config = options.out_dir.join("measured.yaml");
+    let fingerprint = fingerprint_of(&endpoint, &options.config, options);
     let prior = prior_state(&state_path);
-    // Ein Stand von einem anderen Endpunkt oder einer geaenderten
-    // Konfiguration ist kein Stand dieses Laufs. Ihn anzurechnen hiesse,
-    // `fit` und `check` gegen eine Messung von woanders laufen zu lassen.
+    // Ein Stand von einem anderen Endpunkt, einer geaenderten Konfiguration,
+    // anderen Messparametern oder ohne seine eingefrorene Konfiguration ist
+    // kein Stand dieses Laufs. Ihn anzurechnen hiesse, `fit` und `check` gegen
+    // eine Messung von woanders laufen zu lassen.
     //
     // Ein Zustand ganz ohne Fingerabdruck stammt aus einer aelteren Fassung
     // und laesst sich diesem Lauf nicht zuordnen — also ebenfalls neu.
     let had_state = !prior.done.is_empty() || !prior.qualification.steps.is_empty();
-    let stale = had_state
-        && prior
-            .fingerprint
-            .as_ref()
-            .is_none_or(|seen| *seen != fingerprint);
-    let (done, prior_qualification) = if options.restart || stale {
-        if stale {
-            println!(
-                "The saved state belongs to a different endpoint or configuration; measuring \
-                 again from the start."
-            );
+    let stale = if had_state {
+        resumable(&prior, &fingerprint, &out_config).err()
+    } else {
+        None
+    };
+    let (done, prior_qualification) = if options.restart || stale.is_some() {
+        if let Some(reason) = &stale {
+            println!("{reason}");
         }
         (Vec::new(), Qualification::default())
     } else {
@@ -1704,9 +1818,8 @@ pub(crate) async fn run(
         run_shape(&options.config, options.samples),
     );
 
-    let out_config = options.out_dir.join("measured.yaml");
     let mut live = Live {
-        endpoint: options.endpoint.clone(),
+        endpoint: endpoint.clone(),
         out_dir: options.out_dir.clone(),
         samples: options.samples,
         period_us: options.period_us,
@@ -1718,7 +1831,7 @@ pub(crate) async fn run(
     let qualification = Box::pin(execute(
         &mut live,
         &steps,
-        &options.endpoint,
+        &endpoint,
         &options.config,
         &out_config,
         options.quick,
@@ -2475,7 +2588,7 @@ models:
         assert_eq!(pairs.len(), 2);
 
         let state = dir.join("state.json");
-        std::fs::write(&state, state_json(&q, "fp")).unwrap();
+        std::fs::write(&state, state_json(&q, "fp", None)).unwrap();
         assert_eq!(prior_state(&state).qualification.tuning, q.tuning);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2943,6 +3056,111 @@ models:
         assert!(
             estimate_seconds(&Step::ALL, false, one) < estimate_seconds(&Step::ALL, false, two)
         );
+    }
+
+    /// `--endpoint` und Konfiguration nennen denselben Server, oder autotune
+    /// verweigert (Review 15.09., R05). Vorher lief die Messung gegen die
+    /// Datei, waehrend Bericht und Fingerabdruck das Flag nannten.
+    #[test]
+    fn an_explicit_endpoint_that_differs_from_the_configuration_is_refused() {
+        let dir =
+            std::env::temp_dir().join(format!("vig-autotune-endpoint-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("vig.yaml");
+        std::fs::write(&config, include_str!("../../../examples/gate_m3/vig.yaml")).unwrap();
+        assert_eq!(
+            super::effective_endpoint(None, &config).unwrap(),
+            "127.0.0.1:8001"
+        );
+        assert_eq!(
+            super::effective_endpoint(Some("127.0.0.1:8001"), &config).unwrap(),
+            "127.0.0.1:8001"
+        );
+        let refused = super::effective_endpoint(Some("other-machine:8001"), &config).unwrap_err();
+        assert!(refused.contains("other-machine:8001"), "{refused}");
+        // Ohne lesbare Datei — der Entwurf wird erst geschrieben — gilt das Flag.
+        let absent = dir.join("absent.yaml");
+        assert_eq!(
+            super::effective_endpoint(Some("other-machine:8001"), &absent).unwrap(),
+            "other-machine:8001"
+        );
+        assert_eq!(
+            super::effective_endpoint(None, &absent).unwrap(),
+            super::DEFAULT_ENDPOINT
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Ein Stand mit erledigten Schritten, aber ohne seine eingefrorene
+    /// Konfiguration, wird nicht fortgesetzt (Review 15.09., R08). Vorher hiess
+    /// das „Nothing left to do" mit Exitcode 0.
+    #[test]
+    fn a_saved_state_without_its_frozen_configuration_is_not_resumed() {
+        let dir = std::env::temp_dir().join(format!("vig-autotune-resume-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out_config = dir.join("measured.yaml");
+        let _ = std::fs::remove_file(&out_config);
+        let prior = |artifact: Option<String>| super::PriorRun {
+            done: Step::ALL.to_vec(),
+            qualification: Qualification::default(),
+            fingerprint: Some("fp".to_owned()),
+            artifact,
+        };
+        assert!(
+            super::resumable(&prior(None), "fp", &out_config).is_err(),
+            "measured.yaml fehlt"
+        );
+        std::fs::write(&out_config, "version: 1\n").unwrap();
+        let hash = super::file_sha256(&out_config);
+        assert!(super::resumable(&prior(hash.clone()), "fp", &out_config).is_ok());
+        std::fs::write(&out_config, "version: 1\n# von Hand geaendert\n").unwrap();
+        assert!(
+            super::resumable(&prior(hash), "fp", &out_config).is_err(),
+            "measured.yaml wurde seit dem Zustand veraendert"
+        );
+        assert!(super::resumable(&prior(None), "anders", &out_config).is_err());
+        // Nur `discover` erledigt: da gibt es noch keine Datei zu verlieren.
+        std::fs::remove_file(&out_config).unwrap();
+        let only_discover = super::PriorRun {
+            done: vec![Step::Discover],
+            ..prior(None)
+        };
+        assert!(super::resumable(&only_discover, "fp", &out_config).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Andere Messparameter ergeben einen anderen Fingerabdruck.
+    #[test]
+    fn measurement_settings_are_part_of_the_fingerprint() {
+        let config = std::path::PathBuf::from("does-not-matter.yaml");
+        let options = super::Options {
+            endpoint: None,
+            config: config.clone(),
+            out_dir: std::path::PathBuf::from("out"),
+            samples: 200,
+            period_us: None,
+            quick: false,
+            only: None,
+            offline: false,
+            restart: false,
+        };
+        let base = super::fingerprint_of("e:1", &config, &options);
+        for changed in [
+            super::Options {
+                quick: true,
+                ..options.clone()
+            },
+            super::Options {
+                samples: 50,
+                ..options.clone()
+            },
+            super::Options {
+                period_us: Some(33_000),
+                ..options.clone()
+            },
+        ] {
+            assert_ne!(base, super::fingerprint_of("e:1", &config, &changed));
+        }
     }
 
     /// Ein ganzer fremder Kern ist Fremdlast, und eine Luecke ist keine Ruhe.

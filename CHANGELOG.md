@@ -5,6 +5,44 @@ bedeutet, steht in [docs/releases.md](docs/releases.md).
 
 ## [Unveroeffentlicht]
 
+### Behoben (externer Review vom 15.09., docs/reviews/2026-09-15)
+
+- **R03 — ein besseres Maximum verdeckte einen schlechter gewordenen
+  geschuetzten Strom.** `tune` verglich nur den schlechtesten geschuetzten
+  Strom: A 200 → 100 ‰ bei B 0 → 100 ‰ galt als Gewinn. Jetzt prueft
+  `protected_regression` vor jeder Entscheidung jeden geschuetzten Strom an
+  jedem Lastpunkt gegen die unverstellte Fassung, mit derselben gezaehlten
+  Schwelle — in der Suche und in jedem Bestaetigungspaar.
+- **R05 — `--endpoint` und die Konfiguration konnten verschiedene Server
+  nennen.** Gemessen wurde der aus `backend.grpc_endpoint`, berichtet der aus
+  dem Flag. `--endpoint` hat keinen stillen Standard mehr: ohne Flag gilt der
+  Endpunkt der Datei, ein abweichendes Flag wird mit Exitcode 2 verweigert.
+- **R08 — Resume ohne eingefrorene Konfiguration.** Ein Zustand mit lauter
+  erledigten Schritten meldete „Nothing left to do", auch wenn `measured.yaml`
+  fehlte. Der Zustand traegt jetzt deren SHA-256; fehlt die Datei oder weicht
+  sie ab, wird neu gemessen. Der Fingerabdruck umfasst ausserdem `--samples`,
+  `--quick`, `--periodic-us` und die `vig`-Fassung — ein aelterer Zustand wird
+  deshalb einmal neu gemessen.
+
+### Geaendert (Messfenster in Takten, 15.09. abends)
+
+- **`tune`, `fit` und `vig-fit` bemessen ihr Fenster in Takten**
+  (`vig_config::window`): mindestens 200 Takte des langsamsten geschuetzten
+  Stroms, 10 bis 180 s. Vorher 10 s fest — auf dem Pixel 2 27 Takte, ein
+  verfehlter Takt 37 ‰. `vig-fit` schreibt die Takte je Zelle
+  (`governed_samples`, `direct_samples`), und `tune` verlangt einen Vorsprung
+  von mindestens `⌈2·√(k₁+k₂)⌉` verfehlten Takten (ADR-0045, Nachtrag).
+- **Die Telefonzahl ist ersetzt.** „208 → 0 ‰" stammte aus fuenf von 24
+  Takten. Nachgemessen als Anwendungsfall Lieferroboter
+  ([docs/use-cases.md](docs/use-cases.md)): Detektor bei 90 % Last 293 → 99 ‰
+  (Pixel 2) und 497 → 208 ‰ (Pixel 5); ab 100 % beide Wege ≤ 4 ‰, auf dem
+  Pixel 5 bei 125 % der Governor schlechter (32 gegen 3 ‰). README, Seite und
+  Video nennen die neuen Zahlen.
+- **ROS 2 live nachgeprueft:** 296/296 Frames ueber Shared Memory, 297/297
+  ueber den Kopierpfad, mit Capture-ID ueber die fruehere 256er-Grenze hinaus.
+- `tools/android/gate-on-phone.sh` und zwei xsched-Skripte zeigten nach dem
+  Umzug der Laufzeitdaten auf alte Pfade.
+
 ### Behoben (nach dem ersten Tuning-Lauf auf Hardware)
 
 - **Ein unerfuellbarer nachrangiger Strom verdeckte jede Verbesserung.** Die

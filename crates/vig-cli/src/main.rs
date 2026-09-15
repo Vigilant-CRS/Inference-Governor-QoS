@@ -58,8 +58,13 @@ enum Command {
     /// marked as such; nothing that was not measured is made to look measured.
     Autotune {
         /// Address of the inference server to measure against.
-        #[arg(short, long, default_value = "127.0.0.1:8001")]
-        endpoint: String,
+        ///
+        /// Default: `backend.grpc_endpoint` of the configuration if it exists,
+        /// otherwise 127.0.0.1:8001 for the draft. If both are given and
+        /// differ, autotune refuses instead of reporting one server and
+        /// measuring another.
+        #[arg(short, long)]
+        endpoint: Option<String>,
         /// The configuration with your contracts. Written as a draft if absent.
         #[arg(short, long, value_name = "FILE", default_value = "vig.yaml")]
         config: PathBuf,

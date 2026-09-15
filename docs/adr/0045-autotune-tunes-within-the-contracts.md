@@ -358,3 +358,16 @@ am 90-%-Punkt auf 24 Takten; 208 ‰ sind fuenf davon. Die feste Schwelle von
   haelt. Auf dem Laptop aendert sich nichts.
 - Telefonzahlen aus 10-s-Fenstern bleiben in der Validierung stehen, sind dort
   aber als solche gekennzeichnet (docs/benchmark/validierung-autotune.md).
+
+## Nachtrag 15.09.2026: die Zusage gilt je Strom
+
+Der externe Review vom 15.09. (R03) zeigte, dass die Zielgroesse die Zusage
+„nichts Schlechteres fuer die geschuetzten Stroeme" nicht traegt: Sie nimmt den
+schlechtesten geschuetzten Strom am schlechtesten Lastpunkt, und A 200 → 100 ‰
+bei B 0 → 100 ‰ senkt dieses Maximum. **Entscheidung:** Vor der Regel oben
+prueft `protected_regression` jede Zelle (geschuetzter Strom × Lastpunkt) gegen
+die unverstellte Fassung — in der Suche gegen die Ausgangsbewertung, in jedem
+Bestaetigungspaar gegen dessen unverstellte Fassung. Eine Verschlechterung ab
+der gezaehlten Schwelle (`min_gain`, mindestens 5 ‰) verwirft die Fassung,
+egal was das Maximum tut. Nachrangige Stroeme bleiben beim Mittelwert: Ihr
+Preis ist Teil des Vertrags, und der Bericht nennt ihn.
