@@ -145,7 +145,9 @@ pub fn diff(before: &HardwareSnapshot, after: &HardwareSnapshot) -> Vec<Change> 
             describe(&old.memory_total_mib),
             describe(&new.memory_total_mib),
         );
-        push(g, "clock_sm_mhz", describe_clock(old), describe_clock(new));
+        if clock_moved(old, new) {
+            push(g, "clock_sm_mhz", describe_clock(old), describe_clock(new));
+        }
         push(
             g,
             "performance_state",
@@ -215,6 +217,33 @@ fn describe_clock(gpu: &GpuState) -> String {
             format!("~{bucket}")
         }
         None => describe(&gpu.clock_sm_mhz),
+    }
+}
+
+/// Ob sich der Takt so weit bewegt hat, dass es eine Nachricht ist.
+///
+/// **Ueber den Abstand, nicht ueber den Eimer.** Vorher entschied die
+/// Zeichenkette aus [`describe_clock`], und die entsteht durch Abrundung:
+/// 1799 MHz wird „~1700", 1801 MHz wird „~1800". Ein Takt, der nahe an einer
+/// Hunderter-Grenze liegt, ueberquert sie staendig — und jede Ueberquerung
+/// galt als Zustandswechsel. Der Eimer sollte Zittern schlucken und hat es an
+/// genau der Stelle verstaerkt, an der es am haeufigsten auftritt.
+///
+/// Das war kein theoretischer Fall. Im Autotune-Lauf vom 15.09.2026 kostete
+/// es drei von vier Messreihen; eine davon meldete `~1800 -> ~1900`, also
+/// einen Takt, der nach **oben** ging. Ein Einbruch war das nicht.
+///
+/// Die Schwelle bleibt [`CLOCK_BUCKET_MHZ`]: dieselbe Groesse, die der
+/// Kommentar dort als „grob genug fuer Ruhe, fein genug fuer einen Einbruch"
+/// beschreibt — jetzt aber als Abstand gemessen, wie es dort gemeint war.
+///
+/// Fuer alles Nichtnumerische bleibt der Textvergleich. Ein Wechsel von
+/// „unsupported" nach „unavailable" ist eine Nachricht ueber den Collector
+/// und soll sichtbar bleiben.
+fn clock_moved(before: &GpuState, after: &GpuState) -> bool {
+    match (before.clock_sm_mhz.value(), after.clock_sm_mhz.value()) {
+        (Some(a), Some(b)) => a.abs_diff(*b) > CLOCK_BUCKET_MHZ,
+        _ => describe_clock(before) != describe_clock(after),
     }
 }
 
@@ -316,6 +345,25 @@ mod tests {
         let before = snapshot(LINE, 1_000);
         let after = snapshot(&LINE.replace(" 1740, ", " 1785, "), 2_000);
         assert!(diff(&before, &after).is_empty());
+    }
+
+    #[test]
+    fn clock_jitter_across_a_bucket_boundary_is_not_a_state_change() {
+        // Dreissig Megahertz — aber zwei verschiedene Eimer. Die Abrundung
+        // machte daraus einen gemeldeten Zustandswechsel und verwarf
+        // Messreihen, in denen der Takt nur an einer 100er-Grenze zitterte.
+        //
+        // Das ist kein erfundener Fall: Im Autotune-Lauf vom 15.09.2026
+        // gingen drei von vier Reihen so verloren, eine davon mit einem Takt,
+        // der nach **oben** sprang (~1800 -> ~1900). Ein Einbruch war das
+        // sicher nicht.
+        let before = snapshot(&LINE.replace(" 1740, ", " 1785, "), 1_000);
+        let after = snapshot(&LINE.replace(" 1740, ", " 1815, "), 2_000);
+        assert!(
+            diff(&before, &after).is_empty(),
+            "{:?}",
+            diff(&before, &after)
+        );
     }
 
     #[test]
