@@ -314,3 +314,59 @@ Stelle gesetzt wurde. Kein Abbruch, keine stillschweigend andere Groesse.
 „Planned steps (18 minutes, estimated generously)" — innerhalb der zugesagten
 halben Stunde, auf dem schwaechsten Geraet, das wir haben, ohne dass auf
 `--quick` ausgewichen werden musste.
+
+## Nachvalidierung am 15.09.2026, nach den vier Reparaturen
+
+Die Befunde 1 bis 4 wurden am 14.09. um 22:41 behoben (`456fe07`). Geprueft war
+das zu diesem Zeitpunkt ausschliesslich durch Unit- und Funktionstests — 16 fuer
+`autotune`, Gate gruen mit 57 Suiten und 845 Tests. **Ein Lauf gegen echte
+Hardware fand danach zunaechst nicht statt**; die Nacht war durch den Dauerlauf
+belegt, der die Messsperre acht Stunden exklusiv hielt. Tests, die den Schritten
+gefaelschte Ergebnisse unterschieben, zeigen, dass die Ehrlichkeitsregeln
+greifen — nicht, dass der Befehl auf der Karte durchlaeuft.
+
+Am 15.09. ist er zweimal gelaufen, gegen `examples/gate_m3/vig.yaml`.
+
+**Erster Lauf (09:17, `autotune-laptop-2026-09-15/`): verschmutzt — durch die
+Auswertung des Dauerlaufs, die daneben lief.** `measure` und `fit` stehen auf
+`contaminated`, Grund „system load 2.08 before and 2.22 after". Der
+Fremdlastwaechter hat also die eigene Nebenarbeit erwischt; das ist sein Zweck,
+und der Lauf taugt damit als Funktionsnachweis, nicht als Messung.
+
+Aus ihm stammt der beste Beleg fuer Befund 1: `state.json` traegt jetzt
+`config`, `doctor`, das vollstaendige `fit_verdict`, die Serienzahlen, **alle
+vier Schritte mit Ausgang, Grund und Notizen** — und den Fingerabdruck
+`127.0.0.1:8001|6779674cb1213087`. Vorher stand dort `{"done":[…]}`. Und `done`
+enthielt nur `["discover","check"]`: Die verschmutzten Schritte gelten **nicht**
+als erledigt, eine Fortsetzung wuerde sie wiederholen.
+
+**Zweiter Lauf (09:24, `autotune-laptop-2026-09-15b/`): sauber.**
+
+| | |
+|---|---|
+| Exitcode | 0 |
+| Schritte | alle vier `done` |
+| `contaminated` | `false` |
+| `complete` | `true` |
+| `release` | `refused` — „3 of 4 measurement series were discarded" |
+| `doctor` | `READY_WITH_WARNINGS` |
+
+Damit ist belegt, was vorher nur behauptet war: Der reparierte Befehl laeuft auf
+echter Hardware vollstaendig durch, schreibt alle Artefakte und verweigert die
+Freigabe mit genau einem nachvollziehbaren Grund.
+
+**Eine Ungereimtheit, die offen bleibt.** Derselbe Aufbau lieferte einmal
+`NOT_READY` und einmal `READY_WITH_WARNINGS`. Naheliegend ist, dass das
+`measured.yaml` des verschmutzten Laufs unter Fremdlast entstand und `doctor`
+damit andere Zahlen vorfand — **nachgewiesen ist das nicht**, und bis dahin ist
+es eine Vermutung und keine Erklaerung.
+
+**Nicht vergleichbar mit dem 14.09.** `examples/gate_m3/vig.yaml` hat
+`slots: 1`; der Lauf meldet „4 models, 1 slots, 200 samples — 4 cells in all"
+und misst deshalb **keine Paare**. Die Validierung vom Vortag lief mit zwei
+Slots und 16 Zellen. Die Zahlen der beiden Tage stehen also nebeneinander, nicht
+gegeneinander.
+
+**Was der Lauf ueber die Reparatur von Befund 3 zeigt:** Die Ansage nennt jetzt
+die Matrix, auf der sie beruht, und sagt dazu, dass sie die Hardware nicht
+kennt — „The estimate scales with that matrix, not with your hardware."

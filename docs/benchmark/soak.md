@@ -230,3 +230,83 @@ soll — Speicher, Fehler, Drift — hängt daran nicht.
 
 Rohdaten: `InferenceQoS-runtime/soak-2026-09-11/` (Fensterprotokoll,
 Metrikabzug, Taktmitschnitt, Wächterprotokoll, Manifest).
+
+## Dritter Lauf, 14./15.09.2026: zum ersten Mal mit einem echten Sprachmodell
+
+Acht Stunden, 480 von 480 Fenstern, 23:50 bis 07:50. Erstmals mit
+`SOAK_WITH_LLM=1`: Detektor, Pose und Tiefe im Takt, daneben **Qwen3-0.6B auf
+einem eigenen Triton mit vLLM-Backend** (Port 8011), ein Generierungsauftrag
+über 64 Token alle vier Sekunden, einer zur Zeit.
+
+Damit beantwortet der Dauerlauf zum ersten Mal die Frage, für die der Governor
+gebaut ist — und nicht mit einem ResNet-Stellvertreter, sondern mit einem
+Sprachmodell, das wirklich generiert.
+
+### Der getaktete Strom wurde gehalten, acht Stunden lang
+
+| | erste Stunde | letzte Stunde |
+|---|---:|---:|
+| Detektor unabgedeckt | 0 ‰ | 0 ‰ |
+| längste Detektorlücke | 431 ms | **21 ms** |
+| Pose unabgedeckt | 0 ‰ | 0 ‰ |
+| Tiefe unabgedeckt | 0 ‰ | 0 ‰ |
+
+Über den ganzen Lauf: **eine einzige verletzte Frist**
+(`vig_deadline_misses_total 1`), `useful_inference_ratio 0.999`, kein
+Backendfehler, kein Absturz. Der Speicher wuchs von 13 588 auf 17 136 kB, nach
+der ersten Stunde **+154 kB/h** — kein Leck. Die Sicherheitsmarge blieb bei
+110 % und musste in 480 Ablesungen **kein einziges Mal** anziehen.
+
+### Das Sprachmodell bekam nichts — und das ist das Ergebnis
+
+**Eine** abgeschlossene Generierung in acht Stunden, und die kam in **Fenster
+0**, bevor der Governor überhaupt etwas zurückzustellen hatte. Danach keine
+mehr.
+
+| Zähler | Stand nach 8 h |
+|---|---:|
+| `vig_best_effort_starved_total` | 400 |
+| `vig_deferred_for_protected_total` | 1 670 115 |
+| `vig_requests_rejected_infeasible_total` | 0 |
+| `vig_requests_rejected_capacity_total` | 0 |
+
+**Der Governor hat nichts abgewiesen.** Alle drei Ablehnungszähler stehen auf
+null. Er hat die nachrangige Arbeit konsequent zurückgestellt, um die
+getakteten Ströme zu halten — 1,67 Millionen Mal. Der Aushungerungszähler
+wächst dabei schnurgerade, +50 je Stunde, vom ersten Fenster an: Das ist
+**strukturell**, keine Drift und kein Kippen unter Last.
+
+Das ist [ADR-0012](../adr/0012-best-effort-starvation.md) in Reinform, derselbe
+offene Punkt, an dem schon der Berichtspfad des Piloten verhungert ist. Die 402 „abgewiesen" in der
+CSV sind **clientseitig** gezählt (`Err(_)` im Lasttreiber) — Aufrufe, die nie
+an die Reihe kamen, nicht Ablehnungen des Governors.
+
+### Was der Lauf damit belegt und was nicht
+
+**Belegt:** Der Governor hält einen getakteten Strom über acht Stunden
+vollständig durch, auch wenn daneben ein echtes Sprachmodell um dieselbe GPU
+konkurriert. Kein Leck, keine Drift, eine verletzte Frist.
+
+**Nicht belegt:** dass beides *nebeneinander* nutzbar ist. Wer das Sprachmodell
+wirklich braucht, bekommt es unter dieser Konfiguration nicht. Der bekannte
+Ausweg — eine Untergrenze für den Hintergrundfortschritt
+(`minimum_background_progress_pct`, [ADR-0041](../adr/0041-the-look-ahead-protects-the-supply-not-only-the-deadline.md))
+— ist weiterhin **nicht gebaut**. Dieser Lauf liefert ihm die Zahlen.
+
+### Zwei Fehler im Auswertungswerkzeug, die dieser Lauf aufgedeckt hat
+
+`tools/soak-report.py` stürzte an den `-`-Zellen des Generierungsstroms ab
+(`int("-")`) und kam nur bis zwei von vier Strömen. Nach der Reparatur zeigte
+es für `llm` eine **0** in der Spalte „unabgedeckt" — perfekte Versorgung für
+einen Strom, der nichts geliefert hat, weil `med()` auf einer leeren Liste
+null zurückgibt. Beides behoben; leere Spalten zeigen jetzt „—".
+
+Und die Ausfallprüfung zählte **Zeilen statt Fenster**: Sie meldete „479
+Fenster ohne jede Lieferung", während der Detektor 160 000 Antworten je Stunde
+lieferte. Ein absichtlich zurückgestelltes Sprachmodell ist kein
+Backendausfall. Gezählt wird jetzt je Fenster und nur über die getakteten
+Ströme; der Generierungsstrom bekommt eine eigene Zeile.
+
+Rohdaten: `~/soak-2026-09-14-llm/` (Fensterprotokoll, 5-MB-Metrikabzug,
+Konsole). Die Ausgabe liegt auf der NVMe und nicht auf der USB-Platte — aus dem
+Grund, der weiter oben unter „Reproduzieren" steht.

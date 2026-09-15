@@ -47,30 +47,55 @@ def summarise(rows, label):
         "  ----------|---------------|---------------|--------------------|"
         "-----------------|---------------------|-----------|-----------"
     )
+    # Eine Zelle, die `-` traegt, ist keine Null: Der Generierungsstrom eines
+    # Sprachmodells hat keine periodische Abdeckung, und `soak` schreibt dort
+    # deshalb einen Strich. `int("-")` wirft — daran ist die Auswertung des
+    # Laufs vom 14.09. nach zwei von vier Stroemen gestorben. Solche Zellen
+    # werden uebersprungen, nicht zu null gemacht: eine Null waere eine
+    # Messung, die es nicht gibt.
+    def spalte(rs, key):
+        werte = []
+        for r in rs:
+            roh = r.get(key, "")
+            if roh in ("", "-", None):
+                continue
+            try:
+                werte.append(int(roh))
+            except ValueError:
+                continue
+        return sorted(werte)
+
     for name, rs in sorted(by_stream.items()):
-        unc = sorted(int(r["uncovered_permille"]) for r in rs)
-        aoi = sorted(int(response_age_ms(r)) for r in rs)
+        unc = spalte(rs, "uncovered_permille")
+        aoi = sorted(
+            int(v) for v in (response_age_ms(r) for r in rs)
+            if str(v) not in ("", "-", "None")
+        )
         med = lambda v: v[len(v) // 2] if v else 0
 
         # Die Verbrauchersicht steht daneben, nicht statt der alten Zahlen:
         # bestehende Vergleiche bleiben so nachrechenbar. Aeltere Messreihen
         # haben diese Spalten nicht — dann bleibt die Zelle leer statt eine
         # Null zu behaupten, die niemand gemessen hat.
-        cons = sorted(int(r["consumer_uncovered_permille"]) for r in rs) \
+        cons = spalte(rs, "consumer_uncovered_permille") \
             if "consumer_uncovered_permille" in rs[0] else []
-        gap = sorted(int(r["longest_gap_ms"]) for r in rs) \
-            if "longest_gap_ms" in rs[0] else []
-        mean_aoi = sorted(int(r["mean_aoi_ms"]) for r in rs) \
-            if "mean_aoi_ms" in rs[0] else []
+        gap = spalte(rs, "longest_gap_ms") if "longest_gap_ms" in rs[0] else []
+        mean_aoi = spalte(rs, "mean_aoi_ms") if "mean_aoi_ms" in rs[0] else []
         cell = lambda v: str(med(v)) if v else "—"
 
         # Die laengste Luecke ist ein Hoechstwert, kein Median: ein einziger
         # Ausreisser ueber acht Stunden ist genau das, was gesucht wird.
         worst_gap = str(max(gap)) if gap else "—"
 
+        # `cell` statt `med`: Bei einem Strom ohne Abdeckungsspalten ist die
+        # Liste leer, und `med` gaebe dafuer eine 0 zurueck. Eine 0 in der
+        # Spalte "unabgedeckt" liest sich als perfekte Versorgung — fuer den
+        # Generierungsstrom, der in acht Stunden nichts lieferte, waere das
+        # die glatte Umkehrung der Wahrheit. Der Strich sagt, dass hier nichts
+        # zu messen war.
         print(
-            f"  {name:<9} | {med(unc):>13} | {cell(cons):>13} | {worst_gap:>18} | "
-            f"{cell(mean_aoi):>15} | {med(aoi):>19} | "
+            f"  {name:<9} | {cell(unc):>13} | {cell(cons):>13} | {worst_gap:>18} | "
+            f"{cell(mean_aoi):>15} | {cell(aoi):>19} | "
             f"{sum(int(r['delivered']) for r in rs):>9} | "
             f"{sum(int(r['rejected']) for r in rs):>10}"
         )
@@ -167,9 +192,38 @@ def main():
     memory(rows)
     margins(f"{directory}/metrics.log")
 
-    outages = sum(1 for r in rows if int(r["delivered"]) == 0)
+    # Ein Fenster ohne Lieferung heisst: das Backend war weg. Gezaehlt wurden
+    # hier aber **Zeilen** statt Fenster — und seit ein Generierungsstrom eine
+    # eigene Zeile je Fenster schreibt, schlug die Pruefung fast ueberall an.
+    # Im Lauf vom 14.09. meldete sie „479 Fenster ohne jede Lieferung",
+    # waehrend der Detektor 160 000 Antworten je Stunde lieferte: Das
+    # Sprachmodell lieferte nichts, weil der Governor es zugunsten der
+    # getakteten Stroeme zurueckstellte (ADR-0012) — kein Ausfall, sondern das
+    # gesuchte Ergebnis. Gezaehlt wird deshalb je Fenster und nur ueber die
+    # getakteten Stroeme.
+    je_fenster = defaultdict(int)
+    for r in rows:
+        if r.get("kind") == "generative":
+            continue
+        je_fenster[r["window"]] += int(r["delivered"])
+    outages = sum(1 for geliefert in je_fenster.values() if geliefert == 0)
     if outages:
-        print(f"\n  BEFUND {outages} Fenster ohne jede Lieferung.")
+        print(f"\n  BEFUND {outages} von {len(je_fenster)} Fenstern ohne jede "
+              f"Lieferung der getakteten Stroeme.")
+
+    # Der Generierungsstrom bekommt seine eigene Zeile. Null abgeschlossene
+    # Auftraege sind dort eine Aussage ueber die Planung, nicht ueber die
+    # Verfuegbarkeit des Backends.
+    gen = [r for r in rows if r.get("kind") == "generative"]
+    if gen:
+        fertig = sum(int(r["delivered"]) for r in gen)
+        leer = sum(1 for r in gen if int(r["delivered"]) == 0)
+        print(f"\n  Generativer Strom: {fertig} abgeschlossene Auftraege, "
+              f"{leer} von {len(gen)} Fenstern ohne einen einzigen.")
+        if fertig == 0 or leer > len(gen) * 0.9:
+            print("  BEFUND Die nachrangige Last kam praktisch nicht zum Zug "
+                  "(ADR-0012).\n         Das ist der bekannte offene Punkt und "
+                  "kein Fehler des Aufbaus.")
 
 
 if __name__ == "__main__":
