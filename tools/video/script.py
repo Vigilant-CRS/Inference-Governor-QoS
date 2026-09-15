@@ -75,7 +75,7 @@ DEMOS = {
                         "SmolVLM (Apache-2.0)."),
     },
     "humanoid-cams4": {
-        "run": "demo/runs/humanoid-cams4-2039",
+        "run": "demo/runs/humanoid-cams4-2159",
         "clip": "demo.mp4",
         "left": "direct.jsonl",
         "right": "governed.jsonl",
@@ -272,8 +272,9 @@ SCENES = [
         key="demo-humanoid",
         narration=(
             "And the {stream} camera of a {subject}: {left_pct_spoken} with Triton "
-            "alone, {right_pct_spoken} with Vigilant. With room to spare on the chip, "
-            "Triton alone keeps up, and the governor does not help."
+            "alone, {right_pct_spoken} with Vigilant. That is what overload looks like. "
+            "On a chip with room to spare, Triton alone keeps up, and the governor "
+            "does not help."
         ),
         visual="demo_clip",
         source="demo-humanoid-cams4",

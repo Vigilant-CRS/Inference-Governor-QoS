@@ -20,7 +20,7 @@ bedeutet, steht in [docs/releases.md](docs/releases.md).
   Projektseite.
 - **Zwei weitere Szenarien mit derselben Last:** Gehweg-Roboter (Edinburgh,
   CC BY 3.0) Frontkamera 0,2 % → 100 %, humanoider Roboter (TUM RGB-D, CC BY
-  4.0) Kopfkamera 0,1 % → 99,8 %; das Sprachmodell wartet in beiden.
+  4.0) Kopfkamera 0,1 % → 100 %; das Sprachmodell wartet in beiden.
 - **Renderer:** Die BLIND-Anzeige blitzte fuer einzelne Bilder auf, wenn ein
   Ergebnis genau `max_age` alt war — das sah wie Kameraaussetzer aus. Jetzt
   1 ms Toleranz und BLIND erst nach einem ganzen Kamerabild; die Zaehler

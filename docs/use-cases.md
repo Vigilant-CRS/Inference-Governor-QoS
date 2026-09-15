@@ -44,7 +44,7 @@ in time in **99 %** of control cycles instead of 84–85 %, pose 99 % instead of
 this load: the hand-tuned settings were already the best of the settings tried.
 
 Seen as a video — head, chest and two wrist cameras plus a vision-language model
-on one laptop GPU: the head camera stays fresh in 99.8 % of cycles instead of
+on one laptop GPU: the head camera stays fresh in 100 % of cycles instead of
 0.1 %, and the language model waits ([humanoid demo](benchmark/demo-2026-09-15.md)).
 
 ## 2. Indoor service or delivery robot on a phone-class SoC

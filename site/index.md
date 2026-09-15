@@ -51,7 +51,7 @@ saw the objects.
 
 ### Vehicle, city driving — front camera fresh in 100 % of cycles instead of 0.2 %
 
-<div class="video">
+<div class="video" id="demo-vehicle">
 <video controls preload="none" playsinline poster="assets/demo-four-cameras.jpg">
 <source src="assets/demo-four-cameras.mp4" type="video/mp4">
 </video>
@@ -59,15 +59,15 @@ saw the objects.
 
 ### Sidewalk robot — front camera fresh in 100 % of cycles instead of 0.2 %
 
-<div class="video">
+<div class="video" id="demo-sidewalk">
 <video controls preload="none" playsinline poster="assets/demo-sidewalk-robot.jpg">
 <source src="assets/demo-sidewalk-robot.mp4" type="video/mp4">
 </video>
 </div>
 
-### Humanoid robot — head camera fresh in 99.8 % of cycles instead of 0.1 %
+### Humanoid robot — head camera fresh in 100 % of cycles instead of 0.1 %
 
-<div class="video">
+<div class="video" id="demo-humanoid">
 <video controls preload="none" playsinline poster="assets/demo-humanoid-robot.jpg">
 <source src="assets/demo-humanoid-robot.mp4" type="video/mp4">
 </video>

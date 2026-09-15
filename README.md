@@ -31,7 +31,7 @@ missed cycles where the phone loses them — **293 ‰ → 99 ‰** on a Pixel 2
 **497 ‰ → 208 ‰** on a Pixel 5 — paid for by the lower-priority streams, and
 not at every load point ([use cases](docs/use-cases.md)). With four cameras
 and a vision-language model on one laptop GPU — a vehicle, a sidewalk robot and
-a humanoid — the protected camera stays fresh in **99.8–100 %** of cycles
+a humanoid — the protected camera stays fresh in **100 %** of cycles
 instead of **0.1–0.2 %**, and the language model waits
 ([demos](docs/benchmark/demo-2026-09-15.md)). Tested on an NVIDIA GPU and on the
 Adreno GPUs of two Android devices.
@@ -46,6 +46,15 @@ Where your contracts come from — freshness from motion, class from consequence
 — and the loads we measured: [use cases](docs/use-cases.md).
 
 [![Watch the video: Stop computing the past, with four-camera demos (3½ min)](site/assets/video-poster.png)](https://vigilant-crs.github.io/Inference-Governor-QoS/#video)
+
+**See it on camera** — four cameras and a language model on one laptop GPU,
+NVIDIA Triton alone on the left, with Vigilant on the right (click to play on
+the project page):
+
+| Vehicle, city driving | Sidewalk robot | Humanoid robot |
+|---|---|---|
+| [![Vehicle demo: front camera fresh in 100 % of cycles instead of 0.2 %](site/assets/demo-four-cameras.jpg)](https://vigilant-crs.github.io/Inference-Governor-QoS/#demo-vehicle) | [![Sidewalk robot demo: front camera fresh in 100 % of cycles instead of 0.2 %](site/assets/demo-sidewalk-robot.jpg)](https://vigilant-crs.github.io/Inference-Governor-QoS/#demo-sidewalk) | [![Humanoid robot demo: head camera fresh in 100 % of cycles instead of 0.1 %](site/assets/demo-humanoid-robot.jpg)](https://vigilant-crs.github.io/Inference-Governor-QoS/#demo-humanoid) |
+| front camera fresh **0.2 % → 100 %** | front camera fresh **0.2 % → 100 %** | head camera fresh **0.1 % → 100 %** |
 
 [![Status](https://img.shields.io/badge/status-pre--production-orange)](#status-what-works-and-what-does-not)
 [![Tests](https://img.shields.io/badge/tests-900%20passing-brightgreen)](#build-and-verify)
@@ -454,7 +463,7 @@ We would rather you read that list before the benchmark table.
 ```bash
 cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace          # 863 tests, six long-running checks ignored by design
+cargo test --workspace          # 900 tests, six long-running checks ignored by design
 cargo deny check licenses bans advisories sources
 ```
 
