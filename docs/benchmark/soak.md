@@ -187,6 +187,28 @@ SOAK_WITH_LLM=1 SOAK_LLM_ENDPOINT=127.0.0.1:8011 SOAK_LLM_MODEL=qwen \
 sie dort nicht — die Spaltenzahl hat sich geändert, und ein Auswertungsskript,
 das stur nach Position liest, bekommt sonst verschobene Werte.
 
+### Auf einem Backend ohne Shared Memory
+
+```bash
+SOAK_COPY=1 SOAK_HOURS=8 SOAK_OUT=<verzeichnis> ./soak
+```
+
+Ohne diesen Schalter registriert der Dauerlauf für jeden Strom eine
+System-Shared-Memory-Region beim Backend. Auf Android gibt es kein `/dev/shm`
+(siehe [ADR-0039](../adr/0039-a-second-backend-proves-the-seam.md)) — dort scheitert schon
+`Region::create`, und der Lauf endet in der ersten Sekunde statt nach acht
+Stunden. Mit `SOAK_COPY=1` reist die Nutzlast im Request.
+
+**Der Preis ist bekannt und gewollt.** Der Kopierpfad kostet den Transport
+([ADR-0003](../adr/0003-shared-memory-passthrough.md)), und zwar auf
+beiden Seiten gleichermaßen — der Vergleich bleibt damit einer des Schedulings.
+Ein Dauerlauf, der überhaupt läuft, ist mehr wert als einer, der die präzisere
+Zahl gemessen hätte.
+
+Der Schalter heißt bewusst **nicht** `VIG_GATE_COPY` wie in `gate-m3`: Zwei
+Werkzeuge an derselben Variablen hängen zu lassen heißt, dass eine Messung die
+andere umschaltet, ohne dass es jemand beabsichtigt hat.
+
 Das Ausgabeverzeichnis gehört auf ein **fest eingebautes** Laufwerk. Ein per
 USB angebundener Datenträger, in den acht Stunden lang jede Minute ein paar
 Zeilen geschrieben werden, ist genau der Kandidat für eine
@@ -293,7 +315,7 @@ Ausweg — eine Untergrenze für den Hintergrundfortschritt
 (`minimum_background_progress_pct`, [ADR-0041](../adr/0041-the-look-ahead-protects-the-supply-not-only-the-deadline.md))
 — ist weiterhin **nicht gebaut**. Dieser Lauf liefert ihm die Zahlen.
 
-### Zwei Fehler im Auswertungswerkzeug, die dieser Lauf aufgedeckt hat
+### Drei Fehler im Auswertungswerkzeug, die dieser Lauf aufgedeckt hat
 
 `tools/soak-report.py` stürzte an den `-`-Zellen des Generierungsstroms ab
 (`int("-")`) und kam nur bis zwei von vier Strömen. Nach der Reparatur zeigte
@@ -306,6 +328,23 @@ Fenster ohne jede Lieferung", während der Detektor 160 000 Antworten je Stunde
 lieferte. Ein absichtlich zurückgestelltes Sprachmodell ist kein
 Backendausfall. Gezählt wird jetzt je Fenster und nur über die getakteten
 Ströme; der Generierungsstrom bekommt eine eigene Zeile.
+
+### Was in der CSV des Generierungsstroms **nicht** zu lesen ist
+
+`emitted` steht dort über die Nacht auf **7200** und `client_dropped` auf
+**6719**. Das sieht nach einem Befund aus und ist keiner: Bei einer Periode von
+vier Sekunden und `in_flight_cap: 1` löst der Treiber fünfzehnmal je Minute
+aus, und solange ein Auftrag unterwegs ist, verwirft der Client alles Weitere.
+Die beiden Zahlen sind damit Arithmetik der gewählten Periode, keine Eigenschaft
+des Systems — auf einer schnelleren Karte oder mit längerer Periode stünden dort
+völlig andere Werte, ohne dass sich am Verhalten des Governors etwas geändert
+hätte.
+
+Sie werden trotzdem **nicht** unterdrückt. Sie sind nicht falsch, nur
+uninformativ, und ein Strich würde Information vernichten statt sie
+einzuordnen. Aussagekräftig für diesen Strom sind `delivered` (abgeschlossene
+Generierungen) und die Zähler des Governors — `best_effort_starved` und
+`deferred_for_protected`.
 
 Rohdaten: `~/soak-2026-09-14-llm/` (Fensterprotokoll, 5-MB-Metrikabzug,
 Konsole). Die Ausgabe liegt auf der NVMe und nicht auf der USB-Platte — aus dem

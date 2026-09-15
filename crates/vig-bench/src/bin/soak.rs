@@ -223,6 +223,24 @@ fn streams(load: u64, specs: &HashMap<String, InputSpec>) -> Vec<StreamDef> {
     out
 }
 
+/// Reist die Nutzlast im Request statt als Shared-Memory-Referenz?
+///
+/// Ein Backend ohne `/dev/shm` — TFLite auf Android (ADR-0039) — kann keine
+/// Region registrieren. Ohne diesen Schalter stirbt der Dauerlauf dort in der
+/// ersten Sekunde an `system_shared_memory_register`, nicht erst nach Stunden.
+///
+/// Ein **eigener** Schalter und nicht `VIG_GATE_COPY`: Zwei Werkzeuge an
+/// derselben Variablen haengen zu lassen heisst, dass eine Messung die andere
+/// umschaltet, ohne dass es jemand beabsichtigt hat.
+///
+/// Der Preis ist bekannt und gewollt: Der Kopierpfad kostet den Transport
+/// (ADR-0003), und beide Seiten zahlen ihn gleichermassen. Ein Dauerlauf, der
+/// ueberhaupt laeuft, ist mehr wert als einer, der die praezisere Zahl
+/// gemessen haette.
+fn copy_path() -> bool {
+    std::env::var_os("SOAK_COPY").is_some_and(|v| v == "1")
+}
+
 fn load_average() -> String {
     std::fs::read_to_string("/proc/loadavg")
         .ok()
@@ -367,39 +385,48 @@ async fn run() {
             .collect();
         let elements: i64 = shape.iter().copied().product();
         let byte_size = u64::try_from(elements).unwrap_or(0) * 4;
-        let region = Region::create(&format!("vig_soak_{logical}"), byte_size).expect("Shm-Region");
-        let _ = triton
-            .raw()
-            .await
-            .expect("Backend")
-            .system_shared_memory_unregister(SystemSharedMemoryUnregisterRequest {
-                name: region.name.clone(),
-            })
-            .await;
-        triton
-            .raw()
-            .await
-            .expect("Backend")
-            .system_shared_memory_register(SystemSharedMemoryRegisterRequest {
-                name: region.name.clone(),
-                key: region.key.clone(),
-                offset: 0,
-                byte_size,
-            })
-            .await
-            .expect("Shm registrieren");
+        // Auf dem Kopierpfad entsteht gar keine Region: Wo es kein `/dev/shm`
+        // gibt, scheitert schon `Region::create`, und ein `expect` dahinter
+        // beendet den Lauf, bevor das erste Fenster beginnt.
+        let region = if copy_path() {
+            None
+        } else {
+            let region =
+                Region::create(&format!("vig_soak_{logical}"), byte_size).expect("Shm-Region");
+            let _ = triton
+                .raw()
+                .await
+                .expect("Backend")
+                .system_shared_memory_unregister(SystemSharedMemoryUnregisterRequest {
+                    name: region.name.clone(),
+                })
+                .await;
+            triton
+                .raw()
+                .await
+                .expect("Backend")
+                .system_shared_memory_register(SystemSharedMemoryRegisterRequest {
+                    name: region.name.clone(),
+                    key: region.key.clone(),
+                    offset: 0,
+                    byte_size,
+                })
+                .await
+                .expect("Shm registrieren");
+            Some(region)
+        };
         specs.insert(
             logical.to_owned(),
             InputSpec {
                 name: input.name.clone(),
                 datatype: input.datatype.clone(),
                 shape,
-                region: Some(region.name.clone()),
+                region: region.as_ref().map(|r| r.name.clone()),
                 byte_size,
                 payload: None,
             },
         );
-        regions.push(region);
+        regions.extend(region);
     }
 
     // Fenstergroesse und Anzahl sind ueberschreibbar, damit der Lauf vor der
@@ -442,6 +469,14 @@ async fn run() {
              dem vom 02.09. vergleichbar)"
         );
     }
+    println!(
+        "Datenpfad: {}",
+        if copy_path() {
+            "Kopie im Request (SOAK_COPY=1) — fuer Backends ohne /dev/shm"
+        } else {
+            "Shared Memory"
+        }
+    );
     println!("Ausgabe: {out_dir}/streams.csv und metrics.log\n");
 
     // Ein Gateway fuer den ganzen Lauf. Genau das ist der Punkt: es soll
