@@ -47,4 +47,4 @@ pub fn incoming(listener: tokio::net::TcpListener) -> tonic::transport::server::
 }
 
 pub use backend::Backend;
-pub use workload::{StreamDef, StreamReport, drive};
+pub use workload::{Integrity, StreamDef, StreamReport, drive, is_governor_refusal};

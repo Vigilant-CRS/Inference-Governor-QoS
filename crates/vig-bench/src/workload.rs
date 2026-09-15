@@ -168,10 +168,145 @@ pub struct StreamReport {
     pub client_dropped: u64,
     /// Beantwortete Requests.
     pub delivered: u64,
-    /// Vom System abgewiesene Requests.
+    /// Alle nicht beantworteten Requests: `refused` plus `errors`.
+    ///
+    /// Die Summe wie vor der Aufteilung, damit bestehende Auswertungen
+    /// (Dauerlauf, `oip-check`) dieselbe Spalte behalten.
     pub rejected: u64,
+    /// Davon absichtlich abgewiesen, siehe [`is_governor_refusal`].
+    ///
+    /// Unter Last ein legitimes Ergebnis: der Governor hat entschieden,
+    /// diesen Frame nicht mehr zu rechnen.
+    pub refused: u64,
+    /// Davon Transport-, Protokoll- oder Modellfehler, und Requests, die
+    /// sich gar nicht bauen liessen.
+    ///
+    /// Kein Ergebnis ueber das Scheduling, sondern ein Integrationsfehler.
+    pub errors: u64,
+    /// Ob der Strom eine Verbindung zum Ziel bekam und gefahren wurde.
+    ///
+    /// `false` heisst: kein einziger Request ging hinaus, und die Abdeckung
+    /// dieses Berichts ist die eines Stroms, der nie lief.
+    pub connected: bool,
     /// Abdeckung und Age of Information.
     pub coverage: Coverage,
+}
+
+/// Ob ein Strombericht eine Messung ist oder ein Integrationsfehler.
+///
+/// Ein Bericht entsteht fuer jeden Strom, auch wenn nichts ankam. Seine
+/// Abdeckung ist dann 1000 ‰ — eine Zahl, die wie ein vernichtendes Ergebnis
+/// aussieht und keines ist (Review vom 15.09., R04).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Integrity {
+    /// Eine Messung: verbunden, ohne Fehler, mit Lieferungen oder mit
+    /// legitimen Ablehnungen.
+    Valid,
+    /// Keine Verbindung zum Ziel, oder der Strom wurde gar nicht gefahren.
+    NotRun,
+    /// Transport-, Protokoll- oder Modellfehler; die Zahl steht dabei.
+    Errors(u64),
+    /// Weder eine Lieferung noch eine Ablehnung im Messfenster.
+    NoOutcome,
+    /// Keine Lieferung, nur Ablehnungen, auf einem Arm, der liefern muss.
+    NothingDelivered,
+}
+
+impl Integrity {
+    /// Das Wort fuer maschinenlesbare Berichte.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Valid => "valid",
+            Self::NotRun => "not_run",
+            Self::Errors(_) => "errors",
+            Self::NoOutcome => "no_outcome",
+            Self::NothingDelivered => "nothing_delivered",
+        }
+    }
+
+    /// Ob der Bericht als Messung zaehlt.
+    #[must_use]
+    pub const fn is_valid(self) -> bool {
+        matches!(self, Self::Valid)
+    }
+}
+
+impl StreamReport {
+    /// Ein Bericht fuer einen Strom, der nicht gefahren wurde.
+    #[must_use]
+    pub fn not_run(name: &'static str) -> Self {
+        Self {
+            name,
+            emitted: 0,
+            sent: 0,
+            client_dropped: 0,
+            delivered: 0,
+            rejected: 0,
+            refused: 0,
+            errors: 0,
+            connected: false,
+            coverage: Coverage::default(),
+        }
+    }
+
+    /// Ob dieser Bericht eine Messung ist.
+    ///
+    /// `may_starve` sagt, ob ein Strom ohne jede Lieferung ein gueltiges
+    /// Ergebnis sein kann: ueber den Governor ja, wenn er jeden Frame
+    /// absichtlich abgewiesen hat — das ist Aushungern unter Last, ein
+    /// negativer Befund. Direkt am Backend nein: ein Vergleichsarm ohne
+    /// Lieferung vergleicht nichts.
+    ///
+    /// Schon ein einziger Fehler macht den Bericht ungueltig. Ein Fehler
+    /// kostet Takte, die dann dem Scheduling angelastet wuerden.
+    #[must_use]
+    pub const fn integrity(&self, may_starve: bool) -> Integrity {
+        if !self.connected {
+            Integrity::NotRun
+        } else if self.errors > 0 {
+            Integrity::Errors(self.errors)
+        } else if self.delivered > 0 {
+            Integrity::Valid
+        } else if self.refused == 0 {
+            Integrity::NoOutcome
+        } else if may_starve {
+            Integrity::Valid
+        } else {
+            Integrity::NothingDelivered
+        }
+    }
+}
+
+/// Ob ein Status eine absichtliche Ablehnung des Governors ist.
+///
+/// Der Governor nennt den Grund im Metadatum
+/// [`vig_gateway::outcome::REASON_HEADER`]. Scheduling-Entscheidungen sind
+/// `superseded`, `stale` und `infeasible` (`outcome::status_for`) sowie ein
+/// voller Abhaengigkeitsgraph `graph_full`/`graph_quota`
+/// (`outcome::graph_rejection`). Ohne Grund zaehlt nur `ResourceExhausted`:
+/// so antwortet der Governor auf eine volle Actor-Warteschlange und ein
+/// erschoepftes Nutzlastbudget — Backpressure, also ebenfalls Last.
+///
+/// Alles andere ist ein Fehler: `Unavailable` (Verbindung, Backend,
+/// `backend_failed`, Slotkredite in Quarantaene), `DeadlineExceeded`
+/// (`backend_timeout`), `NotFound` (unbekanntes Modell), `InvalidArgument`,
+/// `PermissionDenied`, `Internal`, und jeder Grund, den dieser Client nicht
+/// kennt.
+#[must_use]
+pub fn is_governor_refusal(status: &tonic::Status) -> bool {
+    match status
+        .metadata()
+        .get(vig_gateway::outcome::REASON_HEADER)
+        .map(|value| value.to_str())
+    {
+        Some(Ok(reason)) => matches!(
+            reason,
+            "superseded" | "stale" | "infeasible" | "graph_full" | "graph_quota"
+        ),
+        Some(Err(_)) => false,
+        None => status.code() == tonic::Code::ResourceExhausted,
+    }
 }
 
 struct StreamState {
@@ -181,7 +316,21 @@ struct StreamState {
     client_dropped: AtomicU64,
     delivered: AtomicU64,
     rejected: AtomicU64,
+    refused: AtomicU64,
+    errors: AtomicU64,
     permits: Arc<Semaphore>,
+}
+
+impl StreamState {
+    /// Zaehlt einen nicht beantworteten Request, getrennt nach Ursache.
+    fn record_failure(&self, refusal: bool) {
+        self.rejected.fetch_add(1, Ordering::Relaxed);
+        if refusal {
+            self.refused.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.errors.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 /// Faehrt den Lauf und gibt je Strom einen Bericht zurueck.
@@ -189,9 +338,9 @@ struct StreamState {
 /// `via_governor` steuert nur, ob der Client die Governor-Altersangabe
 /// mitschickt; das Ziel bestimmt der Aufrufer ueber `endpoint`.
 ///
-/// # Panics
-///
-/// Wenn keine Verbindung zum Ziel aufgebaut werden kann.
+/// Kommt keine Verbindung zustande, bricht der Lauf nicht ab: der Strom
+/// meldet `connected: false` und null Lieferungen. Ob ein Bericht eine
+/// Messung ist, sagt [`StreamReport::integrity`].
 pub async fn drive(
     endpoint: &str,
     streams: &[StreamDef],
@@ -217,21 +366,28 @@ pub async fn drive(
             client_dropped: AtomicU64::new(0),
             delivered: AtomicU64::new(0),
             rejected: AtomicU64::new(0),
+            refused: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
             permits: Arc::new(Semaphore::new(stream.in_flight_cap)),
         }));
     }
 
     let mut tasks = Vec::new();
+    let mut connected = vec![false; streams.len()];
     for (index, stream) in streams.iter().enumerate() {
         let Some(state) = states.get(index).cloned() else {
             continue;
         };
         let stream = stream.clone();
         // Ist das Ziel gerade weg, faellt dieser Strom fuer dieses Fenster aus
-        // und meldet null Lieferungen — der Lauf geht weiter.
+        // und meldet null Lieferungen — der Lauf geht weiter. Der Bericht sagt
+        // es in `connected`, damit niemand die Nullen als Messung liest.
         let Ok(client) = try_connect(endpoint).await else {
             continue;
         };
+        if let Some(flag) = connected.get_mut(index) {
+            *flag = true;
+        }
         tasks.push(tokio::spawn(async move {
             if stream.pump {
                 run_stream_pump(client, stream, state, origin, duration, via_governor).await;
@@ -247,13 +403,17 @@ pub async fn drive(
     streams
         .iter()
         .zip(states.iter())
-        .map(|(stream, state)| StreamReport {
+        .zip(connected)
+        .map(|((stream, state), connected)| StreamReport {
             name: stream.name,
             emitted: state.emitted.load(Ordering::Relaxed),
             sent: state.sent.load(Ordering::Relaxed),
             client_dropped: state.client_dropped.load(Ordering::Relaxed),
             delivered: state.delivered.load(Ordering::Relaxed),
             rejected: state.rejected.load(Ordering::Relaxed),
+            refused: state.refused.load(Ordering::Relaxed),
+            errors: state.errors.load(Ordering::Relaxed),
+            connected,
             coverage: state
                 .tracker
                 .lock()
@@ -325,8 +485,8 @@ async fn run_stream(
                 text.as_ref(),
             ) else {
                 // Kein gueltiger `BYTES`-Rahmen (Prompt ab 4 GiB): nicht
-                // gesendet, aber gezaehlt.
-                state.rejected.fetch_add(1, Ordering::Relaxed);
+                // gesendet, aber gezaehlt — als Fehler, nicht als Ablehnung.
+                state.record_failure(false);
                 return;
             };
             state.sent.fetch_add(1, Ordering::Relaxed);
@@ -347,9 +507,7 @@ async fn run_stream(
                         );
                     }
                 }
-                Err(_) => {
-                    state.rejected.fetch_add(1, Ordering::Relaxed);
-                }
+                Err(status) => state.record_failure(is_governor_refusal(&status)),
             }
         });
     }
@@ -429,8 +587,8 @@ async fn run_stream_pump(
             stream.text.as_ref(),
         ) else {
             // Kein gueltiger `BYTES`-Rahmen (Prompt ab 4 GiB): nicht gesendet,
-            // aber gezaehlt.
-            state.rejected.fetch_add(1, Ordering::Relaxed);
+            // aber gezaehlt — als Fehler, nicht als Ablehnung.
+            state.record_failure(false);
             continue;
         };
         state.sent.fetch_add(1, Ordering::Relaxed);
@@ -451,9 +609,7 @@ async fn run_stream_pump(
                     );
                 }
             }
-            Err(_) => {
-                state.rejected.fetch_add(1, Ordering::Relaxed);
-            }
+            Err(status) => state.record_failure(is_governor_refusal(&status)),
         }
     }
     producer.abort();
@@ -717,5 +873,84 @@ mod tests {
             period: ms(15),
         };
         assert_eq!(burst.period_at(ms(25), ms(5_000)), ms(15));
+    }
+
+    /// Eine Ablehnung des Governors ist ein Ergebnis unter Last, ein Fehler
+    /// ist keines. Geprueft an den Statusobjekten, die `vig-gateway` selbst
+    /// baut, nicht an nachgebauten.
+    #[test]
+    fn governor_refusals_are_told_apart_from_integration_errors() {
+        use super::is_governor_refusal;
+        use tonic::{Code, Status};
+        use vig_core::RequestState;
+        use vig_gateway::outcome::{REASON_HEADER, graph_rejection, status_for};
+
+        let refusal = |state| status_for(state).is_some_and(|s| is_governor_refusal(&s));
+        assert!(refusal(RequestState::Superseded));
+        assert!(refusal(RequestState::Stale));
+        assert!(refusal(RequestState::RejectedInfeasible));
+        assert!(is_governor_refusal(&graph_rejection("graph_full", "x")));
+        assert!(is_governor_refusal(&graph_rejection("graph_quota", "x")));
+        // Volle Actor-Warteschlange und Nutzlastbudget: ohne Grund, aber Last.
+        assert!(is_governor_refusal(&Status::resource_exhausted("voll")));
+
+        for state in [
+            RequestState::Failed,
+            RequestState::ExecutionUnknown,
+            RequestState::BackendTimeout,
+            RequestState::Cancelled,
+        ] {
+            assert!(!refusal(state), "{state:?}");
+        }
+        assert!(!is_governor_refusal(&graph_rejection(
+            "capture_mismatch",
+            "x"
+        )));
+        for code in [
+            Code::Unavailable,
+            Code::NotFound,
+            Code::InvalidArgument,
+            Code::PermissionDenied,
+            Code::Internal,
+            Code::Unknown,
+            Code::Unimplemented,
+        ] {
+            assert!(!is_governor_refusal(&Status::new(code, "x")), "{code:?}");
+        }
+        // Ein unbekannter Grund ist kein Freibrief, auch nicht mit dem Code
+        // einer Backpressure.
+        let mut unknown = Status::resource_exhausted("x");
+        if let Ok(value) = "neu_und_unbekannt".parse() {
+            unknown.metadata_mut().insert(REASON_HEADER, value);
+        }
+        assert!(!is_governor_refusal(&unknown));
+    }
+
+    /// Nur ein verbundener Strom ohne Fehler ist eine Messung. Ohne jede
+    /// Lieferung gilt er nur dort, wo Aushungern ein Befund ist, und nur,
+    /// wenn er tatsaechlich abgewiesen wurde.
+    #[test]
+    fn integrity_separates_measurement_from_integration_failure() {
+        use super::{Integrity, StreamReport};
+        let report = |connected: bool, delivered: u64, refused: u64, errors: u64| StreamReport {
+            connected,
+            sent: delivered.saturating_add(refused).saturating_add(errors),
+            delivered,
+            refused,
+            errors,
+            rejected: refused.saturating_add(errors),
+            ..StreamReport::not_run("s")
+        };
+        assert_eq!(report(false, 0, 0, 0).integrity(true), Integrity::NotRun);
+        assert_eq!(report(true, 50, 3, 1).integrity(true), Integrity::Errors(1));
+        assert_eq!(report(true, 50, 3, 0).integrity(false), Integrity::Valid);
+        assert_eq!(report(true, 0, 0, 0).integrity(true), Integrity::NoOutcome);
+        assert_eq!(report(true, 0, 40, 0).integrity(true), Integrity::Valid);
+        assert_eq!(
+            report(true, 0, 40, 0).integrity(false),
+            Integrity::NothingDelivered
+        );
+        assert!(!Integrity::Errors(2).is_valid());
+        assert_eq!(Integrity::NotRun.label(), "not_run");
     }
 }

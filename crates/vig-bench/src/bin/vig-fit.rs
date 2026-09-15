@@ -35,6 +35,35 @@
 //! Mal. Das JSON sagt es in `arms`, die direkten Felder stehen auf `null`,
 //! und der Satz nennt sich Abstimmungslauf — damit niemand eine Bewertung
 //! ohne Vergleich als „lohnt sich" liest.
+//!
+//! ## Gueltigkeit
+//!
+//! Ein Strom meldet auch dann einen Bericht, wenn nichts ankam. Seine
+//! Abdeckung ist dann 1000 ‰ und liest sich wie ein Urteil gegen den
+//! Governor (Review vom 15.09., R04). Deshalb wird jede Zelle
+//! (Lastpunkt × Strom × Arm) geprueft, bevor sie zaehlt:
+//!
+//! * **Ungueltig** ist ein Arm ohne Verbindung, mit auch nur einem Transport-,
+//!   Protokoll- oder Modellfehler, ohne jede Antwort im Messfenster, und —
+//!   nur direkt — ohne jede Lieferung. Das ist ein Integrationsfehler.
+//! * **Gueltig** bleibt ein Governor-Arm, der unter Last absichtlich abweist
+//!   (`superseded`, `stale`, `infeasible`, Backpressure), auch wenn er dabei
+//!   gar nichts liefert. Das ist ein negativer Befund
+//!   (`vig_bench::workload::is_governor_refusal`).
+//!
+//! Ein Urteil gibt es nur fuer eine vollstaendig gueltige Matrix. Sonst
+//! beginnt der Satz mit „Kein Ergebnis", nennt die erste ungueltige Zelle
+//! mit Grund, und das JSON steht auf `conclusive: false`.
+//!
+//! ## Exitcodes
+//!
+//! * `0` — ein Ergebnis: jede Zelle gueltig.
+//! * `1` — kein Ergebnis: keine Zelle, mindestens eine ungueltige Zelle, oder
+//!   das JSON liess sich nicht schreiben. Das JSON wird vorher geschrieben,
+//!   damit der Grund nachlesbar bleibt; die letzte Zeile auf stderr nennt ihn.
+//! * `2` — Aufruf oder Konfiguration abgelehnt.
+//! * `101` — Abbruch, wenn das Backend schon vor der Messung nicht
+//!   erreichbar ist oder seine Modellmetadaten fehlen.
 
 #![allow(
     clippy::print_stdout,
@@ -50,7 +79,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
-use vig_bench::workload::{InputSpec, StreamDef, connect, drive};
+use vig_bench::workload::{InputSpec, Integrity, StreamDef, StreamReport, connect, drive};
 use vig_config::Config;
 use vig_gateway::{GatewayService, MonotonicClock, actor};
 use vig_protocol_oip::inference::ModelMetadataRequest;
@@ -117,6 +146,172 @@ struct Row {
     /// Takten oder 7 von 200. `vig autotune` bemisst daran seine Rauschschwelle.
     direct_samples: Option<u64>,
     governed_samples: u64,
+    /// Was die Requests des direkten Arms erlebt haben; `None` ohne ihn.
+    direct_tally: Option<Tally>,
+    /// Dasselbe ueber den Governor.
+    governed_tally: Tally,
+}
+
+/// Was die Requests eines Arms in einer Zelle erlebt haben.
+///
+/// Die Abdeckung allein unterscheidet nicht zwischen „der Governor hat
+/// abgewiesen" und „es kam nie eine Verbindung zustande". Beides sind 1000 ‰.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Tally {
+    sent: u64,
+    delivered: u64,
+    /// Absichtlich abgewiesen: Aushungern unter Last, ein gueltiger Befund.
+    refused: u64,
+    /// Transport-, Protokoll- oder Modellfehler: ein Integrationsfehler.
+    errors: u64,
+    integrity: Integrity,
+}
+
+impl Tally {
+    /// `may_starve` wie bei [`StreamReport::integrity`]: nur der Governor-Arm
+    /// darf ohne Lieferung gueltig sein.
+    const fn of(report: &StreamReport, may_starve: bool) -> Self {
+        Self {
+            sent: report.sent,
+            delivered: report.delivered,
+            refused: report.refused,
+            errors: report.errors,
+            integrity: report.integrity(may_starve),
+        }
+    }
+}
+
+/// Welcher Arm einer Zelle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Side {
+    Direct,
+    Governed,
+}
+
+impl Side {
+    const fn de(self) -> &'static str {
+        match self {
+            Self::Direct => "direkt",
+            Self::Governed => "Governor",
+        }
+    }
+
+    const fn en(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Governed => "governor",
+        }
+    }
+}
+
+impl Row {
+    /// Die Arme dieser Zelle, die gefahren wurden.
+    fn tallies(&self) -> impl Iterator<Item = (Side, Tally)> {
+        self.direct_tally
+            .map(|tally| (Side::Direct, tally))
+            .into_iter()
+            .chain([(Side::Governed, self.governed_tally)])
+    }
+
+    /// Der erste ungueltige Arm; `None`, wenn die Zelle eine Messung ist.
+    fn invalid_arm(&self) -> Option<(Side, Integrity)> {
+        self.tallies()
+            .find(|(_, tally)| !tally.integrity.is_valid())
+            .map(|(side, tally)| (side, tally.integrity))
+    }
+
+    fn is_valid(&self) -> bool {
+        self.invalid_arm().is_none()
+    }
+}
+
+/// Die Zeile einer Zelle aus den Berichten beider Arme.
+///
+/// `direct` ist `None`, wenn der direkte Arm nicht gefahren wurde.
+fn row_of(
+    load: u64,
+    stream: &str,
+    protected: bool,
+    direct: Option<&StreamReport>,
+    governed: &StreamReport,
+) -> Row {
+    Row {
+        load,
+        stream: stream.to_owned(),
+        protected,
+        direct: direct.map(|a| a.coverage.consumer_uncovered_permille()),
+        governed: governed.coverage.consumer_uncovered_permille(),
+        direct_gap_ms: direct.map(|a| a.coverage.longest_gap_ns / 1_000_000),
+        governed_gap_ms: governed.coverage.longest_gap_ns / 1_000_000,
+        direct_samples: direct.map(|a| a.coverage.total),
+        governed_samples: governed.coverage.total,
+        direct_tally: direct.map(|a| Tally::of(a, false)),
+        governed_tally: Tally::of(governed, true),
+    }
+}
+
+/// Der Bericht eines Stroms, oder `absent`, wenn es keinen gibt.
+fn report_of<'a>(
+    reports: &'a [StreamReport],
+    stream: &str,
+    absent: &'a StreamReport,
+) -> &'a StreamReport {
+    reports.iter().find(|r| r.name == stream).unwrap_or(absent)
+}
+
+/// Ein Governor im Prozess, fuer genau einen Lastpunkt.
+struct RunningGateway {
+    address: String,
+    /// Haelt den Scheduler am Leben, bis der Server beendet ist.
+    _handle: vig_gateway::Handle,
+    shutdown: tokio::sync::oneshot::Sender<()>,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl RunningGateway {
+    /// Startet Scheduler und gRPC-Server auf einem freien Port.
+    async fn start(resolved: Arc<vig_config::schema::Resolved>) -> Self {
+        let triton = Arc::new(vig_backend_triton::TritonClient::new(
+            &resolved.backend_endpoint,
+        ));
+        let clock = MonotonicClock::start();
+        let handle =
+            actor::spawn(Arc::clone(&resolved), &triton, clock, &[]).expect("Scheduler startet");
+        let service = GatewayService::new(resolved, triton, handle.clone(), clock);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("Port");
+        let address = listener.local_addr().expect("Adresse").to_string();
+        let (shutdown, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let stream = vig_bench::incoming(listener);
+            let _ = tonic::transport::Server::builder()
+                .initial_stream_window_size(vig_backend_triton::STREAM_WINDOW_BYTES)
+                .initial_connection_window_size(vig_backend_triton::CONNECTION_WINDOW_BYTES)
+                .add_service(
+                    GrpcInferenceServiceServer::new(service)
+                        .max_decoding_message_size(vig_backend_triton::DEFAULT_MAX_MESSAGE_BYTES)
+                        .max_encoding_message_size(vig_backend_triton::DEFAULT_MAX_MESSAGE_BYTES),
+                )
+                .serve_with_incoming_shutdown(stream, async {
+                    let _ = stopped.await;
+                })
+                .await;
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        Self {
+            address,
+            _handle: handle,
+            shutdown,
+            server,
+        }
+    }
+
+    /// Beendet den Server und wartet darauf.
+    async fn stop(self) {
+        let _ = self.shutdown.send(());
+        let _ = self.server.await;
+    }
 }
 
 fn main() {
@@ -319,81 +514,52 @@ async fn run() {
         // Vertraege unterscheiden sich, und ein Scheduler, der mit den
         // Perioden des vorigen Punktes plant, misst etwas anderes als das,
         // was hier steht.
-        let triton = Arc::new(vig_backend_triton::TritonClient::new(
-            &resolved.backend_endpoint,
-        ));
-        let clock = MonotonicClock::start();
-        let handle =
-            actor::spawn(Arc::clone(&resolved), &triton, clock, &[]).expect("Scheduler startet");
-        let service = GatewayService::new(Arc::clone(&resolved), triton, handle.clone(), clock);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("Port");
-        let gateway = listener.local_addr().expect("Adresse").to_string();
-        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-        let server = tokio::spawn(async move {
-            let stream = vig_bench::incoming(listener);
-            let _ = tonic::transport::Server::builder()
-                .initial_stream_window_size(vig_backend_triton::STREAM_WINDOW_BYTES)
-                .initial_connection_window_size(vig_backend_triton::CONNECTION_WINDOW_BYTES)
-                .add_service(
-                    GrpcInferenceServiceServer::new(service)
-                        .max_decoding_message_size(vig_backend_triton::DEFAULT_MAX_MESSAGE_BYTES)
-                        .max_encoding_message_size(vig_backend_triton::DEFAULT_MAX_MESSAGE_BYTES),
-                )
-                .serve_with_incoming_shutdown(stream, async {
-                    let _ = stopped.await;
-                })
-                .await;
-        });
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        let _warm = connect(&gateway).await;
+        let gateway = RunningGateway::start(Arc::clone(&resolved)).await;
+        let _warm = connect(&gateway.address).await;
 
         print!(" Governor …");
-        let governed = drive(&gateway, &defs(true), duration, true).await;
-        let _ = stop.send(());
-        let _ = server.await;
+        let governed = drive(&gateway.address, &defs(true), duration, true).await;
+        gateway.stop().await;
         println!(" fertig");
 
+        // Jede Zelle bekommt eine Zeile, auch ohne Bericht oder ohne
+        // Lieferung. Vorher entschied das Vorhandensein des Berichts, und
+        // `drive` liefert ihn immer — ein geschlossener Port wurde so zu
+        // 1000 ‰ gegen den Governor (R04). Ob die Zeile zaehlt, entscheidet
+        // jetzt `Row::is_valid`; eine fehlende Zelle ist ungueltig, nicht
+        // stillschweigend weg.
+        let absent = StreamReport::not_run("");
         for logical in &resolved.model_names {
-            let Some(b) = governed.iter().find(|r| r.name == logical.as_str()) else {
-                continue;
-            };
-            // Mit beiden Armen gilt eine Zeile nur, wenn beide geliefert
-            // haben — wie bisher. Ohne direkten Arm gibt es nichts zu suchen.
-            let a = match &direct {
-                Some(reports) => match reports.iter().find(|r| r.name == logical.as_str()) {
-                    Some(a) => Some(a),
-                    None => continue,
-                },
-                None => None,
-            };
             let protected = config
                 .models
                 .get(logical)
                 .is_some_and(|m| m.class == "protected");
-            rows.push(Row {
-                load: *load,
-                stream: logical.clone(),
+            rows.push(row_of(
+                *load,
+                logical,
                 protected,
-                direct: a.map(|a| a.coverage.consumer_uncovered_permille()),
-                governed: b.coverage.consumer_uncovered_permille(),
-                direct_gap_ms: a.map(|a| a.coverage.longest_gap_ns / 1_000_000),
-                governed_gap_ms: b.coverage.longest_gap_ns / 1_000_000,
-                direct_samples: a.map(|a| a.coverage.total),
-                governed_samples: b.coverage.total,
-            });
+                direct
+                    .as_deref()
+                    .map(|reports| report_of(reports, logical, &absent)),
+                report_of(&governed, logical, &absent),
+            ));
         }
     }
 
     // --- Bericht -----------------------------------------------------------
     println!("\n  Unabgedeckte Abtastungen aus Verbrauchersicht, je Promille.\n");
-    println!("  Last | Strom            | Klasse      | direkt | Governor | laengste Luecke d/G");
-    println!("  -----|------------------|-------------|--------|----------|--------------------");
+    println!(
+        "  Last | Strom            | Klasse      | direkt | Governor | laengste Luecke d/G \
+         | G geliefert/abgewiesen/Fehler"
+    );
+    println!(
+        "  -----|------------------|-------------|--------|----------|---------------------\
+         |------------------------------"
+    );
     let dash = || "—".to_owned();
     for row in &rows {
         println!(
-            "  {:>3} % | {:<16} | {:<11} | {:>5} ‰ | {:>6} ‰ | {:>6} / {:<6} ms",
+            "  {:>3} % | {:<16} | {:<11} | {:>5} ‰ | {:>6} ‰ | {:>6} / {:<6} ms | {}/{}/{}",
             row.load,
             row.stream,
             if row.protected {
@@ -405,7 +571,33 @@ async fn run() {
             row.governed,
             row.direct_gap_ms.map_or_else(dash, |d| d.to_string()),
             row.governed_gap_ms,
+            row.governed_tally.delivered,
+            row.governed_tally.refused,
+            row.governed_tally.errors,
         );
+    }
+    // Ungueltige Arme einzeln, mit ihren Zaehlern: wer das liest, soll den
+    // Integrationsfehler finden, nicht die Promille deuten.
+    let mut first_invalid = true;
+    for row in &rows {
+        for (side, tally) in row.tallies().filter(|(_, t)| !t.integrity.is_valid()) {
+            if first_invalid {
+                println!();
+                first_invalid = false;
+            }
+            println!(
+                "  UNGUELTIG {} % · {} · {}: {} (gesendet {}, geliefert {}, abgewiesen {}, \
+                 Fehler {})",
+                row.load,
+                row.stream,
+                side.de(),
+                reason_de(tally.integrity),
+                tally.sent,
+                tally.delivered,
+                tally.refused,
+                tally.errors
+            );
+        }
     }
 
     let load_after = foreign_load().await;
@@ -428,19 +620,50 @@ async fn run() {
             }
         }
     }
-    // Ohne Lieferung gibt es kein Urteil, und ein Aufrufer darf das nicht an
-    // einem Exitcode 0 vorbeilesen.
-    if rows.is_empty() {
+    // Ohne gueltige Matrix gibt es kein Urteil, und ein Aufrufer darf das
+    // nicht an einem Exitcode 0 vorbeilesen. Die letzte Zeile auf stderr nennt
+    // den Grund; `vig autotune` gibt genau diese Zeile weiter.
+    if let Some(reason) = inconclusive(&rows) {
+        match reason {
+            Inconclusive::NoCells => {
+                eprintln!("vig-fit: kein Ergebnis, kein Strom hat geliefert");
+            }
+            Inconclusive::InvalidCells { invalid, total, .. } => eprintln!(
+                "vig-fit: kein Ergebnis, {invalid} von {total} Messzellen ungueltig \
+                 (Integrationsfehler, siehe UNGUELTIG)"
+            ),
+        }
         std::process::exit(1);
     }
 }
 
 /// Das Urteil in einem Satz — auch, wenn es negativ ausfaellt.
 fn verdict(rows: &[Row], points: &[u64], arms: Arms) -> String {
-    if rows.is_empty() {
-        return "  Kein Ergebnis: kein Strom hat geliefert. Laeuft das Backend, und \
-                passen die Modellnamen?"
-            .to_owned();
+    match inconclusive(rows) {
+        None => {}
+        Some(Inconclusive::NoCells) => {
+            return "  Kein Ergebnis: kein Strom hat geliefert. Laeuft das Backend, und \
+                    passen die Modellnamen?"
+                .to_owned();
+        }
+        Some(Inconclusive::InvalidCells {
+            invalid,
+            total,
+            load,
+            stream,
+            side,
+            integrity,
+        }) => {
+            return format!(
+                "  Kein Ergebnis: Der Lauf ist nicht auswertbar. {invalid} von {total} \
+                 Messzellen\n  sind ungueltig, zuerst bei {load} % Last, Strom {stream}, \
+                 Arm {}: {}.\n  Das ist ein Integrationsfehler und kein Urteil ueber den \
+                 Governor. Erst Backend,\n  Governor und Modellnamen pruefen, dann neu \
+                 messen.",
+                side.de(),
+                reason_de(integrity)
+            );
+        }
     }
     if arms == Arms::Governed {
         let tuning = governed_only(rows);
@@ -514,6 +737,26 @@ fn scale(config: &Config, load_percent: u64) -> Config {
     scaled
 }
 
+/// Das Ergebnis als JSON.
+///
+/// Neu seit dem Review vom 15.09. (R04), alle bisherigen Felder bleiben:
+///
+/// * je Zelle `valid` — `true` nur, wenn jeder gefahrene Arm eine Messung
+///   ist. Eine ungueltige Zelle ist kein Ergebnis; ihre Promille bedeuten
+///   nichts.
+/// * je Zelle `direct_state` / `governed_state` — `valid`, `not_run` (keine
+///   Verbindung, kein Bericht), `errors` (Transport-, Protokoll- oder
+///   Modellfehler), `no_outcome` (weder Lieferung noch Ablehnung),
+///   `nothing_delivered` (direkt ohne jede Lieferung). `direct_state` ist
+///   `null` ohne direkten Arm.
+/// * je Zelle `{direct,governed}_{sent,delivered,refused,errors}` —
+///   gesendete Requests, Lieferungen, absichtliche Ablehnungen des Governors
+///   und Fehler; die direkten `null` ohne direkten Arm.
+/// * `invalid_cells` — Zahl der ungueltigen Zellen.
+/// * `inconclusive_reason` — `null` bei einem Ergebnis, sonst `no_cells`
+///   oder `invalid_cells`.
+/// * `conclusive` — `true` nur bei mindestens einer Zelle und keiner
+///   ungueltigen. Vorher genuegte eine Zeile.
 fn as_json(
     rows: &[Row],
     points: &[u64],
@@ -525,7 +768,7 @@ fn as_json(
     let cells: Vec<serde_json::Value> = rows
         .iter()
         .map(|r| {
-            serde_json::json!({
+            let mut cell = serde_json::json!({
                 "load_percent": r.load,
                 "stream": r.stream,
                 "protected": r.protected,
@@ -537,9 +780,45 @@ fn as_json(
                 // seine Rauschschwelle.
                 "direct_samples": r.direct_samples,
                 "governed_samples": r.governed_samples,
-            })
+            });
+            // Einzeln eingefuegt statt im Makro: `json!` stoesst bei vielen
+            // Feldern an die Rekursionsgrenze.
+            let direct = r.direct_tally;
+            let governed = r.governed_tally;
+            if let Some(map) = cell.as_object_mut() {
+                let fields = [
+                    ("valid", serde_json::json!(r.is_valid())),
+                    (
+                        "direct_state",
+                        serde_json::json!(direct.map(|t| t.integrity.label())),
+                    ),
+                    (
+                        "governed_state",
+                        serde_json::json!(governed.integrity.label()),
+                    ),
+                    ("direct_sent", serde_json::json!(direct.map(|t| t.sent))),
+                    (
+                        "direct_delivered",
+                        serde_json::json!(direct.map(|t| t.delivered)),
+                    ),
+                    (
+                        "direct_refused",
+                        serde_json::json!(direct.map(|t| t.refused)),
+                    ),
+                    ("direct_errors", serde_json::json!(direct.map(|t| t.errors))),
+                    ("governed_sent", serde_json::json!(governed.sent)),
+                    ("governed_delivered", serde_json::json!(governed.delivered)),
+                    ("governed_refused", serde_json::json!(governed.refused)),
+                    ("governed_errors", serde_json::json!(governed.errors)),
+                ];
+                for (key, value) in fields {
+                    map.insert(key.to_owned(), value);
+                }
+            }
+            cell
         })
         .collect();
+    let inconclusive = inconclusive(rows);
     serde_json::json!({
         "tool": "vig-fit",
         // `governed`: nur der Governor-Arm lief. Dann sind die direkten
@@ -558,19 +837,42 @@ fn as_json(
         // englischen Dokument — ein Urteil, das der Leser nicht lesen kann,
         // ist keines (validierung-autotune.md, Befund 5).
         "verdict_en": verdict_en(rows, points, arms),
-        // Ohne Lieferung gibt es kein Urteil. Das Feld sagt es maschinenlesbar,
-        // damit niemand „kein Strom hat geliefert" als Ergebnis uebernimmt.
-        "conclusive": !rows.is_empty(),
+        // Ohne gueltige Matrix gibt es kein Urteil. Das Feld sagt es
+        // maschinenlesbar, damit niemand „kein Strom hat geliefert" oder eine
+        // Zelle voller Verbindungsfehler als Ergebnis uebernimmt.
+        "conclusive": inconclusive.is_none(),
+        "inconclusive_reason": inconclusive.as_ref().map(Inconclusive::label),
+        "invalid_cells": rows.iter().filter(|r| !r.is_valid()).count(),
     })
     .to_string()
 }
 
 /// Das Urteil auf Englisch, mit denselben Zahlen wie [`verdict`].
 fn verdict_en(rows: &[Row], points: &[u64], arms: Arms) -> String {
-    if rows.is_empty() {
-        return "No result: no stream delivered. Is the backend running, and do the model \
-                names match?"
-            .to_owned();
+    match inconclusive(rows) {
+        None => {}
+        Some(Inconclusive::NoCells) => {
+            return "No result: no stream delivered. Is the backend running, and do the model \
+                    names match?"
+                .to_owned();
+        }
+        Some(Inconclusive::InvalidCells {
+            invalid,
+            total,
+            load,
+            stream,
+            side,
+            integrity,
+        }) => {
+            return format!(
+                "No result: the run is inconclusive. {invalid} of {total} cells are invalid, \
+                 first at {load} % load, stream {stream}, {} arm: {}. That is an integration \
+                 failure, not a verdict on the governor. Check backend, governor and model \
+                 names first, then measure again.",
+                side.en(),
+                reason_en(integrity)
+            );
+        }
     }
     if arms == Arms::Governed {
         let tuning = governed_only(rows);
@@ -702,6 +1004,77 @@ fn governed_only(rows: &[Row]) -> GovernedOnly {
     out
 }
 
+/// Warum ein Lauf kein Ergebnis hat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Inconclusive {
+    /// Keine einzige Zelle.
+    NoCells,
+    /// So viele Zellen sind ungueltig; die erste mit Arm und Grund.
+    InvalidCells {
+        invalid: usize,
+        total: usize,
+        load: u64,
+        stream: String,
+        side: Side,
+        integrity: Integrity,
+    },
+}
+
+impl Inconclusive {
+    /// Das Wort im JSON.
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::NoCells => "no_cells",
+            Self::InvalidCells { .. } => "invalid_cells",
+        }
+    }
+}
+
+/// `None`, wenn die Matrix ein Ergebnis traegt: mindestens eine Zelle, und
+/// jede gueltig.
+///
+/// Bewusst alles oder nichts. Ein Urteil aus den gueltigen Zellen allein
+/// liesse eine fehlende Zelle genau dort, wo der direkte Weg bricht, als
+/// „lohnt sich nicht" erscheinen.
+fn inconclusive(rows: &[Row]) -> Option<Inconclusive> {
+    if rows.is_empty() {
+        return Some(Inconclusive::NoCells);
+    }
+    let (first, (side, integrity)) = rows
+        .iter()
+        .find_map(|row| row.invalid_arm().map(|arm| (row, arm)))?;
+    Some(Inconclusive::InvalidCells {
+        invalid: rows.iter().filter(|r| !r.is_valid()).count(),
+        total: rows.len(),
+        load: first.load,
+        stream: first.stream.clone(),
+        side,
+        integrity,
+    })
+}
+
+fn reason_de(integrity: Integrity) -> String {
+    match integrity {
+        Integrity::Valid => "gueltig".to_owned(),
+        Integrity::NotRun => "keine Verbindung zum Ziel".to_owned(),
+        Integrity::Errors(count) => format!("{count} Transport-, Protokoll- oder Modellfehler"),
+        Integrity::NoOutcome => {
+            "weder eine Lieferung noch eine Ablehnung im Messfenster".to_owned()
+        }
+        Integrity::NothingDelivered => "keine einzige Lieferung".to_owned(),
+    }
+}
+
+fn reason_en(integrity: Integrity) -> String {
+    match integrity {
+        Integrity::Valid => "valid".to_owned(),
+        Integrity::NotRun => "no connection to the target".to_owned(),
+        Integrity::Errors(count) => format!("{count} transport, protocol or model errors"),
+        Integrity::NoOutcome => "neither a delivery nor a refusal within the window".to_owned(),
+        Integrity::NothingDelivered => "not a single delivery".to_owned(),
+    }
+}
+
 fn element_size(datatype: &str) -> u64 {
     match datatype {
         "FP32" | "INT32" | "UINT32" => 4,
@@ -749,7 +1122,25 @@ fn cores(centi: Option<u64>) -> String {
 // `parsed["arms"]` ist hier die Zusicherung, dass das Feld existiert.
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
-    use super::{Arms, Row, as_json, verdict};
+    use super::{
+        Arms, Integrity, Row, RunningGateway, Tally, as_json, report_of, row_of, verdict,
+        verdict_en,
+    };
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use vig_bench::backend::{self, Backend};
+    use vig_bench::workload::{StreamDef, StreamReport, drive};
+    use vig_sim::workload::RuntimeDistribution;
+
+    /// Ein Arm, der alles geliefert hat.
+    const HEALTHY: Tally = Tally {
+        sent: 200,
+        delivered: 200,
+        refused: 0,
+        errors: 0,
+        integrity: Integrity::Valid,
+    };
 
     fn row(load: u64, protected: bool, direct: u64, governed: u64) -> Row {
         Row {
@@ -762,6 +1153,8 @@ mod tests {
             governed_gap_ms: 0,
             direct_samples: Some(200),
             governed_samples: 200,
+            direct_tally: Some(HEALTHY),
+            governed_tally: HEALTHY,
         }
     }
 
@@ -782,6 +1175,7 @@ mod tests {
             direct: None,
             direct_gap_ms: None,
             direct_samples: None,
+            direct_tally: None,
             ..row(load, protected, 0, governed)
         };
         let rows = vec![
@@ -857,5 +1251,175 @@ mod tests {
     #[test]
     fn no_delivery_is_not_a_verdict() {
         assert!(verdict(&[], &[100], Arms::Both).contains("Kein Ergebnis"));
+    }
+
+    fn parse(json: &str) -> serde_json::Value {
+        serde_json::from_str(json).unwrap()
+    }
+
+    /// Das Gegenbeispiel aus dem Review vom 15.09. (R04).
+    ///
+    /// Ein geschlossener Port liefert nichts. Trotzdem stand im JSON eine
+    /// Zelle mit 1000 ‰ und `conclusive: true`, und der Satz nannte das ein
+    /// Ergebnis gegen den Governor — aus einem Integrationsfehler. Die Zeile
+    /// entsteht hier auf demselben Weg wie in `run()`.
+    #[tokio::test]
+    async fn a_run_without_any_delivery_is_not_conclusive() {
+        let defs = [StreamDef {
+            name: "det",
+            model: "det",
+            period: Duration::from_millis(10),
+            max_age: Duration::from_millis(10),
+            in_flight_cap: 1,
+            input: None,
+            text: None,
+            pump: false,
+            burst: None,
+        }];
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        drop(listener);
+        let reports = drive(&endpoint, &defs, Duration::from_millis(100), false).await;
+        assert!(reports.iter().all(|r| r.delivered == 0), "{reports:?}");
+
+        let absent = StreamReport::not_run("");
+        let report = report_of(&reports, "det", &absent);
+        let rows = [row_of(100, "det", true, Some(report), report)];
+        let parsed = parse(&as_json(&rows, &[100], 1, Some(0), Some(0), Arms::Both));
+        assert_eq!(parsed["conclusive"], false, "{parsed}");
+        assert_eq!(parsed["inconclusive_reason"], "invalid_cells", "{parsed}");
+        assert_eq!(parsed["invalid_cells"], 1, "{parsed}");
+
+        let cell = &parsed["cells"][0];
+        assert_eq!(cell["valid"], false, "{cell}");
+        assert_eq!(cell["direct_state"], "not_run", "{cell}");
+        assert_eq!(cell["governed_state"], "not_run", "{cell}");
+        assert_eq!(cell["governed_delivered"], 0, "{cell}");
+        assert_eq!(cell["governed_errors"], 0, "{cell}");
+        // Die bisherigen Felder bleiben fuer bestehende Leser.
+        assert!(cell["governed_uncovered_permille"].is_u64(), "{cell}");
+        assert!(cell["governed_samples"].is_u64(), "{cell}");
+
+        let german = parsed["verdict"].as_str().unwrap();
+        assert!(german.starts_with("Kein Ergebnis"), "{german}");
+        assert!(german.contains("nicht auswertbar"), "{german}");
+        assert!(german.contains("keine Verbindung zum Ziel"), "{german}");
+        assert!(!german.contains("gegen uns"), "{german}");
+        let english = parsed["verdict_en"].as_str().unwrap();
+        assert!(english.starts_with("No result"), "{english}");
+        assert!(english.contains("inconclusive"), "{english}");
+        assert!(!english.contains("against us"), "{english}");
+    }
+
+    /// Eine einzige ungueltige Zelle haelt das ganze Urteil zurueck, auch
+    /// wenn die uebrigen eines tragen wuerden — und auch im
+    /// Abstimmungslauf. Aushungern unter dem Governor dagegen bleibt ein
+    /// Befund.
+    #[test]
+    fn one_invalid_cell_withholds_the_whole_verdict() {
+        let broken = Row {
+            governed_tally: Tally {
+                errors: 3,
+                integrity: Integrity::Errors(3),
+                ..HEALTHY
+            },
+            ..row(110, true, 300, 1000)
+        };
+        let rows = [row(100, true, 10, 8), broken.clone()];
+        let text = verdict(&rows, &[100, 110], Arms::Both);
+        assert!(text.contains("Kein Ergebnis"), "{text}");
+        assert!(text.contains("1 von 2 Messzellen"), "{text}");
+        assert!(text.contains("Arm Governor: 3 Transport-"), "{text}");
+        assert!(!text.contains("gegen uns"), "{text}");
+        assert!(verdict_en(&rows, &[100, 110], Arms::Both).contains("governor arm: 3 transport"));
+
+        let tuning = Row {
+            direct: None,
+            direct_gap_ms: None,
+            direct_samples: None,
+            direct_tally: None,
+            ..broken
+        };
+        let parsed = parse(&as_json(&[tuning], &[110], 10, None, None, Arms::Governed));
+        assert_eq!(parsed["conclusive"], false, "{parsed}");
+        assert!(parsed["cells"][0]["direct_state"].is_null(), "{parsed}");
+        assert!(parsed["cells"][0]["direct_errors"].is_null(), "{parsed}");
+
+        let starved = Row {
+            governed_tally: Tally {
+                delivered: 0,
+                refused: 200,
+                ..HEALTHY
+            },
+            ..row(125, true, 300, 1000)
+        };
+        let parsed = parse(&as_json(&[starved], &[125], 10, None, None, Arms::Both));
+        assert_eq!(parsed["conclusive"], true, "{parsed}");
+        assert_eq!(parsed["cells"][0]["valid"], true, "{parsed}");
+        assert!(parsed["verdict"].as_str().unwrap().contains("gegen uns"));
+    }
+
+    /// Weist der Governor unter Last Frames ab, ist die Zelle gueltig: ein
+    /// Ergebnis ueber das Scheduling, kein Integrationsfehler.
+    ///
+    /// Ein Slot, 30 ms je Inferenz, ein Takt von 20 ms: 150 % Last. Die
+    /// Ablehnungen kommen vom echten Gateway ueber den Draht, mit dem Grund
+    /// im Metadatum.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refusals_under_load_keep_the_cell_valid() {
+        let runtime = vig_core::Duration::from_millis(30).unwrap();
+        let backend = Arc::new(Backend::new(
+            1,
+            HashMap::from([(
+                "det_main".to_owned(),
+                RuntimeDistribution::constant(runtime),
+            )]),
+            7,
+        ));
+        let endpoint = backend::start(Arc::clone(&backend)).await;
+        let yaml = format!(
+            "version: 1\nbackend:\n  type: triton\n  grpc_endpoint: {endpoint}\n  slots: 1\n  \
+             pipelining_depth: 0\nmodels:\n  det:\n    class: protected\n    queue: {{ policy: latest, \
+             capacity: 1 }}\n    contract: {{ period_ms: 20, deadline_ms: 40, max_age_ms: 40 }}\n    variants:\n      \
+             - id: main\n        backend_model: det_main\n        quality: {{ value: 1.0, \
+             source: measured }}\n        profile: {{ p50_us: 30000, p95_us: 30000, p99_us: \
+             30000, samples: 2000 }}\n"
+        );
+        let resolved = Arc::new(
+            vig_config::Config::from_yaml(&yaml)
+                .unwrap()
+                .resolve()
+                .unwrap(),
+        );
+        let gateway = RunningGateway::start(resolved).await;
+        let defs = [StreamDef {
+            name: "det",
+            model: "det",
+            period: Duration::from_millis(20),
+            max_age: Duration::from_millis(40),
+            in_flight_cap: 4,
+            input: None,
+            text: None,
+            pump: false,
+            burst: None,
+        }];
+        let reports = drive(&gateway.address, &defs, Duration::from_millis(1_500), true).await;
+        gateway.stop().await;
+
+        let absent = StreamReport::not_run("");
+        let report = report_of(&reports, "det", &absent);
+        assert!(report.connected, "{report:?}");
+        assert!(report.refused > 0, "keine Ablehnung unter Last: {report:?}");
+        assert_eq!(report.errors, 0, "{report:?}");
+        assert_eq!(report.rejected, report.refused, "{report:?}");
+
+        let rows = [row_of(150, "det", true, None, report)];
+        let parsed = parse(&as_json(&rows, &[150], 1, None, None, Arms::Governed));
+        assert_eq!(parsed["conclusive"], true, "{parsed}");
+        let cell = &parsed["cells"][0];
+        assert_eq!(cell["valid"], true, "{cell}");
+        assert_eq!(cell["governed_state"], "valid", "{cell}");
+        assert!(cell["governed_refused"].as_u64().unwrap() > 0, "{cell}");
+        assert_eq!(cell["governed_errors"], 0, "{cell}");
     }
 }
