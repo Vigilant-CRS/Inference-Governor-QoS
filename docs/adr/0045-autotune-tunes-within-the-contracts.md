@@ -63,8 +63,16 @@ Aus den Zellen, je Promille unabgedeckter Abtastungen aus Verbrauchersicht:
 
 - **`protected_worst`** — ueber alle Lastpunkte das Maximum des schlechtesten
   geschuetzten Stroms.
-- **`background_mean`** — je Lastpunkt der schlechteste nicht geschuetzte
-  Strom, gemittelt ueber die Lastpunkte (abgerundet; null, wo es keinen gibt).
+- **`background_mean`** — je Lastpunkt der Mittelwert der nicht geschuetzten
+  Stroeme, gemittelt ueber die Lastpunkte (abgerundet; null, wo es keinen gibt).
+
+**Nachtrag 15.09., nach dem ersten Lauf auf Hardware:** Die erste Fassung nahm
+je Lastpunkt den *schlechtesten* nicht geschuetzten Strom. Auf dem Laptop stand
+darin in allen sechs Fassungen der unteilbare 95-ms-Block bei 1000 ‰ — er passt
+neben einer 33-ms-Periode nie (ADR-0012) —, waehrend `pose` und `depth` zwischen
+0 und 3 ‰ lagen. Als Maximum haette dieser eine unerfuellbare Strom jede
+Verbesserung der anderen verdeckt; das Tuning konnte dort gar nichts gewinnen.
+Der Mittelwert laesst ihn mitzaehlen, aber nicht alles andere zudecken.
 
 Die geschuetzten Stroeme gehen vor. Das ist keine Wahl dieses Werkzeugs,
 sondern die Policy, die der Betreiber mit `class: protected` getroffen hat.

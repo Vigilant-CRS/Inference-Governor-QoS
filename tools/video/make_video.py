@@ -225,7 +225,7 @@ def attach_sources(scenes, runtime: Path) -> None:
     Die Messprotokolle liegen neben dem Repository, nicht darin.
     """
     for scene in scenes:
-        if scene.source in ("run", "doctor", "autotune"):
+        if scene.source in ("run", "doctor", "autotune", "tuned"):
             relative = Path(script.SOURCES[scene.source]).relative_to(runtime.name)
             scene.data["path"] = str(runtime / relative)
             # Manche Protokollverzeichnisse tragen kein Datum im Namen; dann

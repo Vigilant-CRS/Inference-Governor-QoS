@@ -723,16 +723,63 @@ def devices(scene, progress: float) -> Image.Image:
         draw.text((x + pad, 428), device["backend"], font=font(SANS, 27), fill=DIM)
         draw.line([(x + pad, 490), (x + width - pad, 490)], fill=FAINT, width=2)
         draw.text((x + pad, 516), "vig autotune", font=font(MONO, 26), fill=ACCENT)
-        draw.text((x + pad, 564), f"{summary['series']} series usable",
-                  font=font(SANS, 28), fill=TEXT)
-        y = 620
-        colour = OK if summary["worth"] else TEXT
-        for line in wrap(draw, summary["answer"], answer_font, width - 2 * pad):
-            draw.text((x + pad, y), line, font=answer_font, fill=colour)
-            y += 40
+        y = 566
+        for line in summary["lines"]:
+            for part in wrap(draw, line, answer_font, width - 2 * pad):
+                draw.text((x + pad, y), part, font=answer_font, fill=TEXT)
+                y += 40
+            y += 8
         x += width + gap
-    footnote(draw, "numbers read from qualification.json of "
+    footnote(draw, "read from qualification.json and measured.yaml of "
                    + ", ".join(Path(p).parent.name for p in scene.data["paths"]))
+    return image
+
+
+def tuning(scene, progress: float) -> Image.Image:
+    """Was `vig autotune` eingestellt hat: jede probierte Einstellung und ihr Ergebnis.
+
+    Alle Zahlen aus `qualification.json` des genannten Laufs (report.tuning_summary).
+    """
+    path = Path(scene.data["path"])
+    t = report.tuning_summary(path)
+    image = base()
+    draw = ImageDraw.Draw(image)
+    kicker(draw, "vig autotune tunes the governor")
+    headline(draw, "It tries the settings on your machine and keeps what helps.",
+             y=112, size=46)
+    top, left = 250, 130
+    rows = t["rows"]
+    height = 70 + 52 * (len(rows) + 1) + 20
+    _panel(draw, top, height, f"vig autotune · tune  ·  {report.source_label(path)}")
+    y = top + 72
+    head = font(SANS_BOLD, 24)
+    for x, label, anchor in ((left + 30, "setting tried", "la"),
+                             (1150, "protected, worst", "ra"),
+                             (1450, "lower-priority", "ra"),
+                             (1740, "decision", "ra")):
+        draw.text((x, y), label, font=head, fill=DIM, anchor=anchor)
+    y += 52
+    shown = int(min(len(rows), 1 + progress * (len(rows) + 2)))
+    body = font(MONO, 26)
+    for change, protected, background, decision in rows[:shown]:
+        colour = OK if decision == "kept" else (DIM if decision != "baseline" else TEXT)
+        draw.text((left + 30, y), change[:48], font=body, fill=colour)
+        draw.text((1150, y), protected, font=body, fill=colour, anchor="ra")
+        draw.text((1450, y), background, font=body, fill=colour, anchor="ra")
+        draw.text((1740, y), decision, font=body, fill=colour, anchor="ra")
+        y += 52
+    below = top + height + 30
+    if progress > 0.5:
+        (up, ub), (tp, tb) = t["untuned"], t["tuned"]
+        if t["improved"] and t["applied"]:
+            text = (f"protected streams miss at worst {tp} ‰ instead of {up} ‰ "
+                    f"· lower-priority {tb} ‰ instead of {ub} ‰")
+            colour = OK
+        else:
+            text = "the measured configuration was already the best setting tried"
+            colour = TEXT
+        draw.text((left, below), text, font=font(SANS_BOLD, 32), fill=colour)
+    _source(draw, path, below + 56, treatment="shown unchanged")
     return image
 
 
@@ -749,6 +796,7 @@ RENDERERS = {
     "autotune": autotune,
     "capabilities": capabilities,
     "trend": trend,
+    "tuning": tuning,
     "devices": devices,
     "terminal_doctor": terminal_doctor,
     "close": close,
@@ -758,7 +806,7 @@ RENDERERS = {
 #: stehen gelassen — das spart Platz und Zeit, ohne dass man es sieht.
 ANIMATED = {"title", "timeline_fifo", "stale", "timeline_governor", "usecases",
             "terminal_run", "price", "limits", "autotune", "terminal_doctor",
-            "capabilities", "devices", "trend",
+            "capabilities", "devices", "trend", "tuning",
             "close", "short_tail"}
 
 

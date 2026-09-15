@@ -146,9 +146,15 @@ impl Evaluation {
     /// Die Zielgroesse; `None` ohne einen einzigen Lastpunkt.
     ///
     /// `protected_worst` ist der schlechteste geschuetzte Strom am
-    /// schlechtesten Lastpunkt, `background_mean` der schlechteste nachrangige
-    /// Strom je Lastpunkt, gemittelt ueber die Lastpunkte (abgerundet; null,
-    /// wo es keinen nachrangigen Strom gibt).
+    /// schlechtesten Lastpunkt, `background_mean` der Mittelwert der
+    /// nachrangigen Stroeme je Lastpunkt, gemittelt ueber die Lastpunkte
+    /// (abgerundet; null, wo es keinen nachrangigen Strom gibt).
+    ///
+    /// Mittelwert und nicht der schlechteste nachrangige Strom: Im Laptoplauf
+    /// vom 15.09. stand ein unteilbarer 95-ms-Block in jeder Fassung bei
+    /// 1000 ‰, weil er neben einer 33-ms-Periode nie passt (ADR-0012). Als
+    /// Maximum verdeckte er jede Verbesserung der anderen nachrangigen Stroeme
+    /// — das Tuning haette dort nie etwas gewinnen koennen.
     pub(crate) fn objective(&self) -> Option<Objective> {
         if self.points.is_empty() {
             return None;
@@ -156,17 +162,24 @@ impl Evaluation {
         let mut protected_worst = 0_u64;
         let mut background_sum = 0_u64;
         for point in &self.points {
-            let worst = |protected: bool| {
-                point
-                    .streams
-                    .iter()
-                    .filter(|s| s.protected == protected)
-                    .map(|s| s.governed_permille)
-                    .max()
-                    .unwrap_or(0)
-            };
-            protected_worst = protected_worst.max(worst(true));
-            background_sum = background_sum.saturating_add(worst(false));
+            let protected = point
+                .streams
+                .iter()
+                .filter(|s| s.protected)
+                .map(|s| s.governed_permille)
+                .max()
+                .unwrap_or(0);
+            let (sum, count) = point.streams.iter().filter(|s| !s.protected).fold(
+                (0_u64, 0_u64),
+                |(sum, count), s| {
+                    (
+                        sum.saturating_add(s.governed_permille),
+                        count.saturating_add(1),
+                    )
+                },
+            );
+            protected_worst = protected_worst.max(protected);
+            background_sum = background_sum.saturating_add(sum.checked_div(count).unwrap_or(0));
         }
         let count = u64::try_from(self.points.len()).unwrap_or(u64::MAX);
         Some(Objective {
@@ -917,8 +930,8 @@ pub(crate) fn markdown(tuning: &Tuning, out: &mut String) {
         out,
         "\nEvery setting ran through `vig-fit` with the governor arm only, at {} % load ({} % \
          with `--quick`), and the numbers are uncovered samples from the consumer's view. *Protected worst* is the \
-         worst protected stream at the worst load point; *lower-priority mean* is the worst \
-         lower-priority stream per load point, averaged over the load points. Only the \
+         worst protected stream at the worst load point; *lower-priority mean* is the mean \
+         over the lower-priority streams per load point, averaged over the load points. Only the \
          governor's own settings were tried — contracts, models and `backend.slots` are never \
          changed. The search is **one pass** over the settings in a fixed order (coordinate \
          descent): a setting is not tried again after a later one changed, so this is the best \
@@ -1068,4 +1081,56 @@ pub(crate) fn from_json(value: &serde_json::Value) -> Option<Tuning> {
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned),
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::{Evaluation, LoadPoint, StreamMiss};
+
+    /// Ein unerfuellbarer nachrangiger Strom darf keine Verbesserung verdecken.
+    ///
+    /// Der Laptoplauf vom 15.09.: Der 95-ms-Block stand in jeder Fassung bei
+    /// 1000 ‰. Als schlechtester nachrangiger Strom gezaehlt, war eine Fassung,
+    /// die `pose` von 200 auf 0 ‰ bringt, von der ungetunten nicht zu
+    /// unterscheiden.
+    #[test]
+    fn an_unservable_lower_priority_stream_does_not_hide_an_improvement() {
+        let point = |pose: u64| LoadPoint {
+            load_percent: 110,
+            streams: vec![
+                StreamMiss {
+                    stream: "detector".to_owned(),
+                    protected: true,
+                    governed_permille: 0,
+                },
+                StreamMiss {
+                    stream: "pose".to_owned(),
+                    protected: false,
+                    governed_permille: pose,
+                },
+                StreamMiss {
+                    stream: "vlm".to_owned(),
+                    protected: false,
+                    governed_permille: 1000,
+                },
+            ],
+        };
+        let untuned = Evaluation {
+            points: vec![point(200)],
+        }
+        .objective()
+        .unwrap();
+        let tuned = Evaluation {
+            points: vec![point(0)],
+        }
+        .objective()
+        .unwrap();
+        assert_eq!(untuned.background_mean, 600, "(200 + 1000) / 2");
+        assert_eq!(tuned.background_mean, 500, "(0 + 1000) / 2");
+        assert!(
+            tuned.background_mean < untuned.background_mean,
+            "die Verbesserung von pose muss in der Zielgroesse ankommen"
+        );
+    }
 }

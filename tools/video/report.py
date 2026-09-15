@@ -260,30 +260,69 @@ _NOT_WORTH = ("not worth it", "lohnt sich der")
 
 
 def device_summary(path: Path) -> dict:
-    """Serienzahl und Urteil eines `vig autotune`-Laufs, fuer die Geraeteszene.
+    """Was `vig autotune` auf einem Geraet gemessen und eingestellt hat.
 
-    Gelesen werden nur `series` und die Zahlen im Urteil. Ein Urteil, das
-    weder „lohnt sich nicht" noch einen Lastpunkt mit vier Promillezahlen
-    traegt, bricht den Bau ab, statt ein Geraet mit erfundener Aussage zu
-    zeigen.
+    Gelesen werden `series` aus `qualification.json` und die Struktur der
+    eingefrorenen `measured.yaml` daneben: Slots, serialisierte Paare,
+    Interferenzeintraege, Modelle. **Kein Urteil**: „lohnt sich" haengt an der
+    Last, die man dem Werkzeug gibt, nicht am Geraet — ein Urteil ohne seine
+    Last waere in einem Geraetebild eine falsche Aussage. Fehlt ein Feld,
+    bricht der Bau ab.
     """
+    import yaml
     data = json.loads(path.read_text(encoding="utf-8"))
     series = data.get("series") or {}
     qualified, discarded = series.get("qualified"), series.get("discarded")
     if qualified is None or discarded is None:
         raise SystemExit(f"{path}: series.qualified/discarded fehlen")
-    verdict = data.get("fit_verdict") or ""
-    if not verdict.strip():
-        raise SystemExit(f"{path}: kein fit_verdict — ohne Urteil kein Geraetebild")
-    if any(phrase in verdict for phrase in _NOT_WORTH):
-        answer, worth = "not needed on this load", False
-    else:
-        load = _LOAD.search(verdict)
-        numbers = fit_numbers(verdict, path)
-        if load is None or numbers is None:
-            raise SystemExit(f"{path}: Urteil ohne Lastpunkt oder Zahlen")
-        answer = (f"from {load.group(1)} % load: protected stream misses "
-                  f"{numbers[0]} → {numbers[1]} ‰")
-        worth = True
-    return {"series": f"{qualified} of {qualified + discarded}",
-            "answer": assert_english(answer, path), "worth": worth}
+    config_path = path.parent / "measured.yaml"
+    if not config_path.is_file():
+        raise SystemExit(f"{config_path}: fehlt — ohne Konfiguration kein Geraetebild")
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    backend = config.get("backend") or {}
+    models = config.get("models") or {}
+    def count(n: int, one: str, many: str) -> str:
+        return f"{n} {one if n == 1 else many}"
+    slots = int(backend.get("slots", 1))
+    pairs = len(backend.get("no_corun") or [])
+    entries = len(backend.get("interference") or [])
+    lines = [
+        f"{count(len(models), 'model', 'models')} measured, "
+        f"{qualified} of {qualified + discarded} series usable",
+        f"{count(slots, 'slot', 'slots')} · {count(pairs, 'serialised pair', 'serialised pairs')}",
+        count(entries, "interference entry", "interference entries"),
+    ]
+    return {"lines": [assert_english(line, path) for line in lines]}
+
+
+# ------------------------------------------------------------ Tuning-Szene --
+
+def tuning_summary(path: Path) -> dict:
+    """Der Tuning-Schritt eines `vig autotune`-Laufs, fuer das Bild.
+
+    Gelesen wird `tuning` aus `qualification.json`: ungetunt gegen getunt und
+    jede probierte Einstellung mit ihrer Entscheidung. Fehlt der Abschnitt,
+    bricht der Bau ab — ein Tuning-Bild ohne Tuning-Lauf waere eine Behauptung.
+    """
+    data = json.loads(path.read_text(encoding="utf-8"))
+    tuning = data.get("tuning")
+    if not tuning:
+        raise SystemExit(f"{path}: kein Abschnitt 'tuning' — Lauf ohne tune-Schritt?")
+    def objective(value):
+        if not value:
+            return None
+        return (value["protected_worst_permille"], value["background_mean_permille"])
+    untuned, tuned = objective(tuning.get("untuned")), objective(tuning.get("tuned"))
+    if untuned is None or tuned is None:
+        raise SystemExit(f"{path}: tuning.untuned/tuned fehlen")
+    rows = []
+    for candidate in tuning.get("candidates", []):
+        o = objective(candidate.get("objective"))
+        rows.append((assert_english(candidate.get("change") or "untuned", path),
+                     "—" if o is None else f"{o[0]} ‰",
+                     "—" if o is None else f"{o[1]} ‰",
+                     candidate.get("decision", "?")))
+    return {"untuned": untuned, "tuned": tuned, "improved": bool(tuning.get("improved")),
+            "applied": bool(tuning.get("applied")), "rows": rows,
+            "series": data.get("series") or {}}
+

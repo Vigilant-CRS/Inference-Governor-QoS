@@ -5,6 +5,19 @@ bedeutet, steht in [docs/releases.md](docs/releases.md).
 
 ## [Unveroeffentlicht]
 
+### Behoben (nach dem ersten Tuning-Lauf auf Hardware)
+
+- **Ein unerfuellbarer nachrangiger Strom verdeckte jede Verbesserung.** Die
+  Zielgroesse des Tuning-Schritts nahm je Lastpunkt den *schlechtesten* nicht
+  geschuetzten Strom. Auf dem Laptop stand darin in allen sechs Fassungen der
+  unteilbare 95-ms-Block bei 1000 ‰ (er passt neben einer 33-ms-Periode nie,
+  ADR-0012), waehrend `pose` und `depth` bei 0 bis 3 ‰ lagen — das Tuning
+  haette dort nie etwas gewinnen koennen. Jetzt zaehlt der Mittelwert der
+  nicht geschuetzten Stroeme je Lastpunkt; ein Regressionstest haelt den Fall
+  fest. Das Ergebnis des Laptoplaufs aendert das nicht (die gemessene
+  Konfiguration war dort schon die beste), wohl aber jede Last, auf der ein
+  nachrangiger Strom zu retten ist.
+
 ### Hinzugefuegt
 
 - **`vig autotune` stellt den Governor ein, statt ihn nur zu beurteilen**

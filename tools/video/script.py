@@ -41,6 +41,8 @@ SOURCES = {
     "run": "InferenceQoS-runtime/messungen/gate-m3-r03/gate-r1.txt",
     "doctor": "InferenceQoS-runtime/messungen/measure-nachlauf-2026-09-11e/pre4-doctor.txt",
     "autotune": "InferenceQoS-runtime/messungen/autotune-laptop-2026-09-15f/qualification.json",
+    # Der Tuning-Lauf mit dem Stand, der autotune den tune-Schritt gibt.
+    "tuned": "InferenceQoS-runtime/messungen/autotune-laptop-2026-09-15-tuned/qualification.json",
     "devices": ", ".join(f"InferenceQoS-runtime/messungen/{d['run']}/qualification.json"
                          for d in DEVICES),
 }
@@ -181,9 +183,9 @@ SCENES = [
             "configuration that serves your protected streams best. And if your "
             "load does not need a governor, it tells you that too."
         ),
-        visual="autotune",
+        visual="tuning",
         chapter="vig autotune: tuned for your machine",
-        source="autotune",
+        source="tuned",
         pause=0.8,
     ),
     Scene(
@@ -270,8 +272,8 @@ PROMO_SCENES = [
             "And vig autotune tunes it for your machine, in one command, against "
             "your own contracts."
         ),
-        visual="autotune",
-        source="autotune",
+        visual="tuning",
+        source="tuned",
         pause=0.6,
     ),
     Scene(
