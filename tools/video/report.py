@@ -250,3 +250,39 @@ def fit_numbers(verdict: str, path: Path) -> tuple[str, str, str, str] | None:
         raise SystemExit(f"{path}: fit_verdict traegt {len(found)} Promillezahlen "
                          "statt vier — Format von vig-fit geaendert?")
     return found[0], found[1], found[2], found[3]
+
+
+# ------------------------------------------------------------ Geraeteszene --
+
+_LOAD = re.compile(r"(?:From|Ab) (\d+) %")
+_NOT_WORTH = ("not worth it", "lohnt sich der")
+
+
+def device_summary(path: Path) -> dict:
+    """Serienzahl und Urteil eines `vig autotune`-Laufs, fuer die Geraeteszene.
+
+    Gelesen werden nur `series` und die Zahlen im Urteil. Ein Urteil, das
+    weder „lohnt sich nicht" noch einen Lastpunkt mit vier Promillezahlen
+    traegt, bricht den Bau ab, statt ein Geraet mit erfundener Aussage zu
+    zeigen.
+    """
+    data = json.loads(path.read_text(encoding="utf-8"))
+    series = data.get("series") or {}
+    qualified, discarded = series.get("qualified"), series.get("discarded")
+    if qualified is None or discarded is None:
+        raise SystemExit(f"{path}: series.qualified/discarded fehlen")
+    verdict = data.get("fit_verdict") or ""
+    if not verdict.strip():
+        raise SystemExit(f"{path}: kein fit_verdict — ohne Urteil kein Geraetebild")
+    if any(phrase in verdict for phrase in _NOT_WORTH):
+        answer, worth = "not needed on this load", False
+    else:
+        load = _LOAD.search(verdict)
+        numbers = fit_numbers(verdict, path)
+        if load is None or numbers is None:
+            raise SystemExit(f"{path}: Urteil ohne Lastpunkt oder Zahlen")
+        answer = (f"from {load.group(1)} % load: protected stream misses "
+                  f"{numbers[0]} → {numbers[1]} ‰")
+        worth = True
+    return {"series": f"{qualified} of {qualified + discarded}",
+            "answer": assert_english(answer, path), "worth": worth}

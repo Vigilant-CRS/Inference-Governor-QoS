@@ -1,0 +1,133 @@
+WEBVTT
+
+00:00.000 --> 00:02.978
+Your GPU is working flat out, and part of that
+
+00:02.978 --> 00:06.409
+work is on frames your robot has already thrown away.
+
+00:07.209 --> 00:11.419
+A robot camera gives you a frame every thirty-three milliseconds.
+
+00:11.419 --> 00:13.233
+Your detector needs fifteen.
+
+00:13.233 --> 00:16.536
+That fits, until something else wants the same GPU.
+
+00:16.536 --> 00:20.227
+Now the detector waits behind a block it cannot interrupt
+
+00:20.227 --> 00:24.372
+and by the time its answer arrives, the robot has already moved.
+
+00:25.072 --> 00:27.663
+Vigilant sits in front of your inference
+
+00:27.663 --> 00:30.967
+server and asks one question before every dispatch:
+
+00:30.967 --> 00:34.400
+will this result still be useful when it is finished?
+
+00:34.400 --> 00:38.027
+Work that cannot be is dropped before it costs anything.
+
+00:38.027 --> 00:39.776
+Same protocol, same models.
+
+00:39.776 --> 00:42.432
+In your client, only the address changes.
+
+00:43.132 --> 00:47.185
+Four decisions, all made before a request reaches the GPU.
+
+00:47.185 --> 00:51.238
+A newer frame replaces an older one that is still waiting.
+
+00:51.238 --> 00:54.662
+Work that would finish too late is never started.
+
+00:54.662 --> 00:58.506
+A long background job waits when protected work is due.
+
+00:58.506 --> 01:02.768
+And when time runs short, a smaller model variant takes over.
+
+01:03.468 --> 01:07.795
+It is built for machines where several models share one accelerator.
+
+01:07.795 --> 01:11.867
+A humanoid robot, whose vision must not wait behind its planner.
+
+01:11.867 --> 01:14.540
+Or driver assistance, with several cameras
+
+01:14.540 --> 01:17.403
+and a slower scene analysis on the same chip.
+
+01:18.103 --> 01:20.843
+Measured against a tuned Triton on the same GPU
+
+01:20.843 --> 01:24.865
+with a real detector and a background job that cannot be interrupted:
+
+01:24.865 --> 01:27.372
+the detector answers in time in ninety-nine
+
+01:27.372 --> 01:30.229
+percent of control cycles instead of eighty-five.
+
+01:30.229 --> 01:32.152
+Twenty times fewer missed cycles.
+
+01:32.952 --> 01:35.194
+And it is not tied to one machine.
+
+01:35.194 --> 01:39.018
+The same governor runs in front of Triton on an NVIDIA GPU
+
+01:39.018 --> 01:43.896
+and in front of TensorFlow Lite on the Adreno GPUs of two Android devices.
+
+01:43.896 --> 01:48.907
+On each of them, vig autotune measured the hardware and gave its own answer.
+
+01:49.707 --> 01:52.067
+You do not have to take our numbers.
+
+01:52.067 --> 01:55.543
+One command, vig autotune, measures your own machine:
+
+01:55.543 --> 01:57.903
+runtimes, concurrency, interference.
+
+01:57.903 --> 02:02.165
+It freezes a configuration and answers the question that matters:
+
+02:02.165 --> 02:06.886
+is the governor worth it here? On this laptop, above ninety percent load
+
+02:06.886 --> 02:11.738
+the protected stream goes from missing almost every cycle to missing none.
+
+02:11.738 --> 02:15.148
+And where you do not need it, it tells you that too.
+
+02:15.948 --> 02:19.165
+Point it at the inference server you already run.
+
+02:19.165 --> 02:23.169
+Same protocol, same models, and your client changes one line.
+
+02:23.169 --> 02:27.305
+Free for evaluation, and for up to three devices in production.
+
+02:28.005 --> 02:30.605
+Faster GPUs compute the past faster.
+
+02:30.605 --> 02:32.628
+Vigilant stops computing it.
+
+02:32.628 --> 02:38.189
+Run vig autotune on the machine you already have, and let the numbers decide.

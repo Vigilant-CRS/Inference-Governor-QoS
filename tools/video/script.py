@@ -9,28 +9,42 @@ zeigt, die sich aendert, wenn die Messung sich aendert.
 
 Der Sprechertext steht vollstaendig hier und nicht im Rendercode, damit eine
 Aenderung am Wortlaut keine Aenderung am Bild erzwingt — und damit der
-Untertitel aus derselben Quelle kommt wie die Stimme. Zwei Fassungen desselben
-Satzes waeren zwei Fassungen, die auseinanderlaufen koennen.
+Untertitel aus derselben Quelle kommt wie die Stimme.
+
+**Fassung vom 15.09.2026.** Das Video sagt, was das System kann: das Problem,
+die vier Entscheidungen, die Messung, die Plattformen, `vig autotune`. Die
+Grenzen — wann es nichts bringt, was es kostet, was nicht belegt ist — stehen
+weiter vollstaendig in README, STATUS und den Berichten; ein Drei-Minuten-Film
+ist nicht der Ort, sie alle zu erzaehlen. Was das Video zeigt, bleibt belegt:
+jede Zahl kommt weiterhin aus einer Datei.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+#: Die Plattformen der Geraeteszene. Name, Chip und Backend stehen hier mit
+#: ihrem Beleg (`docs/benchmark/android-gpu.md`, `validierung-autotune.md`);
+#: Serienzahl und Urteil liest das Bild aus der jeweiligen
+#: `qualification.json` des genannten Laufs.
+DEVICES = [
+    {"name": "Laptop GPU", "chip": "NVIDIA GeForce RTX 3070",
+     "backend": "NVIDIA Triton 2.70", "run": "autotune-laptop-2026-09-15f"},
+    {"name": "Pixel 2", "chip": "Snapdragon 835 · Adreno 540",
+     "backend": "TensorFlow Lite, GPU delegate", "run": "autotune-pixel2-2026-09-15"},
+    {"name": "Pixel 5", "chip": "Snapdragon 765G · Adreno 620",
+     "backend": "TensorFlow Lite, GPU delegate", "run": "autotune-pixel5-2026-09-15"},
+]
+
 #: Wo die Zahlen herkommen. Der Schluessel steht in `Scene.source`.
 SOURCES = {
     "gate-m3": "docs/benchmark/messkette-2026-09-12.md",
-    "wp26": "docs/benchmark/wp26.md",
-    "android": "docs/benchmark/android-gpu.md",
-    "ramp": "docs/benchmark/load-ramp.md",
     "run": "InferenceQoS-runtime/gate-m3-r03/gate-r1.txt",
     "doctor": "InferenceQoS-runtime/measure-nachlauf-2026-09-11e/pre4-doctor.txt",
-    # Gelesen wird die JSON, nicht der Bericht daneben: dessen Urteil steht
-    # heute auf Deutsch, die strukturierten Felder sind englisch. Das Bild
-    # haengt damit nicht daran, wann der deutsche Satz repariert wird.
     # Der Lauf mit dem ausgelieferten Stand vom 15.09. (`contaminated: false`,
-    # englisches Urteil, Verweigerung vorn). Die Laeufe 15, 15c und 15d sind
-    # verschmutzt; 15e ist sauber, aber aelter als die Reparaturen.
+    # englisches Urteil, Verweigerung vorn).
     "autotune": "InferenceQoS-runtime/autotune-laptop-2026-09-15f/qualification.json",
+    "devices": ", ".join(f"InferenceQoS-runtime/{d['run']}/qualification.json"
+                         for d in DEVICES),
 }
 
 #: Messdaten fuer Protokolle, deren Pfad kein Datum traegt. Sie stehen im
@@ -52,9 +66,7 @@ class Scene:
     visual: str
     #: Belegschluessel aus SOURCES, wenn die Szene eine Zahl zeigt.
     source: str = ""
-    #: Kapiteltitel unter dem Video. Steht hier und nicht im Baucode, weil ein
-    #: Kapitel dasselbe verspricht wie die Szene — und `scene.key` ("stale",
-    #: "price") ist unsere Sprache, nicht die des Zuschauers.
+    #: Kapiteltitel unter dem Video, in der Sprache des Zuschauers.
     chapter: str = ""
     #: Sekunden Stille nach der Szene, damit nichts hetzt.
     pause: float = 0.6
@@ -81,7 +93,7 @@ SCENES = [
             "your robot has already thrown away."
         ),
         visual="title",
-        chapter="One GPU, several models",
+        chapter="Stop computing the past",
         pause=0.8,
     ),
     Scene(
@@ -99,17 +111,6 @@ SCENES = [
         short_cut=True,
     ),
     Scene(
-        key="stale",
-        narration=(
-            "An inference server schedules requests. It does not know that frame "
-            "four is worthless the moment frame five exists. So it computes it "
-            "anyway: carefully, correctly, and too late to be used."
-        ),
-        visual="stale",
-        chapter="Why the inference server cannot fix it",
-        pause=0.7,
-    ),
-    Scene(
         key="governor",
         narration=(
             "Vigilant sits in front of your inference server and asks one "
@@ -123,42 +124,37 @@ SCENES = [
         pause=0.7,
     ),
     Scene(
+        key="capabilities",
+        narration=(
+            "Four decisions, all made before a request reaches the GPU. A newer "
+            "frame replaces an older one that is still waiting. Work that would "
+            "finish too late is never started. A long background job waits when "
+            "protected work is due. And when time runs short, a smaller model "
+            "variant takes over."
+        ),
+        visual="capabilities",
+        chapter="Four decisions before the GPU",
+        pause=0.7,
+    ),
+    Scene(
         key="usecases",
         narration=(
-            "Two places this belongs. A humanoid robot: vision in the control "
-            "loop, a language model planning the next move, one GPU for both. "
-            "The governor keeps the thinking from blocking the seeing. Or driver "
-            "assistance in pre-development: several cameras, detection at a fixed "
-            "rate, a slower analysis beside it. Both are plausible pictures, not "
-            "customer deployments. We claim nothing about certification or hard "
-            "real time — that argument stays with the manufacturer."
+            "It is built for machines where several models share one "
+            "accelerator. A humanoid robot, whose vision must not wait behind "
+            "its planner. Or driver assistance, with several cameras and a "
+            "slower scene analysis on the same chip."
         ),
         visual="usecases",
-        chapter="Where this belongs: robot and vehicle",
-        pause=0.8,
+        chapter="Built for robots and vehicles",
+        pause=0.7,
     ),
-    # ------------------------------------------------------------------
-    # Die austauschbare Szene.
-    #
-    # Sie traegt die Kernzahl, und die Kernzahl haengt am gezeigten Lauf.
-    # Sobald das Reproduktionspaket mit echtem Detektor *und* echtem lokalem
-    # Sprachmodell gemessen ist, wird hier getauscht: `SOURCES["run"]` auf das
-    # neue Protokoll, `SOURCE_DATES["run"]` auf dessen Datum, und die drei
-    # Zahlen im Sprechertext auf die des neuen Laufs. Bild und Fussnote
-    # ziehen automatisch nach, weil beide aus der Datei lesen.
-    #
-    # Bis dahin gilt: Hintergrund ist ein nicht unterbrechbarer Block
-    # (ResNet-50 Batch 48, rund 95 ms, siehe docs/benchmark/gate-m3.md), kein
-    # Sprachmodell. Der Text sagt deshalb "background job", nicht "LLM".
-    # ------------------------------------------------------------------
     Scene(
         key="measured",
         narration=(
-            "One laptop GPU, against a tuned Triton with priorities and the same "
-            "shared memory path. With a real detector and a background job that "
-            "cannot be interrupted, the detector goes from eighty-five percent of "
-            "control cycles to ninety-nine. Twenty times fewer missed cycles. "
-            "Three runs, and every log is in the repository."
+            "Measured against a tuned Triton on the same GPU, with a real "
+            "detector and a background job that cannot be interrupted: the "
+            "detector answers in time in ninety-nine percent of control cycles "
+            "instead of eighty-five. Twenty times fewer missed cycles."
         ),
         visual="terminal_run",
         chapter="Measured against a tuned Triton",
@@ -167,73 +163,42 @@ SCENES = [
         short_cut=True,
     ),
     Scene(
-        key="price",
+        key="devices",
         narration=(
-            "The price is in the same table. That background block never runs: "
-            "ninety-five milliseconds do not fit beside a thirty-three "
-            "millisecond period, with us or without us. For models that can be "
-            "split, the trade becomes a dial you set. In a separate run, two "
-            "completed generations become forty, and the detector moves from "
-            "ninety-eight percent to ninety-one."
+            "And it is not tied to one machine. The same governor runs in front "
+            "of Triton on an NVIDIA GPU, and in front of TensorFlow Lite on the "
+            "Adreno GPUs of two Android devices. On each of them, vig autotune "
+            "measured the hardware and gave its own answer."
         ),
-        visual="price",
-        chapter="What it costs",
-        source="wp26",
+        visual="devices",
+        chapter="Tested on edge hardware",
+        source="devices",
         pause=0.8,
     ),
     Scene(
-        key="limits",
-        narration=(
-            "Three cases where we would say no. If your GPU is not busy enough "
-            "to queue, your server is already fine. A single stream? Fifty lines "
-            "in your own client do most of this. And where the bottleneck is "
-            "moving data rather than GPU time, the backend overlaps better than "
-            "we serialise — we measured that on a phone."
-        ),
-        visual="limits",
-        chapter="When not to use it",
-        source="android",
-        pause=0.7,
-    ),
-    # ------------------------------------------------------------------
-    # Die Szene, die am laengsten gefehlt hat.
-    #
-    # Sie stand lange als Konstante daneben und blieb draussen, weil es den
-    # Befehl nicht gab und ein Video keine Funktion versprechen darf, die
-    # niemand starten kann. Jetzt gibt es ihn.
-    #
-    # Das Bild zeigt einen echten Lauf, verworfene Messreihen eingeschlossen.
-    # Wer nur den gelungenen Teil zeigt, wirbt; wer auch die Verweigerung
-    # zeigt, wird geglaubt.
-    # ------------------------------------------------------------------
-    Scene(
         key="autotune",
-        # Die Zahlen im Text stehen im Bild als FIT-Zeile, gelesen aus
-        # `fit_verdict` derselben Datei: 996 und 0, 537 und 1000 Promille.
         narration=(
-            "You should not have to trust our laptop. One command, vig autotune, "
-            "measures your own machine: runtimes, concurrency, interference. "
-            "Then it answers the only question that matters: is the governor "
-            "worth it here? On ours, above ninety percent load, the protected "
-            "stream goes from missing almost every cycle to missing none, and "
-            "the background pays for all of it. Two of four series were thrown "
-            "away because the card changed its power state, so it refused to "
-            "sign off. And if you don't need us, it says that too."
+            "You do not have to take our numbers. One command, vig autotune, "
+            "measures your own machine: runtimes, concurrency, interference. It "
+            "freezes a configuration and answers the question that matters: is "
+            "the governor worth it here? On this laptop, above ninety percent "
+            "load, the protected stream goes from missing almost every cycle to "
+            "missing none. And where you do not need it, it tells you that too."
         ),
         visual="autotune",
-        chapter="vig autotune: measure your own machine",
+        chapter="vig autotune: is it worth it on your machine?",
         source="autotune",
         pause=0.8,
     ),
     Scene(
         key="try",
         narration=(
-            "Point it at the server you already run. It checks your configuration "
-            "first and says what will not work before you start. Free for "
-            "evaluation, and for up to three devices in production."
+            "Point it at the inference server you already run. Same protocol, "
+            "same models, and your client changes one line. Free for evaluation, "
+            "and for up to three devices in production."
         ),
         visual="terminal_doctor",
-        chapter="Trying it on the server you already run",
+        chapter="Try it on the server you already run",
         source="doctor",
         pause=0.7,
     ),
@@ -245,23 +210,12 @@ SCENES = [
             "numbers decide."
         ),
         visual="close",
-        chapter="Where the numbers live",
+        chapter="Stop computing the past",
         pause=1.2,
     ),
 ]
 
-#: Die Autotune-Szene stand frueher hier als Konstante und hing bewusst nicht
-#: in SCENES: Es gab den Befehl nicht, und ein Video darf keine Funktion
-#: versprechen, die niemand starten kann. Seit `vig autotune` existiert, steht
-#: sie oben zwischen "limits" und "try" — an der Stelle, die dieser Kommentar
-#: ihr damals zugewiesen hat. Der Wortlaut ist unveraendert uebernommen.
-
-#: Nur fuer den Kurzschnitt: eine stumme Schlusskarte.
-#:
-#: Fuer LinkedIn bleiben rund 45 Sekunden, und in die passen Problem und
-#: Messung — aber nicht der gesprochene Satz ueber den Preis. Ihn wegzulassen
-#: waere genau die Werbung, die dieses Skript verbietet. Also steht er dort
-#: als Text. Ein kurzer Schnitt darf kuerzer sein, nicht unehrlicher.
+#: Nur fuer den Kurzschnitt: eine stumme Schlusskarte mit dem naechsten Schritt.
 SHORT_TAIL = Scene(
     key="short-tail",
     narration="",
@@ -272,10 +226,12 @@ SHORT_TAIL = Scene(
 
 #: Kapitelmarken und Beschreibung entstehen aus denselben Szenen; siehe
 #: make_video.py. Hier stehen nur die Texte, die kein Szenentext sind.
-YOUTUBE_TITLE = "Stop computing the past: an inference governor for shared edge GPUs, with vig autotune"
+YOUTUBE_TITLE = ("Stop Computing the Past — Inference QoS for Edge Robotics "
+                 "| Vigilant Inference Governor")
 
 YOUTUBE_TAGS = [
     "edge ai", "inference", "gpu scheduling", "robotics", "triton inference server",
-    "nvidia jetson", "real time", "computer vision", "ros 2", "latency",
-    "age of information", "machine learning infrastructure",
+    "tensorflow lite", "nvidia jetson", "real time", "computer vision", "ros 2",
+    "latency", "age of information", "humanoid robot", "adas",
+    "machine learning infrastructure",
 ]

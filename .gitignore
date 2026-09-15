@@ -18,4 +18,6 @@ backends/**/target/
 *.mp4
 *.wav
 *.srt
+# Ausnahme: das eine Video, das die Projektseite abspielt (site/index.md).
+!site/assets/vigilant-inference-governor.mp4
 tools/video/build/

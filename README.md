@@ -1,14 +1,32 @@
 # Vigilant Inference Governor
 
-**Inference QoS for edge robotics — and `vig autotune`, one command that
-measures your own hardware and tells you whether you need it at all.** Keep
-your models. Keep Triton. Tell the governor what has to be *fresh* and what
-merely has to be *fast* — it decides what runs now, what waits, what is thrown
-away because newer data arrived, and which model variant still fits the time
-budget.
+**A scheduler for AI inference on robots and vehicles: when several models
+share one GPU, it keeps the results that matter fresh.** It sits in front of
+your inference server — NVIDIA Triton or TensorFlow Lite — and decides before
+every dispatch whether a result will still be useful when it is finished.
+
+**Is it worth it on your hardware? `vig autotune` measures your machine in one
+command and tells you — including when you do not need it.**
 
 > **Stop computing the past.** A faster GPU computes stale frames faster. The
 > governor stops computing them.
+
+**What it does:** drops frames that a newer one has replaced · refuses work
+that would finish too late · holds back long jobs while protected work is due
+· switches to a smaller model variant when time runs short. Your models stay
+where they are; your client changes one line, the address.
+
+**Measured:** against a tuned Triton on the same GPU, the detector answers in
+time in **99 %** of control cycles instead of 85 % — twenty times fewer
+misses. Tested on an NVIDIA GPU and on the Adreno GPUs of two Android devices.
+
+**Find out whether it is for you:**
+
+```bash
+vig autotune --endpoint 127.0.0.1:8001 -c vig.yaml -o qualification
+```
+
+[![Watch the video: Stop computing the past (2½ min)](site/assets/video-poster.png)](https://vigilant-crs.github.io/Inference-Governor-QoS/#video)
 
 [![Status](https://img.shields.io/badge/status-pre--production-orange)](#status-what-works-and-what-does-not)
 [![Tests](https://img.shields.io/badge/tests-863%20passing-brightgreen)](#build-and-verify)

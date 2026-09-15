@@ -358,7 +358,7 @@ def terminal_doctor(scene, progress: float) -> Image.Image:
     image = base()
     draw = ImageDraw.Draw(image)
     kicker(draw, "try it on your own machine")
-    headline(draw, "It says what will not work — before you start.", y=112, size=46)
+    headline(draw, "It checks your setup before anything runs.", y=112, size=46)
 
     mono = font(MONO, 24)
     line_h = 34
@@ -389,15 +389,14 @@ def terminal_doctor(scene, progress: float) -> Image.Image:
 
     below = top + height + 26
     draw.text((left, below),
-              "It refuses to pretend: an overloaded configuration is reported, "
-              "not smoothed over.",
+              "An overloaded configuration is reported before you deploy it.",
               font=font(SANS, 25), fill=DIM)
     _source(draw, path, below + 38, scene.data.get("date", ""))
     if progress > 0.55:
         # Nicht tiefer als hier: ab rund 930 liegt das Band des eingebrannten
         # Untertitels. Eine Fassung mit 856/958 verdeckte die Lizenzzeile
         # vollstaendig — in der Fassung ohne Untertitel sah man das nicht.
-        commands = ["vig doctor -c vig.yaml", "vig profile", "vig serve"]
+        commands = ["vig autotune", "vig doctor", "vig serve"]
         x = 160
         for command in commands:
             width = int(draw.textlength(command, font=font(MONO, 30))) + 56
@@ -487,16 +486,15 @@ def limits(_scene, progress: float) -> Image.Image:
 
 
 def usecases(_scene, progress: float) -> Image.Image:
-    """Zwei Einsatzbilder — und was wir ausdruecklich nicht behaupten.
+    """Zwei Einsatzbilder: wofuer das System gebaut ist.
 
-    Die Abgrenzung steht im selben Bild wie die Bilder selbst und nicht im
-    Kleingedruckten. Wer das hier einem Sicherheitsverantwortlichen zeigt,
-    soll die Grenze sehen, bevor er fragen muss.
+    Die Abgrenzung (keine Zertifizierung, kein hartes Echtzeitsystem) steht in
+    README und security.md; das Video zeigt, wofuer es gedacht ist.
     """
     image = base()
     draw = ImageDraw.Draw(image)
-    kicker(draw, "where this belongs")
-    headline(draw, "Two pictures — and what we are not claiming.", y=118, size=54)
+    kicker(draw, "where it belongs")
+    headline(draw, "Built for machines that share one accelerator.", y=118, size=54)
 
     cards = [
         ("Humanoid robot",
@@ -527,16 +525,6 @@ def usecases(_scene, progress: float) -> Image.Image:
             y += 42
         x += width + gap
 
-    if progress > 0.5:
-        draw.text((160, 740), "Plausible pictures, not customer deployments.",
-                  font=font(SANS_BOLD, 32), fill=TEXT)
-        draw.text((160, 796),
-                  "We claim nothing about certification or hard real time. "
-                  "We are one component —",
-                  font=font(SANS, 28), fill=DIM)
-        draw.text((160, 838),
-                  "the safety argument stays with the manufacturer.",
-                  font=font(SANS, 28), fill=DIM)
     return image
 
 
@@ -564,23 +552,20 @@ def close(_scene, progress: float) -> Image.Image:
 
 
 def short_tail(_scene, progress: float) -> Image.Image:
-    """Die Schlusskarte des Kurzschnitts: der Preis, ohne gesprochenen Satz."""
+    """Die Schlusskarte des Kurzschnitts: der naechste Schritt."""
     image = base()
     draw = ImageDraw.Draw(image)
-    kicker(draw, "the other half")
-    headline(draw, "And the background pays for it.", y=150, size=58)
-    draw.text((160, 360),
-              "In the same run, the background block never ran.",
+    kicker(draw, "your machine, your answer")
+    headline(draw, "Is it worth it on your hardware?", y=150, size=58)
+    draw.text((160, 360), "One command measures your machine and tells you.",
               font=font(SANS, 34), fill=DIM)
-    draw.text((160, 416),
-              "A 95 ms block does not fit next to a 33 ms period — with or without us.",
-              font=font(SANS, 34), fill=DIM)
-    draw.line([(160, 520), (160 + int(520 * min(1.0, progress * 2)), 520)],
+    draw.text((160, 430), "vig autotune", font=font(MONO, 56), fill=ACCENT)
+    draw.line([(160, 540), (160 + int(520 * min(1.0, progress * 2)), 540)],
               fill=ACCENT, width=5)
-    draw.text((160, 580), "The measurements, the method, and the reports:",
-              font=font(SANS, 32), fill=DIM)
-    draw.text((160, 644), "github.com/Vigilant-CRS/Inference-Governor-QoS",
-              font=font(SANS_BOLD, 40), fill=TEXT)
+    draw.text((160, 600), "Stop computing the past.", font=font(SANS_BOLD, 40),
+              fill=TEXT)
+    draw.text((160, 664), "github.com/Vigilant-CRS/Inference-Governor-QoS",
+              font=font(SANS_BOLD, 36), fill=TEXT)
     return image
 
 
@@ -599,7 +584,7 @@ def autotune(scene, progress: float) -> Image.Image:
     image = base()
     draw = ImageDraw.Draw(image)
     kicker(draw, "measure your own machine")
-    headline(draw, "It measures your machine — and says what it will not claim.",
+    headline(draw, "One command: is the governor worth it on your machine?",
              y=112, size=46)
 
     mono = font(MONO, 24)
@@ -628,8 +613,8 @@ def autotune(scene, progress: float) -> Image.Image:
 
     below = top + height + 26
     draw.text((left, below),
-              "It refuses to certify on data it threw away — and tells you how "
-              "much it threw away.",
+              "Every discarded series is named, and nothing unmeasured is "
+              "passed off as measured.",
               font=font(SANS, 25), fill=DIM)
     # Die Schritt-, Serien- und Freigabefelder stehen englisch in der Datei und
     # werden unveraendert gezeigt. Die FIT-Zeilen dagegen tragen nur die vier
@@ -637,6 +622,77 @@ def autotune(scene, progress: float) -> Image.Image:
     # Quellenzeile, statt "unchanged" fuer das ganze Bild zu behaupten.
     _source(draw, path, below + 38, scene.data.get("date", ""),
             treatment="shown unchanged, FIT from fit_verdict")
+    return image
+
+
+def capabilities(_scene, progress: float) -> Image.Image:
+    """Die vier Entscheidungen, die vor der GPU fallen (README, „What it actually does")."""
+    image = base()
+    draw = ImageDraw.Draw(image)
+    kicker(draw, "what it does")
+    headline(draw, "Four decisions, made before the GPU.", y=118, size=54)
+    cards = [
+        ("Drop superseded frames",
+         "A newer frame replaces an older one that is still waiting."),
+        ("Refuse late work",
+         "A result that would be stale when finished is never started."),
+        ("Protect what matters",
+         "A long background job waits when protected work is due."),
+        ("Fit the time budget",
+         "Under pressure, a smaller model variant takes over."),
+    ]
+    width, height, gap, pad = 780, 250, 60, 40
+    shown = int(min(len(cards), 1 + progress * 5))
+    head_font, body_font = font(SANS_BOLD, 38), font(SANS, 30)
+    for index, (head, body) in enumerate(cards[:shown]):
+        x = 160 + (index % 2) * (width + gap)
+        top = 290 + (index // 2) * (height + 40)
+        draw.rectangle([x, top, x + width, top + height], fill=PANEL)
+        draw.line([(x, top), (x + width, top)], fill=ACCENT, width=4)
+        draw.text((x + pad, top + 44), head, font=head_font, fill=TEXT)
+        y = top + 112
+        for line in wrap(draw, body, body_font, width - 2 * pad):
+            draw.text((x + pad, y), line, font=body_font, fill=DIM)
+            y += 42
+    return image
+
+
+def devices(scene, progress: float) -> Image.Image:
+    """Dieselbe Software auf drei Plattformen, mit dem Urteil von autotune dort.
+
+    Name, Chip und Backend stehen in `script.DEVICES` mit ihrem Beleg;
+    Serienzahl und Urteil liest `report.device_summary` aus der jeweiligen
+    `qualification.json`. Ein fehlendes Feld bricht den Bau ab.
+    """
+    import script
+    image = base()
+    draw = ImageDraw.Draw(image)
+    kicker(draw, "tested on edge hardware")
+    headline(draw, "One governor. Three edge platforms.", y=118, size=54)
+    width, gap, pad = 520, 40, 34
+    pairs = list(zip(script.DEVICES, scene.data["paths"]))
+    shown = int(min(len(pairs), 1 + progress * 4))
+    x = 160
+    answer_font = font(SANS_BOLD, 28)
+    for device, path in pairs[:shown]:
+        summary = report.device_summary(Path(path))
+        draw.rectangle([x, 280, x + width, 820], fill=PANEL)
+        draw.line([(x, 280), (x + width, 280)], fill=ACCENT, width=4)
+        draw.text((x + pad, 326), device["name"], font=font(SANS_BOLD, 40), fill=TEXT)
+        draw.text((x + pad, 388), device["chip"], font=font(SANS, 27), fill=DIM)
+        draw.text((x + pad, 428), device["backend"], font=font(SANS, 27), fill=DIM)
+        draw.line([(x + pad, 490), (x + width - pad, 490)], fill=FAINT, width=2)
+        draw.text((x + pad, 516), "vig autotune", font=font(MONO, 26), fill=ACCENT)
+        draw.text((x + pad, 564), f"{summary['series']} series usable",
+                  font=font(SANS, 28), fill=TEXT)
+        y = 620
+        colour = OK if summary["worth"] else TEXT
+        for line in wrap(draw, summary["answer"], answer_font, width - 2 * pad):
+            draw.text((x + pad, y), line, font=answer_font, fill=colour)
+            y += 40
+        x += width + gap
+    footnote(draw, "numbers read from qualification.json of "
+                   + ", ".join(Path(p).parent.name for p in scene.data["paths"]))
     return image
 
 
@@ -651,6 +707,8 @@ RENDERERS = {
     "price": price,
     "limits": limits,
     "autotune": autotune,
+    "capabilities": capabilities,
+    "devices": devices,
     "terminal_doctor": terminal_doctor,
     "close": close,
 }
@@ -659,6 +717,7 @@ RENDERERS = {
 #: stehen gelassen — das spart Platz und Zeit, ohne dass man es sieht.
 ANIMATED = {"title", "timeline_fifo", "stale", "timeline_governor", "usecases",
             "terminal_run", "price", "limits", "autotune", "terminal_doctor",
+            "capabilities", "devices",
             "close", "short_tail"}
 
 

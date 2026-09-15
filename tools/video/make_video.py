@@ -251,6 +251,9 @@ def main() -> int:
             # kommt es aus dem Bericht (script.SOURCE_DATES), nie aus der
             # Dateizeit — die verstellt schon ein Kopiervorgang.
             scene.data["date"] = script.SOURCE_DATES.get(scene.source, "")
+        if scene.visual == "devices":
+            scene.data["paths"] = [str(runtime / d["run"] / "qualification.json")
+                                   for d in script.DEVICES]
 
     segments, audio_parts, srt_entries, chapters = [], [], [], []
     clock = 0.0
@@ -350,43 +353,37 @@ def main() -> int:
 
     meta = out / "youtube.md"
     lines = [f"# {script.YOUTUBE_TITLE}", "",
-             "One GPU, several models, and only the newest camera frame is worth",
-             "computing. This is what the Vigilant Inference Governor does, what it",
-             "measured on one laptop GPU, and the three cases where we would tell you",
-             "not to use it.", "",
-             "And you do not have to trust our laptop: vig autotune measures your",
-             "own machine in one command and tells you whether the governor is worth",
-             "it there — including when it is not.", "",
-             "For you if several models share one GPU on an edge box or a robot",
-             "and a late answer is worth less than no answer: a humanoid robot",
-             "whose seeing must not wait behind its thinking, driver assistance in",
-             "pre-development, perception loops, ROS 2 nodes, Triton or TensorRT",
-             "behind a controller that cannot wait.",
-             "",
-             "Not for you if your GPU is not busy enough to queue, if you run a",
-             "single stream, or if your bottleneck is moving data rather than GPU",
-             "time. Those three cases are in the video, with the measurement that",
-             "found them.",
-             "",
-             "The repository carries the method, the raw logs of every run shown",
-             "here, and the runs that did not work out — including the ones that",
-             "made us rewrite a number.",
-             "",
+             "When several AI models share one GPU on a robot or a vehicle, an",
+             "inference server works in arrival order — including camera frames",
+             "that are already stale by the time they finish. The Vigilant Inference",
+             "Governor sits in front of your inference server (NVIDIA Triton,",
+             "TensorFlow Lite) and decides before every dispatch whether a result",
+             "will still be useful when it is done.", "",
+             "What it does: it drops frames a newer one has replaced, refuses work",
+             "that would finish too late, holds back long background jobs when",
+             "protected work is due, and switches to a smaller model variant when",
+             "time runs short. It speaks the Open Inference Protocol, so your",
+             "client only changes the address.", "",
+             "Measured against a tuned Triton on the same GPU, the detector answers",
+             "in time in 99 % of control cycles instead of 85 % — twenty times fewer",
+             "missed cycles. Tested on an NVIDIA GPU and on the Adreno GPUs of two",
+             "Android devices.", "",
+             "Is it worth it for you? Run vig autotune on your own hardware: one",
+             "command measures runtimes, concurrency and interference and tells you",
+             "whether the governor pays off on your load — including when it does not.", "",
+             "Built for humanoid and mobile robots, driver-assistance development,",
+             "perception pipelines and ROS 2 systems: anywhere a late answer is worth",
+             "less than no answer.", "",
              "Repository: https://github.com/Vigilant-CRS/Inference-Governor-QoS",
              "Licence: BUSL-1.1 — free for evaluation and for up to three devices in production.",
              "Vigilant e.K., Stuttgart — https://vigilant-crs.de", "",
              "## Chapters", ""]
     for start, key in chapters:
         lines.append(f"{timecode(start)[3:8]} {key}")
-    # Nur die Belege, die im Video wirklich vorkommen. Alle Berichte zu listen
-    # waere leichter zu erzeugen und im Zweifel irrefuehrend: Wer unter einem
-    # Video "Quellen" liest, erwartet die Quelle dessen, was er gesehen hat,
-    # und nicht unser Inhaltsverzeichnis.
-    lines += ["", "## Every number in this video, and where it comes from", ""]
-    for scene in script.SCENES:
-        if scene.source:
-            lines.append(f"- {scene.chapter or scene.key}: "
-                         f"{script.SOURCES[scene.source]}")
+    # Die Belege stehen nicht in der Beschreibung: sie zeigen auf Dateien
+    # neben dem Repository, die ein Zuschauer nicht oeffnen kann. Sie stehen
+    # in script.SOURCES und im Bild selbst; die Beschreibung verweist aufs
+    # Repository.
     lines += ["", "## Tags", "", ", ".join(script.YOUTUBE_TAGS), ""]
     meta.write_text("\n".join(lines), encoding="utf-8")
 

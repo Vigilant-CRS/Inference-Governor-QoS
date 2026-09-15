@@ -129,6 +129,32 @@ Ein unbekannter Schritt oder fehlende Serienzahlen brechen den Bau ab, statt
 stillschweigend eine kürzere Zeile zu zeichnen — ein Bild, das einen Schritt
 wegließe, behauptete einen kürzeren Lauf als den stattgefundenen.
 
+## Die Fassung vom 15.09.2026: was es kann
+
+Die fruehere Fassung erzaehlte die Grenzen im Film selbst: drei Faelle, in
+denen man es nicht braucht, den Preis des Hintergrundblocks, eine Abgrenzung
+zu Zertifizierung und Echtzeit, den Hinweis auf die Logs im Repository. Das
+war ehrlich und fuer einen Drei-Minuten-Film das Falsche: Wer das Video sieht,
+will wissen, **was das System kann** und **wie er herausfindet, ob es fuer ihn
+ist**.
+
+Die Szenenfolge ist deshalb jetzt: Problem → was der Governor tut → die vier
+Entscheidungen (`capabilities`) → wofuer er gebaut ist → die Messung gegen
+Triton → drei Plattformen (`devices`) → `vig autotune` → ausprobieren →
+Schluss. Die Szenen `stale`, `price` und `limits` sind aus `SCENES`
+genommen; ihre Renderer bleiben fuer eine laengere Fassung erhalten.
+
+Was sich **nicht** geaendert hat: Jede gezeigte Zahl kommt aus einer Datei.
+Die Geraeteszene liest Serienzahl und Urteil aus den drei
+`qualification.json` (Laptop `15f`, Pixel 2, Pixel 5); Name, Chip und Backend
+stehen in `script.DEVICES`. Die Grenzen stehen weiter vollstaendig in README,
+STATUS und den Berichten — nur nicht mehr im Sprechertext.
+
+Das Video liegt seit dieser Fassung zusaetzlich unter `site/assets/`, damit die
+Projektseite es abspielen kann (`<video>` mit WebVTT-Untertiteln). Die
+GitHub-README verlinkt ein Vorschaubild dorthin; ein Player direkt in der README
+braucht einen Upload ueber die Weboberflaeche von GitHub.
+
 ## Voraussetzungen
 
 `ffmpeg`, `python3` mit Pillow, `piper` mit einer englischen Stimme unter

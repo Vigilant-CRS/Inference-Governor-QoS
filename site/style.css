@@ -139,3 +139,7 @@ summary { cursor: pointer; font-weight: 600; }
   .kopf { padding: 12px 16px; }
   .held { padding: 36px 0 16px; }
 }
+
+/* Das Demo-Video unter der Kopfzeile. */
+.video { margin: 2rem 0; }
+.video video { width: 100%; height: auto; border-radius: 8px; background: #000; }

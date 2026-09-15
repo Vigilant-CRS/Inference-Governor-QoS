@@ -2,12 +2,13 @@
 
 <h1>Stop computing the past.</h1>
 
-<p class="zeile">Vigilant is a scheduler that sits in front of your inference
-server and decides, before every dispatch, whether a result will still be
-useful when it is finished — and <code>vig autotune</code> measures your own
-hardware in one command and tells you whether you need it at all. Stale work
-is dropped before it costs GPU time. Your models stay where they are. Your
-client changes one line: the address.</p>
+<p class="zeile">Vigilant is a scheduler for AI inference on robots and
+vehicles: when several models share one GPU, it keeps the results that matter
+fresh. It sits in front of your inference server and decides, before every
+dispatch, whether a result will still be useful when it is finished.</p>
+
+<p class="zeile"><code>vig autotune</code> measures your own hardware in one
+command and tells you whether you need it — including when you do not.</p>
 
 <div class="marken">
 <span>Qualifies itself on your hardware</span>
@@ -18,12 +19,20 @@ client changes one line: the address.</p>
 </div>
 
 <div class="knoepfe">
-<a class="knopf" href="#qualify-your-own-hardware">Measure your machine: vig autotune</a>
+<a class="knopf" href="#video">Watch the video</a>
+<a class="knopf leer" href="#qualify-your-own-hardware">Measure your machine: vig autotune</a>
 <a class="knopf leer" href="docs/getting-started.md">Getting started</a>
 <a class="knopf leer" href="docs/benchmark/README.md">Read the measurements</a>
 <a class="knopf leer" href="https://github.com/Vigilant-CRS/Inference-Governor-QoS">GitHub</a>
 </div>
 
+</div>
+
+<div class="video" id="video">
+<video controls preload="metadata" playsinline poster="assets/video-poster.png">
+<source src="assets/vigilant-inference-governor.mp4" type="video/mp4">
+<track kind="subtitles" srclang="en" label="English" src="assets/vigilant-inference-governor.en.vtt">
+</video>
 </div>
 
 ## The problem
@@ -122,8 +131,9 @@ Break-even is between 100 % and 110 % offered load
 
 ## Qualify your own hardware
 
-Every number on this page comes from one laptop. We cannot tell you what
-happens on your machine — so we give you the tool that finds out, there.
+Our numbers come from our hardware — a laptop GPU and two Android devices. What
+happens on yours is a measurement, and we give you the tool that takes it,
+there.
 
 > **Start it, and in half an hour it has measured your machine and tells you
 > what it can carry. And if it turns out you don't need us, it says that too.**
@@ -133,8 +143,9 @@ On our laptop, the run of 15 September answered in under two minutes: above
 the governor **0 ‰** — and the lower-priority streams pay for all of it
 (559 ‰ → 1000 ‰). It kept two of four measurement series, threw two away
 because the power-capped GPU changed state mid-series, and therefore **refused
-to sign off**. On a Pixel 2 it ran clean, twelve of twelve series, and said
-the opposite: on that load the governor is **not worth it**
+to sign off**. On a Pixel 2 and a Pixel 5 it ran clean, twelve of twelve series
+each, derived the same configuration structure on both, and said the opposite:
+on that load the governor is **not worth it**
 ([report](docs/benchmark/validierung-autotune.md)).
 
 ```bash
