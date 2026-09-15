@@ -44,8 +44,9 @@ A vehicle, a sidewalk robot and a humanoid each run four cameras through
 RF-DETR at 30 frames per second next to a vision-language model — on one laptop
 GPU, more work than the chip can do. Left, NVIDIA Triton computes every frame in
 arrival order, and each result is a third of a second old when it arrives.
-Right, the governor keeps the camera that matters fresh in every cycle, serves
-the other cameras with what is left — and the language model waits. Each pair is
+Right, the governor keeps the camera that matters fresh in every cycle, gives
+the language model its guaranteed 300 ms of GPU time per second, and serves the
+other cameras with what is left. Each pair is
 recorded back to back with the same frames; boxes are drawn where the detector
 saw the objects.
 

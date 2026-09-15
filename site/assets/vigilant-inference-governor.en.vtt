@@ -1,184 +1,190 @@
 WEBVTT
 
-00:00.000 --> 00:03.152
+00:00.000 --> 00:03.097
 Robots and cars are moving to central computers.
 
-00:03.152 --> 00:06.172
+00:03.097 --> 00:06.065
 Vision, planning and language models now share
 
-00:06.172 --> 00:09.324
+00:06.065 --> 00:09.162
 one chip, and they all want it at the same time.
 
-00:10.133 --> 00:14.367
+00:09.967 --> 00:14.152
 A robot camera gives you a frame every thirty-three milliseconds.
 
-00:14.367 --> 00:16.191
+00:14.152 --> 00:15.955
 Your detector needs fifteen.
 
-00:16.191 --> 00:19.578
+00:15.955 --> 00:19.303
 That fits, until something else wants the same chip.
 
-00:19.578 --> 00:23.290
+00:19.303 --> 00:22.974
 Now the detector waits behind a block it cannot interrupt
 
-00:23.290 --> 00:27.459
+00:22.974 --> 00:27.094
 and by the time its answer arrives, the robot has already moved.
 
-00:28.167 --> 00:30.837
+00:27.800 --> 00:30.401
 Vigilant sits in front of your inference
 
-00:30.837 --> 00:34.243
+00:30.401 --> 00:33.718
 server and asks one question before every dispatch:
 
-00:34.243 --> 00:37.781
+00:33.718 --> 00:37.165
 will this result still be useful when it is finished?
 
-00:37.781 --> 00:41.520
+00:37.165 --> 00:40.807
 Work that cannot be is dropped before it costs anything.
 
-00:41.520 --> 00:43.323
+00:40.807 --> 00:42.563
 Same protocol, same models.
 
-00:43.323 --> 00:46.061
+00:42.563 --> 00:45.230
 In your client, only the address changes.
 
-00:46.767 --> 00:50.836
+00:45.933 --> 00:49.901
 Four decisions, all made before a request reaches the chip.
 
-00:50.836 --> 00:54.837
+00:49.901 --> 00:53.801
 A newer frame replaces an older one that is still waiting.
 
-00:54.837 --> 00:58.216
+00:53.801 --> 00:57.096
 Work that would finish too late is never started.
 
-00:58.216 --> 01:02.010
+00:57.096 --> 01:00.794
 A long background job waits when protected work is due.
 
-01:02.010 --> 01:06.217
+01:00.794 --> 01:04.896
 And when time runs short, a smaller model variant takes over.
 
-01:06.933 --> 01:09.986
+01:05.600 --> 01:08.608
 It is built for exactly that kind of machine.
 
-01:09.986 --> 01:14.329
+01:08.608 --> 01:12.887
 A humanoid robot, whose vision must not wait behind its planner.
 
-01:14.329 --> 01:17.585
+01:12.887 --> 01:16.096
 Or a vehicle's central computer, running several
 
-01:17.585 --> 01:21.181
+01:16.096 --> 01:19.639
 cameras and a slower scene analysis on the same chip.
 
-01:21.867 --> 01:24.595
+01:20.333 --> 01:23.134
 Measured against a tuned Triton on the same GPU
 
-01:24.595 --> 01:28.601
+01:23.134 --> 01:27.247
 with a real detector and a background job that cannot be interrupted:
 
-01:28.601 --> 01:31.098
+01:27.247 --> 01:29.809
 the detector answers in time in ninety-nine
 
-01:31.098 --> 01:33.942
+01:29.809 --> 01:32.730
 percent of control cycles instead of eighty-five.
 
-01:33.942 --> 01:35.858
+01:32.730 --> 01:34.696
 Twenty times fewer missed cycles.
 
-01:36.667 --> 01:38.565
+01:35.500 --> 01:37.284
 Here is what that looks like.
 
-01:38.565 --> 01:42.164
+01:37.284 --> 01:40.666
 Four cameras and a language model share one laptop GPU:
 
-01:42.164 --> 01:44.193
+01:40.666 --> 01:42.573
 more work than the chip can do.
 
-01:44.193 --> 01:47.531
+01:42.573 --> 01:45.709
 Triton alone computes every frame in arrival order.
 
-01:47.531 --> 01:53.029
+01:45.709 --> 01:50.875
 Its detections arrive a third of a second late, so the vehicle is effectively blind.
 
-01:53.029 --> 01:57.414
-With Vigilant, the front camera stays fresh in every control cycle.
+01:50.875 --> 01:54.934
+With Vigilant, the front camera stays fresh in every control cycle
 
-01:57.414 --> 02:01.275
-The price is visible too: the language model answered once.
+01:54.934 --> 01:58.624
+and the language model keeps a guaranteed share of the chip:
 
-02:01.275 --> 02:05.987
-Without the governor, two hundred and twenty-two times in forty seconds.
+01:58.624 --> 02:01.146
+it answered ninety-one times, against two
 
-02:06.600 --> 02:09.518
+02:01.146 --> 02:04.221
+hundred and twenty-one times without the governor.
+
+02:04.221 --> 02:06.004
+The other cameras pay for it.
+
+02:06.600 --> 02:09.415
 On a sidewalk robot, with four cameras as well:
 
-02:09.518 --> 02:14.423
+02:09.415 --> 02:14.147
 the front camera is fresh in zero point two percent of cycles with Triton alone
 
-02:14.423 --> 02:16.783
+02:14.147 --> 02:16.423
 and one hundred percent with Vigilant.
 
-02:17.267 --> 02:19.894
+02:16.933 --> 02:19.509
 And the head camera of a humanoid robot:
 
-02:19.894 --> 02:24.886
+02:19.509 --> 02:24.402
 zero point one percent with Triton alone, one hundred percent with Vigilant.
 
-02:24.886 --> 02:27.054
+02:24.402 --> 02:26.527
 That is what overload looks like.
 
-02:27.054 --> 02:32.571
+02:26.527 --> 02:31.936
 On a chip with room to spare, Triton alone keeps up, and the governor does not help.
 
-02:33.367 --> 02:35.575
+02:32.733 --> 02:34.964
 And it is not tied to one machine.
 
-02:35.575 --> 02:39.343
+02:34.964 --> 02:38.770
 The same governor runs in front of Triton on an NVIDIA GPU
 
-02:39.343 --> 02:44.150
+02:38.770 --> 02:43.625
 and in front of TensorFlow Lite on the Adreno GPUs of two Android devices.
 
-02:44.150 --> 02:49.542
+02:43.625 --> 02:49.071
 On each of them, vig autotune measured the hardware and set the governor up for it.
 
-02:50.333 --> 02:53.635
+02:49.867 --> 02:53.204
 You do not have to take our numbers, or our settings.
 
-02:53.635 --> 02:57.559
+02:53.204 --> 02:57.171
 One command, vig autotune, measures your models on your machine
 
-02:57.559 --> 03:00.799
+02:57.171 --> 03:00.446
 tries the governor's settings against your contracts
 
-03:00.799 --> 03:03.789
+03:00.446 --> 03:03.469
 and only keeps what holds up when it runs again.
 
-03:03.789 --> 03:06.592
+03:03.469 --> 03:06.302
 On a Pixel 2 carrying a delivery robot's load
 
-03:06.592 --> 03:10.267
+03:06.302 --> 03:10.018
 the governor cut the detector's missed cycles by two thirds
 
-03:10.267 --> 03:12.696
+03:10.018 --> 03:12.474
 paid for by the lower-priority streams.
 
-03:13.500 --> 03:16.756
+03:13.267 --> 03:16.450
 Point it at the inference server you already run.
 
-03:16.756 --> 03:20.810
+03:16.450 --> 03:20.414
 Same protocol, same models, and your client changes one line.
 
-03:20.810 --> 03:24.996
+03:20.414 --> 03:24.507
 Free for evaluation, and for up to three devices in production.
 
-03:25.700 --> 03:28.196
+03:25.200 --> 03:27.649
 Faster chips compute the past faster.
 
-03:28.196 --> 03:30.085
+03:27.649 --> 03:29.503
 Vigilant stops computing it.
 
-03:30.085 --> 03:32.985
+03:29.503 --> 03:32.349
 Run vig autotune on the machine you already
 
-03:32.985 --> 03:36.291
+03:32.349 --> 03:35.593
 have, and let it tune the governor for your load.

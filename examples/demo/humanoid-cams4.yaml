@@ -57,7 +57,7 @@ models:
     class: best_effort
     backend_endpoint: "127.0.0.1:9601"
     queue: { policy: fifo, capacity: 2, overflow: backpressure_client }
-    contract: { deadline_ms: 5000, max_age_ms: 8000 }
+    contract: { deadline_ms: 5000, max_age_ms: 8000, min_runtime: { budget_ms: 300, window_ms: 1000 } }
     variants:
       - id: main
         backend_model: smolvlm

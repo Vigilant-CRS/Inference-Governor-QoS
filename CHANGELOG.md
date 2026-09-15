@@ -45,7 +45,11 @@ bedeutet, steht in [docs/releases.md](docs/releases.md).
   Projektseite.
 - **Zwei weitere Szenarien mit derselben Last:** Gehweg-Roboter (Edinburgh,
   CC BY 3.0) Frontkamera 0,2 % → 100 %, humanoider Roboter (TUM RGB-D, CC BY
-  4.0) Kopfkamera 0,1 % → 100 %; das Sprachmodell wartet in beiden.
+  4.0) Kopfkamera 0,1 % → 100 %; das Sprachmodell wartet in beiden. Mit
+  Mindestlaufzeit (ADR-0046, 300 ms je Sekunde) neu aufgenommen: Das
+  Sprachmodell antwortet in allen drei Szenarien 71- bis 91-mal statt ein- bis
+  dreimal, die geschuetzte Kamera bleibt bei 100 %; die nachrangigen Kameras
+  zahlen 2 bis 17 Punkte frischer Takte.
 - **Renderer:** Die BLIND-Anzeige blitzte fuer einzelne Bilder auf, wenn ein
   Ergebnis genau `max_age` alt war — das sah wie Kameraaussetzer aus. Jetzt
   1 ms Toleranz und BLIND erst nach einem ganzen Kamerabild; die Zaehler

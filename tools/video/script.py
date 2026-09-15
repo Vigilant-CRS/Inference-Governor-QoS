@@ -49,7 +49,7 @@ DEVICES = [
 #: `data={"demo": <Schluessel>}`.
 DEMOS = {
     "krakow-cams4": {
-        "run": "demo/runs/krakow-cams4-1825",
+        "run": "demo/runs/krakow-budget-2223",
         "clip": "demo.mp4",
         "left": "direct.jsonl",
         "right": "governed.jsonl",
@@ -63,7 +63,7 @@ DEMOS = {
                         "SmolVLM (Apache-2.0)."),
     },
     "sidewalk-cams4": {
-        "run": "demo/runs/sidewalk-cams4-2033",
+        "run": "demo/runs/sidewalk-budget-2223",
         "clip": "demo.mp4",
         "left": "direct.jsonl",
         "right": "governed.jsonl",
@@ -75,7 +75,7 @@ DEMOS = {
                         "SmolVLM (Apache-2.0)."),
     },
     "humanoid-cams4": {
-        "run": "demo/runs/humanoid-cams4-2159",
+        "run": "demo/runs/humanoid-budget-2223",
         "clip": "demo.mp4",
         "left": "direct.jsonl",
         "right": "governed.jsonl",
@@ -240,9 +240,10 @@ SCENES = [
             "share one {gpu_kind}: more work than the chip can do. Triton alone "
             "computes every frame in arrival order. Its detections arrive "
             "{left_age_spoken} late, so the {subject} is effectively blind. With "
-            "Vigilant, the {stream} camera stays fresh in {right_fresh_spoken}. The "
-            "price is visible too: the language model answered {right_answers_spoken}. "
-            "Without the governor, {left_answers_spoken} in {clip_spoken}."
+            "Vigilant, the {stream} camera stays fresh in {right_fresh_spoken}, and "
+            "the language model keeps a guaranteed share of the chip: it answered "
+            "{right_answers_spoken}, against {left_answers_spoken} without the "
+            "governor. The other cameras pay for it."
         ),
         visual="demo_clip",
         chapter="On camera: {cameras_word} cameras, one GPU",

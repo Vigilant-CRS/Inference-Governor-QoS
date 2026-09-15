@@ -45,7 +45,7 @@ this load: the hand-tuned settings were already the best of the settings tried.
 
 Seen as a video — head, chest and two wrist cameras plus a vision-language model
 on one laptop GPU: the head camera stays fresh in 100 % of cycles instead of
-0.1 %, and the language model waits ([humanoid demo](benchmark/demo-2026-09-15.md)).
+0.1 %, while the language model keeps answering from its runtime budget ([humanoid demo](benchmark/demo-2026-09-15.md)).
 
 ## 2. Indoor service or delivery robot on a phone-class SoC
 

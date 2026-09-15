@@ -32,8 +32,8 @@ missed cycles where the phone loses them — **293 ‰ → 99 ‰** on a Pixel 2
 not at every load point ([use cases](docs/use-cases.md)). With four cameras
 and a vision-language model on one laptop GPU — a vehicle, a sidewalk robot and
 a humanoid — the protected camera stays fresh in **100 %** of cycles
-instead of **0.1–0.2 %**, and the language model waits
-([demos](docs/benchmark/demo-2026-09-15.md)). Tested on an NVIDIA GPU and on the
+instead of **0.1–0.2 %**, while the language model keeps answering from a
+guaranteed runtime budget ([demos](docs/benchmark/demo-2026-09-15.md)). Tested on an NVIDIA GPU and on the
 Adreno GPUs of two Android devices.
 
 **Find out whether it is for you:**
