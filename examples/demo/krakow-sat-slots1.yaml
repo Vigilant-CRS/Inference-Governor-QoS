@@ -1,0 +1,38 @@
+# Demo "City driving", gesaettigt: RF-DETR Medium (576 px) bei 30 Bildern je
+# Sekunde neben SmolVLM auf einer RTX 3070 Laptop.
+#
+# Vertrag des Detektors: jedes Kamerabild (33 ms), Ergebnis spaetestens 66 ms
+# nach der Aufnahme, nach 100 ms wertlos (bei 30 km/h rund 80 cm Fahrt).
+# Variante A: `slots: 1` und `no_corun` — der Governor laesst die beiden nie
+# gleichzeitig rechnen.
+version: 1
+backend:
+  type: triton
+  grpc_endpoint: "127.0.0.1:9501"
+  slots: 1
+  pipelining_depth: 0
+  safety_margin_percent: 110
+  no_corun:
+    - [detector, vlm]
+models:
+  detector:
+    class: protected
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 33, deadline_ms: 66, max_age_ms: 100, variant_dwell_ms: 300 }
+    variants:
+      - id: medium
+        backend_model: rfdetr_medium
+        quality: { value: 1.00, source: user_declared }
+        # vig profile, 200 Laeufe, 15.09.2026
+        profile: { p50_us: 19017, p95_us: 20653, p99_us: 21774, samples: 200 }
+  vlm:
+    class: best_effort
+    backend_endpoint: "127.0.0.1:9601"
+    queue: { policy: fifo, capacity: 2, overflow: backpressure_client }
+    contract: { deadline_ms: 5000, max_age_ms: 8000 }
+    variants:
+      - id: main
+        backend_model: smolvlm
+        quality: { value: 1.00, source: user_declared }
+        # demo-record profile-vlm, 100 Aufrufe, hoechstens 5 Token, 15.09.2026
+        profile: { p50_us: 121474, p95_us: 156447, p99_us: 170257, samples: 100 }

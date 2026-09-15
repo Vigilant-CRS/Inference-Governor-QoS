@@ -1,0 +1,67 @@
+# Demo "City driving", vier Kameras: ein Fahrzeug mit Rundumsicht, jede
+# Kamera laeuft durch denselben Detektor (RF-DETR Medium, 576 px) auf einer
+# RTX 3070 Laptop, daneben SmolVLM.
+#
+# Last: 4 Kameras x 30 Bilder/s x 19 ms = rund 230 % einer GPU. Das ist die
+# Lage, fuer die der Governor da ist: Mehr Arbeit kommt an, als der Chip
+# rechnen kann, und jemand muss entscheiden, was wegfaellt.
+#
+# Vertraege: die Frontkamera ist geschuetzt (jedes Bild, spaetestens 66 ms,
+# nach 100 ms wertlos). Links, rechts und hinten sind `normal`: dieselbe
+# Frische, aber nachrangig. Das Sprachbildmodell ist best_effort.
+version: 1
+backend:
+  type: triton
+  grpc_endpoint: "127.0.0.1:9501"
+  slots: 2
+  pipelining_depth: 0
+  safety_margin_percent: 110
+models:
+  front:
+    class: protected
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 33, deadline_ms: 66, max_age_ms: 100, variant_dwell_ms: 300 }
+    variants:
+      - id: medium
+        backend_model: rfdetr_medium
+        quality: { value: 1.00, source: user_declared }
+        # vig profile, 200 Laeufe, 15.09.2026
+        profile: { p50_us: 19017, p95_us: 20653, p99_us: 21774, samples: 200 }
+  left:
+    class: normal
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 33, deadline_ms: 66, max_age_ms: 100 }
+    variants:
+      - id: medium
+        backend_model: rfdetr_medium
+        quality: { value: 1.00, source: user_declared }
+        profile: { p50_us: 19017, p95_us: 20653, p99_us: 21774, samples: 200 }
+  right:
+    class: normal
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 33, deadline_ms: 66, max_age_ms: 100 }
+    variants:
+      - id: medium
+        backend_model: rfdetr_medium
+        quality: { value: 1.00, source: user_declared }
+        profile: { p50_us: 19017, p95_us: 20653, p99_us: 21774, samples: 200 }
+  rear:
+    class: normal
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 33, deadline_ms: 66, max_age_ms: 100 }
+    variants:
+      - id: medium
+        backend_model: rfdetr_medium
+        quality: { value: 1.00, source: user_declared }
+        profile: { p50_us: 19017, p95_us: 20653, p99_us: 21774, samples: 200 }
+  vlm:
+    class: best_effort
+    backend_endpoint: "127.0.0.1:9601"
+    queue: { policy: fifo, capacity: 2, overflow: backpressure_client }
+    contract: { deadline_ms: 5000, max_age_ms: 8000 }
+    variants:
+      - id: main
+        backend_model: smolvlm
+        quality: { value: 1.00, source: user_declared }
+        # demo-record profile-vlm, 100 Aufrufe, hoechstens 5 Token, 15.09.2026
+        profile: { p50_us: 121474, p95_us: 156447, p99_us: 170257, samples: 100 }

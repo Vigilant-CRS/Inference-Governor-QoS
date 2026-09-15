@@ -29,8 +29,11 @@ time in **99 %** of control cycles instead of 85 % — twenty times fewer
 misses. On two phones carrying a delivery-robot load, it cuts the detector's
 missed cycles where the phone loses them — **293 ‰ → 99 ‰** on a Pixel 2,
 **497 ‰ → 208 ‰** on a Pixel 5 — paid for by the lower-priority streams, and
-not at every load point ([use cases](docs/use-cases.md)). Tested on an NVIDIA
-GPU and on the Adreno GPUs of two Android devices.
+not at every load point ([use cases](docs/use-cases.md)). With four cameras
+and a vision-language model on one laptop GPU, the protected camera stays fresh
+in **100 %** of cycles instead of **0.2 %** — and the language model waits
+([demo](docs/benchmark/demo-2026-09-15.md)). Tested on an NVIDIA GPU and on the
+Adreno GPUs of two Android devices.
 
 **Find out whether it is for you:**
 
@@ -44,7 +47,7 @@ Where your contracts come from — freshness from motion, class from consequence
 [![Watch the video: Stop computing the past (2½ min)](site/assets/video-poster.png)](https://vigilant-crs.github.io/Inference-Governor-QoS/#video)
 
 [![Status](https://img.shields.io/badge/status-pre--production-orange)](#status-what-works-and-what-does-not)
-[![Tests](https://img.shields.io/badge/tests-884%20passing-brightgreen)](#build-and-verify)
+[![Tests](https://img.shields.io/badge/tests-900%20passing-brightgreen)](#build-and-verify)
 [![License](https://img.shields.io/badge/license-BUSL--1.1-blue)](LICENSE)
 
 ---

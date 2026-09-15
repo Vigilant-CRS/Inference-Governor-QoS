@@ -38,6 +38,26 @@ keeps only what holds up in a back-to-back rerun.</p>
 </video>
 </div>
 
+## See it: four cameras, one GPU
+
+Four cameras run RF-DETR at 30 frames per second next to a vision-language
+model on one laptop GPU — more work than the chip can do. Left, NVIDIA Triton
+computes every frame in arrival order, and each result is a third of a second
+old when it arrives. Right, the governor keeps the front camera fresh in every
+cycle, serves the other cameras with what is left — and the language model
+waits. Recorded back to back with the same frames; boxes are drawn where the
+detector saw the objects.
+
+<div class="video">
+<video controls preload="metadata" playsinline poster="assets/demo-four-cameras.jpg">
+<source src="assets/demo-four-cameras.mp4" type="video/mp4">
+</video>
+</div>
+
+Where the GPU is not overloaded, the governor does not help — one camera plus
+the language model ran as well or better without it. Both results, with their
+configurations: [demo measurements](docs/benchmark/demo-2026-09-15.md).
+
 ## The problem
 
 A camera gives you a frame every 33 ms. Your detector needs 15 ms. That fits —

@@ -1,0 +1,11 @@
+name: "rfdetr_medium"
+platform: "onnxruntime_onnx"
+# RF-DETR Medium, oeffentliche COCO-Gewichte (Roboflow rf-detr), 576 px,
+# exportiert am 15.09.2026 mit `rfdetr` im Triton-vLLM-Image. sha256 305c3dd04fcfe728…
+max_batch_size: 0
+input [ { name: "input", data_type: TYPE_FP32, dims: [ 1, 3, 576, 576 ] } ]
+output [
+  { name: "dets", data_type: TYPE_FP32, dims: [ 1, 300, 4 ] },
+  { name: "labels", data_type: TYPE_FP32, dims: [ 1, 300, 91 ] }
+]
+instance_group [ { count: 1, kind: KIND_GPU } ]

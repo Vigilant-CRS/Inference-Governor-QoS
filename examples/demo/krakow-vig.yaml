@@ -1,0 +1,49 @@
+# Demo "City driving": Detektor und Sprachbildmodell auf einer GPU.
+#
+# Zwei Triton-Prozesse auf derselben RTX 3070: RF-DETR (ONNX) auf 9501,
+# SmolVLM (Python-Backend) auf 9601. `slots: 1` und `no_corun`: fuer den
+# Governor ist das eine GPU, auf der beide nicht gleichzeitig rechnen sollen.
+#
+# Vertrag des Detektors: 15 Ergebnisse je Sekunde (period 66 ms), ein Ergebnis
+# ist bis 200 ms nach der Aufnahme brauchbar, spaetestens nach 150 ms soll es
+# da sein. Das Sprachbildmodell ist nachrangig und darf warten.
+#
+# Profile: RF-DETR aus `vig profile` am 15.09.2026 (200 Laeufe, RTX 3070
+# Laptop, Triton 2.70); SmolVLM aus dem direkten Demo-Lauf gesetzt.
+version: 1
+backend:
+  type: triton
+  grpc_endpoint: "127.0.0.1:9501"
+  slots: 1
+  pipelining_depth: 0
+  safety_margin_percent: 110
+  no_corun:
+    - [detector, vlm]
+models:
+  detector:
+    class: protected
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 100, deadline_ms: 200, max_age_ms: 200, variant_dwell_ms: 300 }
+    # Nur eine Variante: Medium (576 px), Small (512 px) und Nano (384 px)
+    # erwarten verschiedene Eingabeformen, und ein Wechsel darf die Form des
+    # Requests nicht aendern.
+    variants:
+      - id: small
+        backend_model: rfdetr_small
+        quality: { value: 1.00, source: user_declared }
+        profile: { p50_us: 15018, p95_us: 16854, p99_us: 19012, samples: 200 }
+  vlm:
+    class: best_effort
+    backend_endpoint: "127.0.0.1:9601"
+    queue: { policy: fifo, capacity: 2, overflow: backpressure_client }
+    contract: { deadline_ms: 5000, max_age_ms: 8000 }
+    variants:
+      - id: main
+        backend_model: smolvlm
+        quality: { value: 1.00, source: user_declared }
+        # demo-record VIG_DEMO_ARM=profile-vlm, 100 Aufrufe ueber gRPC direkt
+        # an Triton, Bilder aus dem Clip, Frage "Name the main things on the
+        # road ahead in a few words.", hoechstens 5 Token (15.09.2026). Mit 16
+        # Token lag p99 bei 858 ms: Jedes Token kostet im Python-Backend rund
+        # 35 ms, und ein so langer Block passt in keinen Detektortakt.
+        profile: { p50_us: 121474, p95_us: 156447, p99_us: 170257, samples: 100 }

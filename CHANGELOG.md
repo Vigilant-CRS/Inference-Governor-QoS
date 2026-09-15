@@ -5,7 +5,31 @@ bedeutet, steht in [docs/releases.md](docs/releases.md).
 
 ## [Unveroeffentlicht]
 
+### Neu (Demo, 15.09. abends)
+
+- **`demo-record`** (vig-bench): spielt einen Clip als Kamera ab, schickt
+  Detektorstroeme und ein Sprachbildmodell direkt an Triton oder ueber den
+  Governor im Prozess und schreibt jede Antwort, Ablehnung und jeden Fehler
+  als Zeitleiste; `profile-vlm` misst das Profil eines Sprachbildmodells ueber
+  gRPC. **`tools/demo/render.py`** setzt zwei Zeitleisten zu einem Video
+  nebeneinander und zeigt je Bild nur, was da schon angekommen war.
+- **Demo „four cameras, one GPU"** ([Messung](docs/benchmark/demo-2026-09-15.md),
+  Konfigurationen in `examples/demo/`): Frontkamera direkt 0,2 % frische Takte,
+  unter dem Governor 100 %; das Sprachmodell wartet. Dazu die Laeufe ohne
+  Ueberlast, in denen der Governor nicht half oder schadete. Video auf der
+  Projektseite.
+
 ### Behoben (externer Review vom 15.09., docs/reviews/2026-09-15)
+
+- **R02/R07** Shared Memory: ein Segment gehoert unter `trust: strict` seinem
+  Registranten; Plaetze werden vor dem Backendaufruf atomar reserviert.
+- **R04** `vig-fit` urteilt nur ueber eine gueltige Matrix; Integrationsfehler
+  machen den Lauf ungueltig, Exitcode 1. `autotune` liest ungueltige Zellen
+  als Fehler.
+- **R06/R09** TFLite-Backend: der Abschluss wird im Modellthread gezaehlt, die
+  Tensorform geprueft.
+- **`workload::drive`** wartet offene Requests nach dem Messfenster ab (bis
+  30 s); vorher belegten sie das Backend im naechsten Messfenster.
 
 - **R03 — ein besseres Maximum verdeckte einen schlechter gewordenen
   geschuetzten Strom.** `tune` verglich nur den schlechtesten geschuetzten

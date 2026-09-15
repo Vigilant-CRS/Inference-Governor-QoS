@@ -20,4 +20,6 @@ backends/**/target/
 *.srt
 # Ausnahme: das eine Video, das die Projektseite abspielt (site/index.md).
 !site/assets/vigilant-inference-governor.mp4
+# und die Demo "four cameras, one GPU" (docs/benchmark/demo-2026-09-15.md).
+!site/assets/demo-four-cameras.mp4
 tools/video/build/
