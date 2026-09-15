@@ -52,10 +52,14 @@ nothing on this load, that sentence is the headline of the report
 the `tune` step tries the governor's own settings on your load —
 `pipelining_depth`, `protect_supply`, `margin_learning`,
 `safety_margin_percent` — one at a time, in a single pass, each through
-`vig-fit` with the governor arm only (about four minutes). A setting is kept
-only if it beats the best one so far by more than a noise threshold, and
-never if it is worse for your protected streams than the measured
-configuration. The kept settings go into `measured.yaml`, so the "is it worth
+`vig-fit` with the governor arm only (about four to seven minutes). It does not
+search at all if `vig doctor` already says NOT_READY for the measured
+configuration: no setting can serve contracts the machine cannot schedule. A
+setting is kept only if it beats the best one so far by more than a noise
+threshold, and never if it is worse for your protected streams than the
+measured configuration. A kept setting is written only if it holds up again in
+two back-to-back pairs against the untuned configuration. The kept settings go
+into `measured.yaml`, so the "is it worth
 it here?" step judges the tuned governor. The report lists every setting
 tried, its numbers, and whether it was kept, rejected or refused. Contracts
 and `backend.slots` are never changed; if the step ran under foreign load,

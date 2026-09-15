@@ -35,6 +35,21 @@
 //! nachrangigen Stroemen viel bringt. Lief der Schritt unter Fremdlast, wird
 //! die unverstellte Fassung zurueckgeschrieben: Dann weiss niemand, ob der
 //! Vorsprung von der Einstellung kam oder von der anderen Arbeit.
+//!
+//! ## Machbarkeit und Bestaetigung
+//!
+//! Zwei Befunde vom Pixel 2 (15.09., `vig-slots2-heavy.yaml`) haben die erste
+//! Fassung dieses Schritts widerlegt (ADR-0045, „Bestaetigung und
+//! Machbarkeit"):
+//!
+//! * **Vor der Suche** muss die gemessene Fassung `vig doctor` bestehen. Sagt
+//!   die Pruefung `NOT_READY`, wird nicht gesucht: Auf einer Maschine, die die
+//!   Vertraege nicht planen kann, misst die Suche nur Streuung.
+//! * **Vor dem Schreiben** muss eine behaltene Einstellung sich bestaetigen:
+//!   unverstellt und eingestellt noch einmal, abwechselnd, in zwei Paaren,
+//!   und in **jedem** Paar muss die eingestellte nach derselben Regel
+//!   gewinnen. Ein einzelnes 10-s-Fenster auf einer gesaettigten Maschine
+//!   streut weiter als der Vorsprung, den die Suche behalten hatte.
 
 use super::{Outcome, Steps};
 use std::collections::BTreeSet;
@@ -81,6 +96,16 @@ const MARGIN_MAX_PERCENT: u32 = 300;
 /// Umstellungen (Tiefe, Versorgungsschutz, Kalibrierung, zwei Margen).
 const TYPICAL_EVALUATIONS: u64 = 6;
 
+/// Paare der Bestaetigung: je einmal unverstellt, dann eingestellt.
+///
+/// Zwei und nicht eines: Ein einzelnes Paar kann denselben Zufall zweimal
+/// treffen, der schon die Suche getaeuscht hat. Mehr als zwei kosten je Paar
+/// zwei weitere Bewertungen, und die Regel verlangt ohnehin jedes Paar.
+const CONFIRMATION_PAIRS: u64 = 2;
+
+/// Bewertungen der Bestaetigung.
+const CONFIRMATION_EVALUATIONS: u64 = CONFIRMATION_PAIRS.saturating_mul(2);
+
 /// Aufwand je Aufruf von `vig-fit` jenseits der Messfenster, in Sekunden:
 /// Start, Metadaten, zwei Fenster fuer die Fremdlast von je drei Sekunden.
 /// Der Laptoplauf vom 15.09. brauchte fuer 80 s Messfenster 82 s, die
@@ -111,13 +136,16 @@ pub(crate) const fn eval_seconds(quick: bool) -> u64 {
 /// Anders als der Messschritt haengt sie kaum an der Hardware: Die Messfenster
 /// von `vig-fit` sind feste Wanduhrzeit. Was sie nicht kennt, ist die Zahl der
 /// Stellgroessen, die tatsaechlich versucht werden — sechs Bewertungen sind
-/// der uebliche Fall.
+/// der uebliche Fall —, und ob etwas behalten wird. Gerechnet wird, als waere
+/// es so: dann kommen die vier Bewertungen der Bestaetigung dazu.
 pub(crate) const fn rough_seconds(quick: bool) -> u64 {
-    TYPICAL_EVALUATIONS.saturating_mul(
-        eval_point_count(quick)
-            .saturating_mul(eval_seconds(quick))
-            .saturating_add(OVERHEAD_SECONDS_PER_EVALUATION),
-    )
+    TYPICAL_EVALUATIONS
+        .saturating_add(CONFIRMATION_EVALUATIONS)
+        .saturating_mul(
+            eval_point_count(quick)
+                .saturating_mul(eval_seconds(quick))
+                .saturating_add(OVERHEAD_SECONDS_PER_EVALUATION),
+        )
 }
 
 /// Ein Strom an einem Lastpunkt, unter dem Governor.
@@ -267,11 +295,79 @@ pub(crate) enum Unevaluated {
     Failed { reason: String },
 }
 
+/// Was `vig doctor` ueber die gemessene Fassung sagt, bevor gesucht wird.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Feasibility {
+    /// `READY`, `READY_WITH_WARNINGS` oder `NOT_READY`.
+    pub(crate) verdict: String,
+    /// Die `FAIL`-Zeilen der Pruefung, soweit es welche gibt.
+    pub(crate) failures: Vec<String>,
+}
+
+impl Feasibility {
+    /// Verweigert die Pruefung die Fassung?
+    fn refuses(&self) -> bool {
+        self.verdict == "NOT_READY"
+    }
+}
+
 /// Die Zielgroesse einer Bewertung, in Promille.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Objective {
     pub(crate) protected_worst: u64,
     pub(crate) background_mean: u64,
+}
+
+impl Objective {
+    /// `geschuetzt/nachrangig ‰`, fuer Begruendungen.
+    fn short(self) -> String {
+        format!("{}/{} ‰", self.protected_worst, self.background_mean)
+    }
+}
+
+/// Ein Paar der Bestaetigung: unverstellt, dann eingestellt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConfirmationPair {
+    /// 1 oder 2, wie in `tune/confirm-<pair>-{untuned,tuned}.json`.
+    pub(crate) pair: u64,
+    /// `None`, wenn die Bewertung nicht zustande kam.
+    pub(crate) untuned: Option<Objective>,
+    pub(crate) tuned: Option<Objective>,
+    /// Gewinnt die eingestellte Fassung in diesem Paar nach [`decide`]?
+    pub(crate) held: bool,
+    pub(crate) reason: String,
+}
+
+/// Die Bestaetigung einer behaltenen Einstellung.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Confirmation {
+    pub(crate) pairs: Vec<ConfirmationPair>,
+}
+
+impl Confirmation {
+    /// Hat sie in **jedem** Paar gehalten?
+    pub(crate) fn held(&self) -> bool {
+        !self.pairs.is_empty() && self.pairs.iter().all(|p| p.held)
+    }
+
+    /// Die Zahlen aller Paare in einer Zeile, fuer `withheld`.
+    fn summary(&self) -> String {
+        let show =
+            |o: Option<Objective>| o.map_or_else(|| "not evaluated".to_owned(), Objective::short);
+        self.pairs
+            .iter()
+            .map(|p| {
+                format!(
+                    "pair {} untuned {}, tuned {} ({})",
+                    p.pair,
+                    show(p.untuned),
+                    show(p.tuned),
+                    if p.held { "held" } else { "not held" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
 }
 
 /// Behalten oder nicht — mit Begruendung in beiden Faellen.
@@ -403,6 +499,8 @@ pub(crate) struct Tuning {
     pub(crate) applied: bool,
     /// Warum eine gefundene bessere Fassung **nicht** geschrieben wurde.
     pub(crate) withheld: Option<String>,
+    /// Die Bestaetigung; `None`, wenn nichts behalten wurde.
+    pub(crate) confirmation: Option<Confirmation>,
 }
 
 impl Tuning {
@@ -679,16 +777,138 @@ pub(crate) async fn run<S: Steps + ?Sized>(
             notes.push(format!(
                 "{} settings tried besides the measured one, {evaluated} of them evaluated; {}",
                 tuning.candidates.len(),
-                if tuning.improved() {
-                    "the best one is written to the frozen configuration"
-                } else {
-                    "none beat the measured configuration beyond the noise threshold"
+                match (tuning.improved(), tuning.applied) {
+                    (true, true) => {
+                        "the best one held up in confirmation and is written to the frozen \
+                         configuration"
+                    }
+                    (true, false) => "the best one is not written (see the report)",
+                    (false, _) => "none beat the measured configuration beyond the noise threshold",
                 }
             ));
             (Outcome::Done, Some(tuning))
         }
-        Err(outcome) => (outcome, None),
+        // Ohne Ergebnis bleibt keine Einstellung stehen, die der Bericht nicht
+        // nennt — auch keine aus einem frueheren `tune` derselben Messung.
+        Err(outcome) => match restore_untuned(measured) {
+            Ok(()) => (outcome, None),
+            Err(reason) => (
+                Outcome::Failed {
+                    reason: outcome
+                        .reason()
+                        .map_or_else(|| reason.clone(), |first| format!("{first}; {reason}")),
+                },
+                None,
+            ),
+        },
     }
+}
+
+/// Schreibt die unverstellte Fassung zurueck, falls es eine gibt und
+/// `measured.yaml` von ihr abweicht.
+///
+/// # Errors
+///
+/// Wenn sie da ist, aber nicht gelesen oder zurueckgeschrieben werden kann.
+fn restore_untuned(measured: &Path) -> Result<(), String> {
+    let path = tune_dir(measured).join(UNTUNED_FILE);
+    let untuned = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("{} is unreadable: {e}", path.display())),
+    };
+    if std::fs::read_to_string(measured).is_ok_and(|current| current == untuned) {
+        return Ok(());
+    }
+    std::fs::write(measured, &untuned).map_err(|e| {
+        format!(
+            "the untuned configuration could not be restored to {}: {e}",
+            measured.display()
+        )
+    })
+}
+
+/// Bewertet eine Fassung fuer die Bestaetigung.
+///
+/// # Errors
+///
+/// Warum keine vergleichbare Zielgroesse zustande kam.
+async fn confirmation_objective<S: Steps + ?Sized>(
+    steps: &mut S,
+    path: &Path,
+    expected: &BTreeSet<(u64, String)>,
+    quick: bool,
+) -> Result<Objective, String> {
+    match steps.evaluate(path, quick).await {
+        Ok(evaluation) if evaluation.cells() == *expected => evaluation
+            .objective()
+            .ok_or_else(|| "the evaluation has no load point".to_owned()),
+        Ok(_) => Err("not comparable: other streams or load points than the search".to_owned()),
+        Err(Unevaluated::Missing) => Err("vig-fit is no longer found".to_owned()),
+        Err(Unevaluated::Refused { reason }) => {
+            Err(format!("refused by the configuration check: {reason}"))
+        }
+        Err(Unevaluated::Failed { reason }) => Err(reason),
+    }
+}
+
+/// Faehrt unverstellt und eingestellt abwechselnd, [`CONFIRMATION_PAIRS`]-mal.
+///
+/// Abwechselnd und direkt hintereinander: Was sich an der Maschine zwischen
+/// Suche und Bestaetigung aendert — Temperatur, Takt, Hintergrund —, trifft
+/// beide Fassungen eines Paars gleich. Verglichen wird nur innerhalb eines
+/// Paars, nie mit den Zahlen der Suche.
+///
+/// # Errors
+///
+/// Wenn eine Fassung nicht geschrieben werden kann.
+async fn confirm<S: Steps + ?Sized>(
+    steps: &mut S,
+    dir: &Path,
+    untuned_text: &str,
+    tuned_text: &str,
+    expected: &BTreeSet<(u64, String)>,
+    quick: bool,
+) -> Result<Confirmation, Outcome> {
+    let mut pairs = Vec::new();
+    for pair in 1..=CONFIRMATION_PAIRS {
+        let mut objectives = Vec::new();
+        for (label, text) in [("untuned", untuned_text), ("tuned", tuned_text)] {
+            let path = dir.join(format!("confirm-{pair}-{label}.yaml"));
+            std::fs::write(&path, text)
+                .map_err(|e| failed(format!("{} could not be written: {e}", path.display())))?;
+            objectives.push(confirmation_objective(steps, &path, expected, quick).await);
+        }
+        let mut objectives = objectives.into_iter();
+        let untuned = objectives
+            .next()
+            .unwrap_or_else(|| Err("not evaluated".to_owned()));
+        let tuned = objectives
+            .next()
+            .unwrap_or_else(|| Err("not evaluated".to_owned()));
+        let (held, reason) = match (&untuned, &tuned) {
+            // Dieselbe Regel wie in der Suche, mit der unverstellten Fassung
+            // dieses Paars als bisher bester und als unverstellter.
+            (Ok(before), Ok(after)) => match decide(*after, *before, *before) {
+                Ok(why) => (true, why),
+                Err(why) => (false, why),
+            },
+            (Err(why), _) => (false, format!("untuned not evaluated: {why}")),
+            (_, Err(why)) => (false, format!("tuned not evaluated: {why}")),
+        };
+        println!(
+            "    confirmation pair {pair}: {} — {reason}",
+            if held { "held" } else { "not held" }
+        );
+        pairs.push(ConfirmationPair {
+            pair,
+            untuned: untuned.ok(),
+            tuned: tuned.ok(),
+            held,
+            reason,
+        });
+    }
+    Ok(Confirmation { pairs })
 }
 
 fn failed(reason: String) -> Outcome {
@@ -751,6 +971,36 @@ async fn search<S: Steps + ?Sized>(
                 .collect::<Vec<_>>()
                 .join("; ")
         )));
+    }
+
+    // Machbarkeit vor der Suche. Auf dem Pixel 2 hat die Suche eine Maschine
+    // eingestellt, die die Vertraege gar nicht planen konnte (126 % geschuetzte
+    // Auslastung auf zwei Slots) — und dabei nur Streuung behalten.
+    let feasibility = steps.feasibility(&untuned_path).await.map_err(|e| {
+        failed(format!(
+            "the configuration check could not run on the measured configuration: {e}"
+        ))
+    })?;
+    if feasibility.refuses() {
+        let mut reason = format!(
+            "the measured configuration is not ready on this machine (vig doctor: {}), so the \
+             contracts cannot be served as configured — no governor setting can serve them; \
+             tuning skipped",
+            feasibility.verdict
+        );
+        if !feasibility.failures.is_empty() {
+            let _ = write!(
+                reason,
+                ". vig doctor: {}",
+                feasibility
+                    .failures
+                    .iter()
+                    .map(|line| format!("FAIL {}", line.replace('|', "/")))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            );
+        }
+        return Err(Outcome::Skipped { reason });
     }
 
     let baseline = match steps.evaluate(&untuned_path, quick).await {
@@ -865,20 +1115,40 @@ async fn search<S: Steps + ?Sized>(
     }
 
     let improved = candidates.iter().any(|c| c.decision == Decision::Kept);
-    // Ohne Verbesserung wird die unverstellte Fassung Byte fuer Byte
-    // zurueckgeschrieben — auch dann, wenn ein frueheres `tune` auf derselben
-    // Messung etwas behalten hatte, das dieser Lauf nicht bestaetigt.
-    let tuned_text = if improved {
-        best.to_yaml().map_err(|e| {
+    let mut confirmation = None;
+    let mut withheld = None;
+    let mut written = untuned_text.clone();
+    if improved {
+        let tuned_text = best.to_yaml().map_err(|e| {
             failed(format!(
                 "the tuned configuration could not be written as YAML: {e}"
             ))
-        })?
-    } else {
-        untuned_text
-    };
-    if tuned_text != measured_text {
-        std::fs::write(measured, &tuned_text)
+        })?;
+        let checked = confirm(
+            steps,
+            &dir,
+            &untuned_text,
+            &tuned_text,
+            &expected_cells,
+            quick,
+        )
+        .await?;
+        if checked.held() {
+            written = tuned_text;
+        } else {
+            withheld = Some(format!(
+                "did not hold up in confirmation (protected worst/lower-priority mean): {}",
+                checked.summary()
+            ));
+        }
+        confirmation = Some(checked);
+    }
+    // Ohne bestaetigte Verbesserung wird die unverstellte Fassung Byte fuer
+    // Byte zurueckgeschrieben — auch dann, wenn ein frueheres `tune` auf
+    // derselben Messung etwas behalten hatte, das dieser Lauf nicht bestaetigt.
+    let applied = written != untuned_text;
+    if written != measured_text {
+        std::fs::write(measured, &written)
             .map_err(|e| failed(format!("{} could not be written: {e}", measured.display())))?;
     }
     Ok(Tuning {
@@ -886,14 +1156,48 @@ async fn search<S: Steps + ?Sized>(
         tuned: best_objective,
         candidates,
         not_tried,
-        applied: improved,
-        withheld: None,
+        applied,
+        withheld,
+        confirmation,
     })
 }
 
 /// Eine Zelle einer Markdown-Tabelle: kein `|`, kein Zeilenumbruch.
 fn cell(text: &str) -> String {
     text.replace('|', "\\|").replace('\n', " ")
+}
+
+/// Wie gesucht, entschieden und bestaetigt wurde — mit den Schwellen, die der
+/// Code tatsaechlich benutzt, und nicht mit abgeschriebenen Zahlen.
+fn method_markdown(out: &mut String) {
+    let _ = write!(
+        out,
+        "\nEvery setting ran through `vig-fit` with the governor arm only, at {} % load ({} % \
+         with `--quick`), and the numbers are uncovered samples from the consumer's view. \
+         *Protected worst* is the worst protected stream at the worst load point; \
+         *lower-priority mean* is the mean over the lower-priority streams per load point, \
+         averaged over the load points. Only the governor's own settings were tried — \
+         contracts, models and `backend.slots` are never changed. The search is **one pass** \
+         over the settings in a fixed order (coordinate descent): a setting is not tried again \
+         after a later one changed, so this is the best of the settings tried, not an optimum. \
+         A setting is kept only if it beats the best one so far beyond the noise threshold — \
+         the protected worst by at least {} ‰ or a tenth, whichever is larger, or, with the \
+         protected streams no worse, the lower-priority mean by at least {} ‰ or a tenth. \
+         Nothing worse for the protected streams than the untuned configuration is ever kept. \
+         A kept setting is written only if it also holds up in back-to-back confirmation: the \
+         untuned and the tuned configuration run again, interleaved, in {} pairs, and the tuned \
+         one must beat that pair's untuned one by the same rule in every pair — one measuring \
+         window on a saturated machine scatters more than the effects the search keeps. The \
+         search does not run at all if `vig doctor` says NOT_READY for the measured \
+         configuration. Each setting is kept as `tune/candidate-<n>.yaml`, the untuned one as \
+         `tune/untuned.yaml`, the confirmation evaluations as \
+         `tune/confirm-<pair>-untuned.json` and `-tuned.json`.\n\n",
+        eval_points(false),
+        eval_points(true),
+        PROTECTED_MIN_GAIN_PERMILLE,
+        BACKGROUND_MIN_GAIN_PERMILLE,
+        CONFIRMATION_PAIRS
+    );
 }
 
 /// Der Abschnitt „Tuning" des Berichts.
@@ -904,12 +1208,12 @@ pub(crate) fn markdown(tuning: &Tuning, out: &mut String) {
         (Some(why), true) => {
             let _ = writeln!(
                 out,
-                "A setting that did better was found, but it was **not** written: {why}. The \
+                "A setting did better in the search, but it was **not** written: {why}. The \
                  frozen configuration is the measured one, untuned."
             );
         }
         (_, true) => {
-            let _ = writeln!(
+            let _ = write!(
                 out,
                 "Tuned: the protected streams miss at worst {} ‰ instead of {} ‰ with the \
                  untuned governor; the lower-priority streams {} ‰ instead of {} ‰.",
@@ -918,6 +1222,15 @@ pub(crate) fn markdown(tuning: &Tuning, out: &mut String) {
                 tuning.tuned.background_mean,
                 tuning.untuned.background_mean
             );
+            if let Some(confirmation) = &tuning.confirmation {
+                let held = confirmation.pairs.iter().filter(|p| p.held).count();
+                let _ = write!(
+                    out,
+                    " The setting held up in {held} of {} back-to-back confirmation pairs.",
+                    confirmation.pairs.len()
+                );
+            }
+            out.push('\n');
         }
         (_, false) => {
             let _ = writeln!(
@@ -926,26 +1239,7 @@ pub(crate) fn markdown(tuning: &Tuning, out: &mut String) {
             );
         }
     }
-    let _ = write!(
-        out,
-        "\nEvery setting ran through `vig-fit` with the governor arm only, at {} % load ({} % \
-         with `--quick`), and the numbers are uncovered samples from the consumer's view. *Protected worst* is the \
-         worst protected stream at the worst load point; *lower-priority mean* is the mean \
-         over the lower-priority streams per load point, averaged over the load points. Only the \
-         governor's own settings were tried — contracts, models and `backend.slots` are never \
-         changed. The search is **one pass** over the settings in a fixed order (coordinate \
-         descent): a setting is not tried again after a later one changed, so this is the best \
-         of the settings tried, not an optimum. A setting is kept only if it beats the best one \
-         so far beyond the noise threshold — the protected worst by at least {} ‰ or a tenth, \
-         whichever is larger, or, with the protected streams no worse, the lower-priority mean \
-         by at least {} ‰ or a tenth. Nothing worse for the protected streams than the untuned \
-         configuration is ever kept. Each setting is kept as `tune/candidate-<n>.yaml`, the \
-         untuned one as `tune/untuned.yaml`.\n\n",
-        eval_points(false),
-        eval_points(true),
-        PROTECTED_MIN_GAIN_PERMILLE,
-        BACKGROUND_MIN_GAIN_PERMILLE
-    );
+    method_markdown(out);
     out.push_str(
         "| # | Setting tried | Differs from the measured configuration | Protected worst ‰ | \
          Lower-priority mean ‰ | Decision |\n|---:|---|---|---:|---:|---|\n",
@@ -980,6 +1274,56 @@ pub(crate) fn markdown(tuning: &Tuning, out: &mut String) {
         for line in &tuning.not_tried {
             let _ = writeln!(out, "- {line}");
         }
+    }
+    if let Some(confirmation) = &tuning.confirmation {
+        confirmation_markdown(confirmation, out);
+    }
+}
+
+/// Der Unterabschnitt „Confirmation": jedes Paar mit seinen Zahlen.
+///
+/// Eine nicht bewertete Fassung hat keine Zahl, sondern einen Strich und den
+/// Grund in der letzten Spalte.
+fn confirmation_markdown(confirmation: &Confirmation, out: &mut String) {
+    let _ = writeln!(
+        out,
+        "\n### Confirmation\n\nThe best setting of the search against the untuned one, run back \
+         to back, untuned first. {}\n",
+        if confirmation.held() {
+            "It held up in every pair."
+        } else {
+            "It did **not** hold up in every pair, so it was not written."
+        }
+    );
+    out.push_str(
+        "| Pair | Untuned protected worst ‰ | Untuned lower-priority mean ‰ | Tuned protected \
+         worst ‰ | Tuned lower-priority mean ‰ | Held |\n|---:|---:|---:|---:|---:|---|\n",
+    );
+    let number = |o: Option<Objective>, protected: bool| {
+        o.map_or_else(
+            || "—".to_owned(),
+            |o| {
+                if protected {
+                    o.protected_worst
+                } else {
+                    o.background_mean
+                }
+                .to_string()
+            },
+        )
+    };
+    for pair in &confirmation.pairs {
+        let _ = writeln!(
+            out,
+            "| {} | {} | {} | {} | {} | {} — {} |",
+            pair.pair,
+            number(pair.untuned, true),
+            number(pair.untuned, false),
+            number(pair.tuned, true),
+            number(pair.tuned, false),
+            if pair.held { "yes" } else { "no" },
+            cell(&pair.reason)
+        );
     }
 }
 
@@ -1034,7 +1378,35 @@ pub(crate) fn to_json(tuning: &Tuning) -> serde_json::Value {
         "withheld": tuning.withheld,
         "candidates": candidates,
         "not_tried": tuning.not_tried,
+        "confirmation": tuning.confirmation.as_ref().map(|c| {
+            serde_json::json!({
+                "pairs_required": CONFIRMATION_PAIRS,
+                "held": c.held(),
+                "pairs": c.pairs.iter().map(|p| serde_json::json!({
+                    "pair": p.pair,
+                    "untuned": objective_json(p.untuned),
+                    "tuned": objective_json(p.tuned),
+                    "held": p.held,
+                    "reason": p.reason,
+                })).collect::<Vec<_>>(),
+            })
+        }),
     })
+}
+
+/// Die Bestaetigung aus dem Zustand; `None`, wo sie fehlt oder unlesbar ist.
+fn confirmation_from_json(value: &serde_json::Value) -> Option<Confirmation> {
+    let mut pairs = Vec::new();
+    for entry in value.get("pairs")?.as_array()? {
+        pairs.push(ConfirmationPair {
+            pair: entry.get("pair")?.as_u64()?,
+            untuned: entry.get("untuned").and_then(objective_from_json),
+            tuned: entry.get("tuned").and_then(objective_from_json),
+            held: entry.get("held")?.as_bool()?,
+            reason: entry.get("reason")?.as_str()?.to_owned(),
+        });
+    }
+    Some(Confirmation { pairs })
 }
 
 /// Liest das Ergebnis aus dem Zustand zurueck; `None`, wo es unvollstaendig
@@ -1080,6 +1452,7 @@ pub(crate) fn from_json(value: &serde_json::Value) -> Option<Tuning> {
             .get("withheld")
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned),
+        confirmation: value.get("confirmation").and_then(confirmation_from_json),
     })
 }
 

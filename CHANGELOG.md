@@ -17,6 +17,31 @@ bedeutet, steht in [docs/releases.md](docs/releases.md).
   fest. Das Ergebnis des Laptoplaufs aendert das nicht (die gemessene
   Konfiguration war dort schon die beste), wohl aber jede Last, auf der ein
   nachrangiger Strom zu retten ist.
+- **Das Tuning stellte eine Maschine ein, die die Vertraege nicht tragen
+  kann** (Pixel 2, `vig-slots2-heavy.yaml`). `vig doctor` sagte danach
+  `NOT_READY` (`PROTECTED_WORKLOAD_UNSCHEDULABLE`, 126 % geschuetzte
+  Auslastung auf zwei Slots). Jetzt laeuft dieselbe Pruefung **vor** der
+  Suche; sagt sie `NOT_READY`, wird `tune` mit Grund und den `FAIL`-Zeilen
+  als `skipped` gefuehrt, nichts bewertet und nichts geschrieben. Der Lauf ist
+  damit unvollstaendig, nicht gescheitert — die Freigabe verweigert ohnehin
+  schon `NOT_READY`.
+- **Eine behaltene Einstellung war Streuung.** Auf demselben Lauf behielt die
+  Suche `protect_supply: true` und `safety_margin_percent: 100`, geschuetzt
+  220 → 50 ‰. `fit` mass dieselbe Fassung danach bei 25/90/440 ‰ an
+  100/110/125 % Last, wo die Bewertung im Tuning 50/22/40 ‰ gesehen hatte:
+  Ein 10-s-Fenster auf einer gesaettigten Maschine streut weiter als der
+  behaltene Effekt. Jetzt werden unverstellte und eingestellte Fassung vor dem
+  Schreiben noch zweimal abwechselnd bewertet; geschrieben wird nur, wenn die
+  eingestellte in **jedem** Paar nach derselben Regel gewinnt. Sonst bleibt
+  `measured.yaml` Byte fuer Byte unverstellt, und `withheld` nennt die Zahlen
+  beider Paare. Bericht („### Confirmation") und JSON (`tuning.confirmation`)
+  fuehren die Paare, die Bewertungen liegen als
+  `tune/confirm-<paar>-{untuned,tuned}.json`. Die Schaetzung fuer `tune` steigt
+  von 240 auf 400 s (`--quick` 200 s), die Referenzgroesse von 529 auf 689 s.
+- Ein `tune`, das ohne Ergebnis endet (ausgelassen oder gescheitert), schreibt
+  die unverstellte Fassung zurueck, falls ein frueheres `tune` derselben
+  Messung etwas hinterlassen hatte. Sonst stuende eine Einstellung in Betrieb,
+  die der Bericht nicht nennt.
 
 ### Hinzugefuegt
 

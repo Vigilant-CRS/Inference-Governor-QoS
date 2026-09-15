@@ -189,8 +189,100 @@ Die Regeln aus ADR-0044 gelten fuer den neuen Schritt ohne Abstrich:
    unveraendert und der Lauf unvollstaendig — wie bei `fit`. Scheitert die
    Bewertung der unverstellten Fassung, scheitert der Schritt.
 
+## Bestaetigung und Machbarkeit
+
+**Nachtrag 15.09., nach dem Lauf auf dem Pixel 2 mit schwerer Last**
+(`vig-slots2-heavy.yaml`, Lauf
+`messungen/autotune-pixel2-2026-09-15-tuned-heavy`). Die erste Fassung dieses
+Schritts hat dort zwei Dinge falsch gemacht, und beide widersprechen dem, was
+oben als Zusage steht.
+
+**Befund 1: gesucht auf einer Maschine, die die Vertraege nicht traegt.** Die
+Suche behielt `protect_supply: true` und `safety_margin_percent: 100`. Danach
+sagte `vig doctor` im Schritt `check`: `NOT_READY`,
+`PROTECTED_WORKLOAD_UNSCHEDULABLE`, 126 % geschuetzte Auslastung auf zwei
+Slots. Keine Einstellung des Governors macht aus 126 % auf zwei Slots eine
+planbare Last; was eine Suche dort misst, ist, wie verschieden eine
+uebersaettigte Maschine von Fenster zu Fenster ausfaellt.
+
+**Befund 2: eine behaltene Einstellung war Streuung.** Die Suche sah fuer die
+behaltene Fassung geschuetzt 220 → 50 ‰, je ein 10-s-Fenster mit nur dem
+Governor-Arm. `fit` mass **dieselbe** Fassung unmittelbar danach: der
+Detektor unter dem Governor bei 25/90/440 ‰ an 100/110/125 % Last — die
+Bewertung im Tuning hatte an denselben Punkten 50/22/40 ‰ gesehen. Die
+Streuung eines einzelnen Fensters auf einer gesaettigten Maschine ist also um
+ein Vielfaches groesser als der Effekt, den die Rauschschwelle von
+`max(5 ‰, ein Zehntel)` durchgelassen hat. Eine gesetzte Grenze kann die
+Streuung einer fremden Maschine nicht kennen; auf einer Maschine unter
+Saettigung ist sie deshalb nicht die richtige Sicherung.
+
+### Entscheidung
+
+1. **Machbarkeit vor der Suche.** Bevor irgendeine Fassung bewertet wird,
+   laeuft auf der unverstellten Fassung dasselbe Urteil wie im Schritt
+   `check` (`vig doctor`). Sagt es `NOT_READY`, wird nicht gesucht: Der
+   Schritt steht als `skipped` im Bericht, mit dem Grund und den `FAIL`-Zeilen
+   der Pruefung, nichts wird bewertet und `measured.yaml` bleibt unverstellt.
+   `READY_WITH_WARNINGS` haelt die Suche nicht auf.
+
+   *Warum `skipped` und nicht `failed`:* Nach ADR-0044 ist `failed` ein
+   Schritt, der nicht durchlief — ein Werkzeugfehler. Hier lief alles, und die
+   Antwort lautet: auf dieser Maschine gibt es nichts einzustellen. Das ist
+   dieselbe Art offene Frage wie ein fehlendes `vig-fit`. Der Lauf wird damit
+   unvollstaendig („not every step ran"), der Ausgabewert bleibt 0, und die
+   Freigabe verweigert ohnehin schon `NOT_READY` aus `check`. Ein zweites,
+   gleichlautendes Nein als Fehlschlag zu fuehren, wuerde eine CI rot faerben
+   fuer ein Ergebnis — genau das, was ADR-0044 ausschliesst.
+
+2. **Bestaetigung vor dem Schreiben.** Hat die Suche etwas behalten, werden
+   unverstellte und eingestellte Fassung noch einmal bewertet, direkt
+   hintereinander und abwechselnd, in zwei Paaren: unverstellt, eingestellt,
+   unverstellt, eingestellt — dieselben Lastpunkte, dieselben Sekunden.
+   Geschrieben wird die eingestellte Fassung nur, wenn sie in **jedem** Paar
+   die unverstellte **dieses Paars** nach derselben Regel schlaegt:
+   geschuetzt um mindestens `max(5 ‰, unverstellt / 10)`, oder bei nicht
+   schlechteren geschuetzten Stroemen nachrangig um mindestens
+   `max(10 ‰, unverstellt / 10)`. Sonst bleibt `measured.yaml` Byte fuer Byte
+   unverstellt, `applied` ist `false`, und `withheld` nennt die Zahlen beider
+   Paare („did not hold up in confirmation: pair 1 untuned X/Y ‰, tuned A/B ‰
+   …"). Die Paare stehen im Bericht unter „Confirmation" und im JSON unter
+   `tuning.confirmation`, die Bewertungen als
+   `tune/confirm-<paar>-{untuned,tuned}.json`.
+
+   *Warum abwechselnd und paarweise:* Was sich an der Maschine zwischen zwei
+   Bewertungen aendert — Temperatur, Takt, Hintergrund —, trifft beide
+   Fassungen eines Paars fast gleich. Verglichen wird nur innerhalb eines
+   Paars, nie mit den Zahlen der Suche; die haben die Einstellung gerade
+   ausgewaehlt und sind deshalb zu ihren Gunsten verzerrt. *Warum jedes Paar:*
+   Die Regel soll eine Einstellung durchlassen, die wiederholt gewinnt, und
+   keine, die einmal Glueck hatte. *Warum zwei:* Eines kann denselben Zufall
+   treffen, der schon die Suche getaeuscht hat; jedes weitere kostet zwei
+   Bewertungen, rund 80 s.
+
+3. **Ein `tune` ohne Ergebnis hinterlaesst keine Einstellung.** Endet der
+   Schritt ausgelassen oder gescheitert, wird `tune/untuned.yaml` nach
+   `measured.yaml` zurueckgeschrieben, falls ein frueheres `tune` derselben
+   Messung etwas hinterlassen hatte. Sonst stuende eine Einstellung in
+   Betrieb, die kein Bericht nennt.
+
+### Was das nicht loest
+
+Die Bestaetigung verhindert, dass Streuung geschrieben wird; sie macht aus
+einer gesaettigten Maschine keine ruhige. Auf dem Pixel-2-Lauf haette die
+Machbarkeitspruefung die Suche gar nicht erst beginnen lassen. Auf einer
+Maschine, die gerade noch planbar ist und trotzdem stark streut, wird die
+Bestaetigung haeufiger „nicht gehalten" sagen — dann bleibt die gemessene
+Fassung stehen, und das ist die sichere Richtung. Die Streuung selbst misst
+auch diese Fassung nicht; vier Bewertungen sind zu wenige, um aus ihnen eine
+Schwelle abzuleiten.
+
 ## Konsequenzen
 
+- **Nachtrag zur Dauer:** Mit der Bestaetigung rechnet die Schaetzung zehn
+  statt sechs Bewertungen, 400 s statt 240 s (`--quick` 200 s). Die
+  Referenzgroesse steigt auf 689 s, die zugesagte halbe Stunde haelt. Wird
+  nichts behalten, entfallen die vier Bewertungen der Bestaetigung; wird
+  wegen `NOT_READY` nicht gesucht, kostet der Schritt nur die Pruefung.
 - **Die Dauer waechst um rund vier Minuten.** Die Schaetzung setzt sechs
   Bewertungen zu je drei Punkten × 10 s plus 10 s Aufwand an, 240 s
   (`--quick`: 120 s). Der Aufwand stammt aus den Laeufen vom 15.09.: `vig-fit`
@@ -212,9 +304,12 @@ Die Regeln aus ADR-0044 gelten fuer den neuen Schritt ohne Abstrich:
   ersten offenen Schritt laeuft alles Folgende mit") laufen `tune`, `fit` und
   `check`.
 - **Was offen bleibt:**
-  - Jede Fassung wird **einmal** gemessen. Die Schwelle ist gesetzt, nicht aus
-    einer gemessenen Streuung abgeleitet; eine Wiederholung der besten und der
-    unverstellten Fassung wuerde das belegen und kostet eine weitere Minute.
+  - Jede Fassung der **Suche** wird einmal gemessen, und die Schwelle ist
+    gesetzt, nicht aus einer gemessenen Streuung abgeleitet. Seit dem Nachtrag
+    oben wird die behaltene Fassung vor dem Schreiben in zwei Paaren gegen die
+    unverstellte wiederholt; eine Einstellung, die nur in der Suche gewann,
+    wird damit nicht mehr geschrieben. Eine Stellgroesse, die in der Suche an
+    Streuung **gescheitert** ist, bleibt dagegen unentdeckt.
   - Wechselwirkungen und ein zweiter Durchgang fehlen (siehe oben).
   - `margin_learning` wird nur mit seinen Voreinstellungen versucht, die
     `pipelining_depth` weiterer Domaenen gar nicht.

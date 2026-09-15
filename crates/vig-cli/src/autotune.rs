@@ -59,7 +59,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 mod tune;
 
-pub(crate) use tune::{Evaluation, Tuning, Unevaluated};
+pub(crate) use tune::{Evaluation, Feasibility, Tuning, Unevaluated};
 
 /// Ab so viel fremder Rechenzeit gilt die Maschine als nicht ruhig, in
 /// Hundertstel Kernen.
@@ -484,6 +484,18 @@ pub(crate) trait Steps {
     /// die Konfigurationspruefung die Fassung ablehnt, sonst
     /// [`Unevaluated::Failed`].
     async fn evaluate(&mut self, config: &Path, quick: bool) -> Result<Evaluation, Unevaluated>;
+
+    /// Vor Schritt 3: traegt die Maschine die Vertraege ueberhaupt?
+    ///
+    /// Dasselbe Urteil wie Schritt 5 (`vig doctor`), nur vorher und auf der
+    /// unverstellten Fassung. Sind die Vertraege nicht planbar, kann keine
+    /// Einstellung des Governors sie bedienen — und eine Suche darauf misst
+    /// nur, wie verschieden eine uebersaettigte Maschine streut (ADR-0045).
+    ///
+    /// # Errors
+    ///
+    /// Wenn die Konfiguration nicht gelesen werden kann.
+    async fn feasibility(&mut self, config: &Path) -> Result<Feasibility, String>;
 
     /// Schritt 4: lohnt es sich? `None`, wenn das Werkzeug nicht da ist.
     ///
@@ -1173,14 +1185,22 @@ impl Steps for Live {
             return Err(Unevaluated::Missing);
         };
         // `candidate-3.yaml` wird `eval-3.json`, `untuned.yaml` wird
-        // `eval-untuned.json`: Fassung und Bewertung liegen erkennbar
+        // `eval-untuned.json`, `confirm-1-tuned.yaml` wird
+        // `confirm-1-tuned.json`: Fassung und Bewertung liegen erkennbar
         // nebeneinander.
         let name = config
             .file_stem()
             .and_then(|stem| stem.to_str())
             .unwrap_or("candidate");
-        let label = name.strip_prefix("candidate-").unwrap_or(name);
-        let json_path = self.out_dir.join("tune").join(format!("eval-{label}.json"));
+        let file = if name.starts_with("confirm-") {
+            format!("{name}.json")
+        } else {
+            format!(
+                "eval-{}.json",
+                name.strip_prefix("candidate-").unwrap_or(name)
+            )
+        };
+        let json_path = self.out_dir.join("tune").join(file);
         // Wie bei `fit`: eine Bewertung aus einem frueheren Lauf darf nicht als
         // diese gelesen werden.
         match std::fs::remove_file(&json_path) {
@@ -1248,6 +1268,16 @@ impl Steps for Live {
                 reason: format!("evaluation unreadable: {e}"),
             })?;
         tune::evaluation_from_fit_json(&parsed).map_err(|reason| Unevaluated::Failed { reason })
+    }
+
+    async fn feasibility(&mut self, config: &Path) -> Result<Feasibility, String> {
+        let verdict = Box::pin(crate::doctor::verdict_of(config, self.offline))
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(Feasibility {
+            verdict: verdict.label().to_owned(),
+            failures: crate::doctor::failures(),
+        })
     }
 
     async fn check(&mut self, config: &Path) -> Result<String, String> {
@@ -1714,19 +1744,26 @@ pub(crate) async fn run(
 mod tests {
     use super::tune::{Decision, LoadPoint, Objective, StreamMiss, decide};
     use super::{
-        Clock, Evaluation, Outcome, Qualification, Release, RunShape, SeriesCount, Step,
-        StepResult, Steps, Unevaluated, estimate_seconds, execute, headline, json, markdown, plan,
-        prior_state, quiet_enough, state_json, summary,
+        Clock, Evaluation, Feasibility, Outcome, Qualification, Release, RunShape, SeriesCount,
+        Step, StepResult, Steps, Unevaluated, estimate_seconds, execute, headline, json, markdown,
+        plan, prior_state, quiet_enough, state_json, summary,
     };
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    /// Wie eine Fassung abschneidet — die Tests setzen es je Fall.
-    type Score = fn(&vig_config::Config) -> Result<Evaluation, Unevaluated>;
+    /// Wie eine Fassung abschneidet — die Tests setzen es je Fall. Das zweite
+    /// Argument ist der Dateiname ohne Endung (`candidate-3`,
+    /// `confirm-2-tuned`), damit ein Test eine einzelne Bewertung streuen
+    /// lassen kann.
+    type Score = fn(&vig_config::Config, &str) -> Result<Evaluation, Unevaluated>;
 
     /// Ein Lauf mit austauschbarem Ausgang, damit sich die Ehrlichkeitsregeln
     /// ohne GPU pruefen lassen.
     #[derive(Default)]
+    #[expect(
+        clippy::struct_excessive_bools,
+        reason = "jeder Schalter ist ein eigener Ausfall, den ein Test einzeln setzt"
+    )]
     struct Fake {
         series: SeriesCount,
         fit: Option<String>,
@@ -1737,6 +1774,8 @@ mod tests {
         evaluate_missing: bool,
         /// Ohne Angabe schneidet jede Fassung gleich ab.
         score: Option<Score>,
+        /// `vig doctor` sagt vor der Suche `NOT_READY`.
+        unschedulable: bool,
         clock_blind: bool,
         persisted: usize,
         /// Welche Methoden in welcher Reihenfolge gerufen wurden.
@@ -1772,8 +1811,25 @@ mod tests {
             }
             let parsed =
                 vig_config::Config::from_yaml(&std::fs::read_to_string(config).unwrap()).unwrap();
+            let stem = config.file_stem().unwrap().to_str().unwrap();
             self.score
-                .map_or_else(|| Ok(evaluation(20, 100)), |score| score(&parsed))
+                .map_or_else(|| Ok(evaluation(20, 100)), |score| score(&parsed, stem))
+        }
+        async fn feasibility(&mut self, _config: &Path) -> Result<Feasibility, String> {
+            self.calls.push("feasibility");
+            Ok(if self.unschedulable {
+                Feasibility {
+                    verdict: "NOT_READY".to_owned(),
+                    failures: vec![
+                        "PROTECTED_WORKLOAD_UNSCHEDULABLE: protected 126 % over 2 slots".to_owned(),
+                    ],
+                }
+            } else {
+                Feasibility {
+                    verdict: "READY".to_owned(),
+                    failures: Vec::new(),
+                }
+            })
         }
         async fn fit(&mut self, _config: &Path, _quick: bool) -> Result<Option<String>, String> {
             self.calls.push("fit");
@@ -2303,7 +2359,7 @@ models:
     #[tokio::test]
     async fn tuning_keeps_a_real_improvement() {
         let mut fake = Fake {
-            score: Some(|c| {
+            score: Some(|c, _| {
                 Ok(if c.backend.protect_supply {
                     evaluation(10, 100)
                 } else {
@@ -2375,9 +2431,188 @@ models:
         assert!(report.contains("| # | Setting tried |"), "{report}");
         assert!(report.contains("**one pass**"), "{report}");
         assert!(json(&q, "x").contains("\"tuning\":{"));
+
+        // Geschrieben wurde erst nach der Bestaetigung: zwei Paare, beide
+        // gehalten, abwechselnd unverstellt und eingestellt.
+        let confirmation = tuning.confirmation.clone().unwrap();
+        assert!(confirmation.held());
+        assert_eq!(confirmation.pairs.len(), 2);
+        for pair in &confirmation.pairs {
+            assert!(pair.held, "{pair:?}");
+            assert_eq!(pair.untuned.unwrap().protected_worst, 40);
+            assert_eq!(pair.tuned.unwrap().protected_worst, 10);
+            for label in ["untuned", "tuned"] {
+                assert!(
+                    dir.join(format!("tune/confirm-{}-{label}.yaml", pair.pair))
+                        .is_file()
+                );
+            }
+        }
+        assert_eq!(
+            fake.calls.iter().filter(|c| **c == "evaluate").count(),
+            10,
+            "unverstellt, fuenf Fassungen, vier Bewertungen der Bestaetigung"
+        );
+        assert!(report.contains("held up in 2 of 2"), "{report}");
+        assert!(report.contains("### Confirmation"), "{report}");
+        let parsed: serde_json::Value = serde_json::from_str(&json(&q, "x")).unwrap();
+        let pairs = parsed
+            .get("tuning")
+            .and_then(|t| t.get("confirmation"))
+            .and_then(|c| c.get("pairs"))
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        assert_eq!(pairs.len(), 2);
+
         let state = dir.join("state.json");
         std::fs::write(&state, state_json(&q, "fp")).unwrap();
         assert_eq!(prior_state(&state).qualification.tuning, q.tuning);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Eine Maschine, die die Vertraege nicht planen kann, wird nicht
+    /// eingestellt — der Pixel-2-Lauf vom 15.09. mit 126 % geschuetzter
+    /// Auslastung auf zwei Slots.
+    #[tokio::test]
+    async fn an_unschedulable_configuration_is_not_tuned() {
+        let mut fake = Fake {
+            unschedulable: true,
+            score: Some(|c, _| {
+                Ok(if c.backend.protect_supply {
+                    evaluation(10, 100)
+                } else {
+                    evaluation(220, 100)
+                })
+            }),
+            ..clean()
+        };
+        let (q, dir) = tune_only(&mut fake, MEASURED).await;
+        let Outcome::Skipped { reason } = outcome_of(&q, Step::Tune) else {
+            panic!("NOT_READY laesst das Tuning aus: {:?}", q.steps);
+        };
+        assert!(reason.contains("NOT_READY"), "{reason}");
+        assert!(reason.contains("tuning skipped"), "{reason}");
+        assert!(
+            reason.contains("FAIL PROTECTED_WORKLOAD_UNSCHEDULABLE"),
+            "die Befunde gehoeren in den Bericht: {reason}"
+        );
+        assert!(
+            !fake.calls.contains(&"evaluate"),
+            "nichts wird bewertet: {:?}",
+            fake.calls
+        );
+        assert!(q.tuning.is_none());
+        assert!(!q.failed(), "ausgelassen ist nicht gescheitert");
+        assert!(!q.complete(), "aber der Lauf ist unvollstaendig");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("measured.yaml")).unwrap(),
+            MEASURED
+        );
+        assert!(markdown(&q, "x").contains("tuning skipped"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Hat ein frueheres `tune` derselben Messung etwas geschrieben, bleibt es
+    /// nicht stehen, wenn dieser Lauf das Tuning auslaesst.
+    #[tokio::test]
+    async fn a_skipped_tune_restores_the_untuned_configuration() {
+        let dir = workdir(MEASURED);
+        std::fs::create_dir_all(dir.join("tune")).unwrap();
+        std::fs::write(dir.join("tune/untuned.yaml"), MEASURED).unwrap();
+        std::fs::write(
+            dir.join("measured.yaml"),
+            MEASURED.replace("  slots: 1\n", "  slots: 1\n  protect_supply: true\n"),
+        )
+        .unwrap();
+        let mut fake = Fake {
+            unschedulable: true,
+            ..clean()
+        };
+        let q = execute(
+            &mut fake,
+            &[Step::Tune],
+            "127.0.0.1:8001",
+            &dir.join("vig.yaml"),
+            &dir.join("measured.yaml"),
+            false,
+            Qualification::default(),
+        )
+        .await;
+        assert!(matches!(
+            outcome_of(&q, Step::Tune),
+            Outcome::Skipped { .. }
+        ));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("measured.yaml")).unwrap(),
+            MEASURED
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Haelt die behaltene Einstellung in einem Paar der Bestaetigung nicht,
+    /// wird sie nicht geschrieben — der Pixel-2-Lauf, auf dem `fit` dieselbe
+    /// Fassung bei 440 ‰ sah, die das Tuning bei 40 ‰ gemessen hatte.
+    #[tokio::test]
+    async fn a_setting_that_fails_one_confirmation_pair_is_withheld() {
+        let mut fake = Fake {
+            score: Some(|c, stem| {
+                Ok(if stem == "confirm-2-tuned" {
+                    evaluation(220, 100)
+                } else if c.backend.protect_supply {
+                    evaluation(50, 100)
+                } else {
+                    evaluation(220, 100)
+                })
+            }),
+            ..clean()
+        };
+        let (q, dir) = tune_only(&mut fake, MEASURED).await;
+        assert_eq!(outcome_of(&q, Step::Tune), Outcome::Done, "{:?}", q.steps);
+        let tuning = q.tuning.clone().unwrap();
+        assert!(tuning.improved(), "die Suche hat etwas behalten");
+        assert!(!tuning.applied, "aber es wurde nicht geschrieben");
+        let withheld = tuning.withheld.clone().unwrap();
+        assert!(
+            withheld.starts_with("did not hold up in confirmation"),
+            "{withheld}"
+        );
+        assert!(
+            withheld.contains("pair 1 untuned 220/100 ‰, tuned 50/100 ‰ (held)"),
+            "{withheld}"
+        );
+        assert!(
+            withheld.contains("pair 2 untuned 220/100 ‰, tuned 220/100 ‰ (not held)"),
+            "{withheld}"
+        );
+        let confirmation = tuning.confirmation.clone().unwrap();
+        assert!(!confirmation.held());
+        let held: Vec<bool> = confirmation.pairs.iter().map(|p| p.held).collect();
+        assert_eq!(held, [true, false]);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("measured.yaml")).unwrap(),
+            MEASURED,
+            "Byte fuer Byte die unverstellte Fassung"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("tune/untuned.yaml")).unwrap(),
+            MEASURED
+        );
+        let report = markdown(&q, "x");
+        assert!(report.contains("**not** written"), "{report}");
+        assert!(report.contains("### Confirmation"), "{report}");
+        assert!(
+            report.contains("| 2 | 220 | 100 | 220 | 100 | no — "),
+            "{report}"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&json(&q, "x")).unwrap();
+        let confirmation = parsed
+            .get("tuning")
+            .and_then(|t| t.get("confirmation"))
+            .unwrap();
+        assert_eq!(
+            confirmation.get("held"),
+            Some(&serde_json::Value::Bool(false))
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2386,7 +2621,7 @@ models:
     #[tokio::test]
     async fn an_improvement_below_the_noise_threshold_is_not_kept() {
         let mut fake = Fake {
-            score: Some(|c| {
+            score: Some(|c, _| {
                 Ok(if c.backend.protect_supply {
                     // 4 ‰ besser; die Schwelle ist max(5, 40/10) = 5.
                     evaluation(36, 100)
@@ -2428,7 +2663,7 @@ models:
     #[tokio::test]
     async fn a_setting_worse_for_the_protected_streams_than_untuned_is_never_kept() {
         let mut fake = Fake {
-            score: Some(|c| {
+            score: Some(|c, _| {
                 Ok(if c.backend.pipelining_depth == 0 {
                     evaluation(41, 0)
                 } else {
@@ -2486,7 +2721,7 @@ models:
             "  slots: 1\n  margin_learning: { max_factor_percent: 120 }\n",
         );
         let mut fake = Fake {
-            score: Some(|c| {
+            score: Some(|c, _| {
                 if c.backend.pipelining_depth == 0 {
                     Err(Unevaluated::Refused {
                         reason: "backend.pipelining_depth: the backend says no".to_owned(),
@@ -2545,7 +2780,7 @@ models:
     async fn a_tune_under_foreign_load_writes_nothing() {
         let mut fake = Fake {
             load: Some(300),
-            score: Some(|c| {
+            score: Some(|c, _| {
                 Ok(if c.backend.protect_supply {
                     evaluation(10, 100)
                 } else {
@@ -2627,11 +2862,13 @@ models:
                 .checked_mul(super::tune::eval_seconds(quick))
                 .unwrap();
             assert!(
-                super::tune::rough_seconds(quick) >= per_evaluation.checked_mul(6).unwrap(),
-                "sechs Bewertungen passen nicht in die Schaetzung"
+                super::tune::rough_seconds(quick) >= per_evaluation.checked_mul(10).unwrap(),
+                "sechs Bewertungen der Suche und vier der Bestaetigung passen nicht in die \
+                 Schaetzung"
             );
         }
-        assert_eq!(super::tune::rough_seconds(false), 240);
+        assert_eq!(super::tune::rough_seconds(false), 400);
+        assert_eq!(super::tune::rough_seconds(true), 200);
     }
 
     /// Und sie muss reissen koennen — sonst ist die Warnung toter Code.

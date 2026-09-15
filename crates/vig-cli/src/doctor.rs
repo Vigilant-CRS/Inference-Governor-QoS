@@ -40,8 +40,27 @@ fn warn(text: &str) {
     println!("WARN {text}");
 }
 
+/// Die `FAIL`-Zeilen der letzten Pruefung, als Werte.
+///
+/// `vig autotune` nennt sie im Bericht, wenn es das Tuning wegen `NOT_READY`
+/// auslaesst. Gedruckt und gesammelt wird an derselben Stelle, damit der
+/// Bericht nie etwas anderes nennt als das Terminal.
+static FAILURES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
 fn fail(text: &str) {
     println!("FAIL {text}");
+    FAILURES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(text.to_owned());
+}
+
+/// Die `FAIL`-Zeilen der zuletzt gelaufenen [`verdict_of`].
+pub(crate) fn failures() -> Vec<String> {
+    FAILURES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
 }
 
 /// Fuehrt die Pruefung aus.
@@ -77,6 +96,10 @@ pub(crate) async fn verdict_of(
     path: &Path,
     offline: bool,
 ) -> Result<Verdict, Box<dyn std::error::Error>> {
+    FAILURES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
     let text = std::fs::read_to_string(path)?;
     let config = match Config::from_yaml(&text) {
         Ok(c) => c,
