@@ -60,7 +60,15 @@ end does not overflow, and a name no other caller owns. At most
 unregistering *all* regions (empty name) needs an admin token. Under
 `trust: strict` an inference may only name regions its own caller registered
 through the governor, in inputs and outputs alike, and unknown regions cannot
-be unregistered.
+be unregistered. Under `strict` the **segment** behind a key belongs to the
+caller who registered it first through the governor: another caller cannot
+register the same key under a different name, whatever offset and size it
+names, and `SystemSharedMemoryStatus` lists only the caller's own regions (an
+admin token sees all). A registration reserves its name, slot and segment
+before it reaches Triton and is booked only when Triton confirms, so
+concurrent registrations cannot exceed `max_shm_regions`; a second
+registration or unregistration of a name whose call is still running is
+answered with `ABORTED`.
 
 **Payload budget.** `max_inflight_mib` counts every request that carries bytes,
 including unconfigured models passed through in open mode.
@@ -109,7 +117,8 @@ For anything beyond one operator on one host:
 | Triton runs with `ipc: host` and as root in the Compose file | shared memory with clients on the host needs the host IPC namespace; dropping `DAC_OVERRIDE` would stop root in the container from reading client-owned segments | `no-new-privileges`; no published ports; the governor's key prefix limits what is registered **through it** |
 | Shared memory registered **directly** at Triton (bypassing the governor) is not visible to the governor | benchmarks and existing clients do exactly this; in open mode it is allowed | `trust: strict` refuses any inference that names such a region |
 | `curl` is in the runtime image | the container health check uses it | image is otherwise minimal; runs read-only without capabilities |
-| `SystemSharedMemoryStatus` lists region names of all callers | pass-through of the backend's answer; names carry no payload | pick non-telling names; the key prefix is operator-chosen |
+| In `trust: open`, `SystemSharedMemoryStatus` lists the regions of all callers | pass-through of the backend's answer; names carry no payload | `strict` lists only the caller's own regions; pick non-telling names |
+| Under `strict`, a caller who registers another caller's key **before** its owner does holds that segment | the governor sees keys, not which process created a segment; binding keys to identities needs operator-assigned namespaces | the owner's own registration then fails with `PERMISSION_DENIED`, so the takeover is not silent; use keys that cannot be guessed |
 | The metrics port is unauthenticated and has no idle timeout | Prometheus scrapes are unauthenticated by convention | loopback by default; at most 16 connections |
 | The implausible-timestamp counter is not exported as a metric | only in the log line (`total=`) | the log line is rate-limited and carries the total |
 | Governor → Triton is plaintext gRPC (I3) | loopback or the Compose network | for a remote backend, use a private network or a TLS-terminating tunnel |
@@ -121,7 +130,7 @@ For anything beyond one operator on one host:
 | Finding | Fix | Test |
 |---|---|---|
 | **H1** Quickstart Compose published Triton to the network, past the governor | Triton has no published port; `vig` ports bound to `127.0.0.1`; `vig` read-only, `cap_drop: ALL`, `no-new-privileges`; `.dockerignore` keeps tokens, keys and local configs out of the build context | Compose file review; `serve::tests::loopback_needs_no_identity_check` and siblings for the refusal outside loopback |
-| **H2** Shared-memory keys passed through unchecked | key prefix, extent and ownership checks on every registration through the governor; under `strict` inferences may only name own regions | `security::shm_registration_is_confined_to_its_prefix_owner_and_bound`, `security::strict_mode_only_lets_a_caller_name_its_own_regions`, `shm::tests::keys_must_carry_the_prefix_and_nothing_else`, `shm::tests::extents_must_not_overflow`, `shm::tests::a_name_belongs_to_its_registrant`, `service::tests::region_references_are_found_in_inputs_and_outputs` |
+| **H2** Shared-memory keys passed through unchecked | key prefix, extent and ownership checks on every registration through the governor; under `strict` inferences may only name own regions | `security::shm_registration_is_confined_to_its_prefix_owner_and_bound`, `security::strict_mode_only_lets_a_caller_name_its_own_regions`, `security::strict_mode_refuses_a_foreign_segment_under_another_name`, `security::strict_status_lists_only_own_regions`, `shm::tests::a_segment_belongs_to_its_registrant_when_exclusive`, `shm::tests::keys_must_carry_the_prefix_and_nothing_else`, `shm::tests::extents_must_not_overflow`, `shm::tests::a_name_belongs_to_its_registrant`, `service::tests::region_references_are_found_in_inputs_and_outputs` |
 | **H3** Admin endpoints open to every token holder | closed in every mode until `admin_token_file`; then only its tokens | `security::admin_endpoints_are_closed_until_an_admin_token_is_presented` |
 | **M1** Auth after full decode; no transport limits | `Gate` interceptor before decoding; `backend.security.transport` limits | `security::the_gate_refuses_before_anything_is_decoded`, `auth::tests::the_gate_rejects_before_the_service_sees_anything`, config tests `the_security_limits_*` |
 | **M2** Pass-through bypassed the payload budget | pass-through reserves budget like configured work | `security::passthrough_is_bounded_by_the_payload_budget` |
@@ -134,7 +143,7 @@ For anything beyond one operator on one host:
 | **N4** Metrics server without limits | at most 16 concurrent connections | `metrics_listener::the_metrics_listener_holds_at_most_its_limit` |
 | **N5** Clients could flood the log | warning rate-limited to one per 10 s, with a running total | `security::implausible_client_timestamps_are_counted_not_each_logged` |
 | **N6** Hint TTL without upper bound | `hints.max_ttl_ms`, default 60 s; longer hints are dropped | `service::tests::a_hint_longer_than_the_limit_is_dropped`, config tests |
-| **N7** Container hardening | base images pinned by digest; `ShmRegistry` bounded (`max_shm_regions`); Triton `no-new-privileges`; residuals listed above | `shm::tests::the_registry_is_bounded`, config tests |
+| **N7** Container hardening | base images pinned by digest; `ShmRegistry` bounded (`max_shm_regions`), also for concurrent registrations (slots reserved before the backend call); Triton `no-new-privileges`; residuals listed above | `shm::tests::the_registry_is_bounded`, `shm::tests::a_reservation_holds_its_place_until_it_is_settled`, `shm::tests::calls_for_one_name_do_not_interleave`, `security::parallel_registrations_respect_the_region_limit`, config tests |
 | **I1** `trust: open` default plus Compose binding made an unsafe quickstart | accepted for `open` (benchmarks and pass-through depend on it); the quickstart is no longer unsafe because of H1 and M3 | — |
 | **I2** `ci.yml` without `permissions` | `permissions: contents: read` | workflow review |
 | **I3** Token compare timing; plaintext gRPC to Triton | accepted, see residual risks | — |

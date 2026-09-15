@@ -43,6 +43,10 @@ pub struct MockBackend {
     /// Shared-Memory-Registrierungen und -Abmeldungen, die das Backend
     /// erreicht haben.
     pub shm_calls: AtomicU64,
+    /// Die registrierten Regionen, wie sie der Status zeigt.
+    pub shm_regions: std::sync::Mutex<
+        std::collections::BTreeMap<String, system_shared_memory_status_response::RegionStatus>,
+    >,
     /// Zeichen, die ein generatives Modell je Aufruf erzeugt.
     ///
     /// `0` schaltet die Textausgabe ab; das Backend antwortet dann wie ein
@@ -108,6 +112,7 @@ impl MockBackend {
             seen_models: std::sync::Mutex::new(Vec::new()),
             raw_bytes_seen: AtomicU64::new(0),
             shm_calls: AtomicU64::new(0),
+            shm_regions: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             chars_per_call: 0,
             seen_prompts: std::sync::Mutex::new(Vec::new()),
             seen_max_tokens: std::sync::Mutex::new(Vec::new()),
@@ -456,11 +461,26 @@ impl GrpcInferenceService for Service {
         Err(Status::unimplemented("repository_model_unload"))
     }
 
+    // Der Status zeigt, was registriert ist — wie Triton alle Regionen, ohne
+    // nach Aufrufern zu unterscheiden. Die Einschraenkung ist Sache des
+    // Governors.
     async fn system_shared_memory_status(
         &self,
-        _r: Request<SystemSharedMemoryStatusRequest>,
+        r: Request<SystemSharedMemoryStatusRequest>,
     ) -> Result<Response<SystemSharedMemoryStatusResponse>, Status> {
-        Err(Status::unimplemented("system_shared_memory_status"))
+        let name = r.into_inner().name;
+        let regions = self.inner.shm_regions.lock().unwrap();
+        let listed: std::collections::HashMap<_, _> = regions
+            .iter()
+            .filter(|(n, _)| name.is_empty() || **n == name)
+            .map(|(n, s)| (n.clone(), s.clone()))
+            .collect();
+        if !name.is_empty() && listed.is_empty() {
+            return Err(Status::not_found(format!("keine Region {name}")));
+        }
+        Ok(Response::new(SystemSharedMemoryStatusResponse {
+            regions: listed,
+        }))
     }
 
     // Registrierung und Abmeldung werden angenommen und gezaehlt: die
@@ -468,17 +488,34 @@ impl GrpcInferenceService for Service {
     // sehen koennen, ob eine Anfrage das Backend erreicht hat.
     async fn system_shared_memory_register(
         &self,
-        _r: Request<SystemSharedMemoryRegisterRequest>,
+        r: Request<SystemSharedMemoryRegisterRequest>,
     ) -> Result<Response<SystemSharedMemoryRegisterResponse>, Status> {
         self.inner.shm_calls.fetch_add(1, Ordering::Relaxed);
+        let r = r.into_inner();
+        self.inner.shm_regions.lock().unwrap().insert(
+            r.name.clone(),
+            system_shared_memory_status_response::RegionStatus {
+                name: r.name,
+                key: r.key,
+                offset: r.offset,
+                byte_size: r.byte_size,
+            },
+        );
         Ok(Response::new(SystemSharedMemoryRegisterResponse::default()))
     }
 
     async fn system_shared_memory_unregister(
         &self,
-        _r: Request<SystemSharedMemoryUnregisterRequest>,
+        r: Request<SystemSharedMemoryUnregisterRequest>,
     ) -> Result<Response<SystemSharedMemoryUnregisterResponse>, Status> {
         self.inner.shm_calls.fetch_add(1, Ordering::Relaxed);
+        let name = r.into_inner().name;
+        let mut regions = self.inner.shm_regions.lock().unwrap();
+        if name.is_empty() {
+            regions.clear();
+        } else {
+            regions.remove(&name);
+        }
         Ok(Response::new(
             SystemSharedMemoryUnregisterResponse::default(),
         ))

@@ -30,7 +30,7 @@ use vig_protocol_oip::inference::model_infer_request::{
 use vig_protocol_oip::inference::{
     InferParameter, ModelInferRequest, RepositoryModelLoadRequest, RepositoryModelUnloadRequest,
     ServerLiveRequest, ServerReadyRequest, SystemSharedMemoryRegisterRequest,
-    SystemSharedMemoryUnregisterRequest,
+    SystemSharedMemoryStatusRequest, SystemSharedMemoryUnregisterRequest,
 };
 
 const ALPHA: &str = "alpha-0123456789abcdef";
@@ -320,6 +320,139 @@ async fn strict_mode_only_lets_a_caller_name_its_own_regions() {
         .await
         .expect_err("unbekannte Region");
     assert_eq!(status.code(), Code::PermissionDenied);
+}
+
+/// Review 15.09.2026, R02: im strikten Modus schuetzt der Besitz nicht nur
+/// den frei gewaehlten Regionsnamen, sondern das physische Segment dahinter.
+/// Ein anderer Aufrufer bekommt ALPHAs Schluessel nicht unter einem eigenen
+/// Namen — weder denselben Bereich noch einen anderen Bereich desselben
+/// Objekts —, und kann deshalb auch keinen Alias in einer Inferenz nennen.
+/// Derselbe Besitzer registriert seinen Schluessel dagegen mehrfach.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn strict_mode_refuses_a_foreign_segment_under_another_name() {
+    let (mock, endpoint) = backend(Duration::from_millis(1)).await;
+    let service = service(&endpoint, "  trust: strict\n", 1, CONTRACT).with_tokens(tokens());
+    service
+        .system_shared_memory_register(register("alpha", "/vig_private", 0, 1024, ALPHA))
+        .await
+        .unwrap();
+
+    for (offset, what) in [
+        (0, "derselbe Bereich unter anderem Namen"),
+        (4096, "ein anderer Bereich desselben Segments"),
+    ] {
+        let alias = service
+            .system_shared_memory_register(register("beta", "/vig_private", offset, 1024, BETA))
+            .await
+            .expect_err(what);
+        assert_eq!(alias.code(), Code::PermissionDenied, "{what}: {alias:?}");
+    }
+    assert_eq!(
+        mock.shm_calls.load(Ordering::Relaxed),
+        1,
+        "abgelehnt heisst: nie beim Backend"
+    );
+    let status = service
+        .model_infer(with_token(referencing(Some("beta"), None), Some(BETA)))
+        .await
+        .expect_err("es gibt keinen Alias, den BETA nennen koennte");
+    assert_eq!(status.code(), Code::PermissionDenied);
+
+    service
+        .system_shared_memory_register(register("alpha_tail", "/vig_private", 1024, 1024, ALPHA))
+        .await
+        .expect("derselbe Besitzer, zweiter Bereich");
+    service
+        .system_shared_memory_register(register("beta", "/vig_beta", 0, 1024, BETA))
+        .await
+        .expect("ein eigenes Segment");
+}
+
+async fn status_names(
+    service: &GatewayService,
+    name: &str,
+    token: &str,
+) -> Result<Vec<String>, tonic::Status> {
+    let response = service
+        .system_shared_memory_status(with_token(
+            SystemSharedMemoryStatusRequest {
+                name: name.to_owned(),
+            },
+            Some(token),
+        ))
+        .await?;
+    let mut names: Vec<String> = response.into_inner().regions.into_keys().collect();
+    names.sort();
+    Ok(names)
+}
+
+/// Review 15.09.2026, R02: im strikten Modus zeigt der Status einem Aufrufer
+/// nur seine eigenen Regionen. Namen und Schluessel fremder Regionen sind die
+/// Angaben, mit denen er sich an ein fremdes Segment haengen wollte; eine
+/// fremde Region ist dabei von einer unbekannten nicht zu unterscheiden. Das
+/// Administrationstoken sieht weiterhin alles.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn strict_status_lists_only_own_regions() {
+    let (_mock, endpoint) = backend(Duration::from_millis(1)).await;
+    let service = service(&endpoint, "  trust: strict\n", 1, CONTRACT)
+        .with_tokens(tokens())
+        .with_admin_tokens(admin());
+    service
+        .system_shared_memory_register(register("frames", "/vig_frames", 0, 1024, ALPHA))
+        .await
+        .unwrap();
+    service
+        .system_shared_memory_register(register("depth", "/vig_depth", 0, 1024, BETA))
+        .await
+        .unwrap();
+
+    assert_eq!(status_names(&service, "", ALPHA).await.unwrap(), ["frames"]);
+    assert_eq!(status_names(&service, "", BETA).await.unwrap(), ["depth"]);
+    assert_eq!(
+        status_names(&service, "depth", BETA).await.unwrap(),
+        ["depth"]
+    );
+    for name in ["frames", "elsewhere"] {
+        let status = status_names(&service, name, BETA)
+            .await
+            .expect_err("fremd oder unbekannt");
+        assert_eq!(status.code(), Code::PermissionDenied, "{name}: {status:?}");
+    }
+    assert_eq!(
+        status_names(&service, "", ROOT).await.unwrap(),
+        ["depth", "frames"]
+    );
+}
+
+/// Review 15.09.2026, R07: die Obergrenze gilt auch fuer Registrierungen, die
+/// gleichzeitig ankommen. Frueher lagen Pruefung und Buchung beiderseits des
+/// Backendaufrufs; beide sahen denselben freien Platz, und der Bestand wuchs
+/// ueber `max_shm_regions`. Jetzt reserviert die erste den Platz vorher.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parallel_registrations_respect_the_region_limit() {
+    let (mock, endpoint) = backend(Duration::from_millis(1)).await;
+    let service = service(
+        &endpoint,
+        "  security:\n    max_shm_regions: 1\n",
+        1,
+        CONTRACT,
+    )
+    .with_tokens(tokens());
+    let (a, b) = tokio::join!(
+        service.system_shared_memory_register(register("a", "/vig_a", 0, 1024, ALPHA)),
+        service.system_shared_memory_register(register("b", "/vig_b", 0, 1024, BETA)),
+    );
+    assert_eq!(service.shm_registry().len(), 1, "limit=1, a={a:?}, b={b:?}");
+    let refused = match (a, b) {
+        (Ok(_), Err(refused)) | (Err(refused), Ok(_)) => refused,
+        other => panic!("genau eine Registrierung passt: {other:?}"),
+    };
+    assert_eq!(refused.code(), Code::ResourceExhausted, "{refused:?}");
+    assert_eq!(
+        mock.shm_calls.load(Ordering::Relaxed),
+        1,
+        "die abgelehnte erreicht das Backend nicht"
+    );
 }
 
 // ---------------------------------------------------------------------------

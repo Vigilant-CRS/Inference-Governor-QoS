@@ -25,7 +25,9 @@
 //! * **Administration** — Endpunkte, die den Zustand des Backends aendern,
 //!   nur mit Administrationstoken (Security-Review H3).
 //! * **Shared Memory** — Schluesselpraefix, Besitz, Obergrenze, und unter
-//!   `trust: strict` nur eigene Regionen in Inferenzen (H2, M4, N7).
+//!   `trust: strict` nur eigene Regionen in Inferenzen, eigene Segmente und
+//!   ein Status nur ueber eigene Regionen (H2, M4, N7; Review 15.09.2026
+//!   R02, R07).
 
 use crate::actor::{GraphRequest, Handle};
 use crate::auth::{Gate, Identity, Tokens};
@@ -149,6 +151,60 @@ fn region_references(request: &ModelInferRequest) -> Vec<&str> {
 /// Ob ein Hinweis mit dieser Geltungsdauer angenommen wird (N6).
 fn hint_ttl_allowed(ttl: Duration, max: Option<Duration>) -> bool {
     max.is_none_or(|max| ttl <= max)
+}
+
+/// Die Antwort auf eine abgewiesene Registrierung oder Abmeldung.
+fn shm_refusal(name: &str, refusal: Refusal) -> Status {
+    match refusal {
+        Refusal::Foreign => {
+            Status::permission_denied(format!("die Region {name} gehoert einem anderen Aufrufer"))
+        }
+        // Wer das Segment haelt, bleibt ungesagt.
+        Refusal::ForeignSegment => Status::permission_denied(
+            "das Segment hinter diesem Schluessel ist bereits von einem anderen \
+             Aufrufer registriert; im strikten Modus gehoert ein Segment genau \
+             einem Aufrufer",
+        ),
+        Refusal::Unknown => Status::permission_denied(format!(
+            "die Region {name} wurde nicht ueber diesen Governor \
+             registriert; im strikten Modus meldet nur ihr Besitzer ab"
+        )),
+        Refusal::Busy => Status::aborted(format!(
+            "fuer die Region {name} laeuft gerade eine Registrierung oder \
+             Abmeldung; nach deren Antwort erneut versuchen"
+        )),
+        Refusal::Full { limit } => Status::resource_exhausted(format!(
+            "hoechstens {limit} Regionen (backend.security.max_shm_regions)"
+        )),
+    }
+}
+
+/// Fuehrt einen reservierten Shared-Memory-Aufruf beim Backend aus und bucht
+/// sein Ergebnis.
+///
+/// Der Aufruf laeuft als eigene Aufgabe. Bricht der Client ab, laeuft er
+/// trotzdem zu Ende und wird gebucht oder zurueckgegeben: gaebe ein
+/// Abbruch die Reservierung frei, obwohl das Backend schon registriert hat,
+/// waere das Segment im Backend belegt und hier frei — fuer jeden anderen
+/// Aufrufer (Review R02, R07). Scheitert der Aufruf, oder wird die Aufgabe
+/// selbst abgebrochen, gibt die fallengelassene Reservierung ihren Platz
+/// zurueck. Ein Backend, das nie antwortet, haelt sie so lange, wie seine
+/// Verbindung besteht; das ist die vorsichtige Seite.
+async fn settle_shm<T, F>(
+    reservation: crate::shm::Reservation,
+    call: F,
+) -> Result<Response<T>, Status>
+where
+    T: Send + 'static,
+    F: Future<Output = Result<Response<T>, Status>> + Send + 'static,
+{
+    let task = tokio::spawn(async move {
+        let response = call.await?;
+        reservation.confirm();
+        Ok(response)
+    });
+    task.await
+        .map_err(|e| Status::unavailable(format!("Shared-Memory-Aufruf abgebrochen: {e}")))?
 }
 
 impl GatewayService {
@@ -784,16 +840,42 @@ impl GrpcInferenceService for GatewayService {
 
     // Shared-Memory-Endpunkte werden durchgereicht; der Governor beruehrt die
     // Payload dabei nie (ADR-0003). Registrierung und Abmeldung sind aber
-    // geprueft: Schluesselpraefix, Ausdehnung, Besitz, Obergrenze.
+    // geprueft: Schluesselpraefix, Ausdehnung, Besitz von Name und Segment,
+    // Obergrenze.
     async fn system_shared_memory_status(
         &self,
         request: Request<SystemSharedMemoryStatusRequest>,
     ) -> Result<Response<SystemSharedMemoryStatusResponse>, Status> {
         self.authorize(&request)?;
-        self.raw()
-            .await?
-            .system_shared_memory_status(request.into_inner())
-            .await
+        let identity = self.gate.identity_of(&request);
+        // Im strikten Modus sieht ein Aufrufer nur seine eigenen Regionen:
+        // Namen und Schluessel fremder Regionen sind genau die Angaben, mit
+        // denen er sich an ein fremdes Segment haengen wollte (Review R02).
+        // Eine fremde und eine unbekannte Region sind nicht unterscheidbar.
+        let confined = self.config.trust == TrustMode::Strict && !self.gate.is_admin(&request);
+        Box::pin(async move {
+            let inner = request.into_inner();
+            if confined
+                && !inner.name.is_empty()
+                && self.shm.owner_of(&inner.name) != Some(identity)
+            {
+                return Err(Status::permission_denied(format!(
+                    "die Region {} wurde nicht von diesem Aufrufer ueber den \
+                     Governor registriert; im strikten Modus zeigt der Status nur \
+                     eigene Regionen",
+                    inner.name
+                )));
+            }
+            let mut response = self.raw().await?.system_shared_memory_status(inner).await?;
+            if confined {
+                response
+                    .get_mut()
+                    .regions
+                    .retain(|name, _| self.shm.owner_of(name) == Some(identity));
+            }
+            Ok(response)
+        })
+        .await
     }
 
     async fn system_shared_memory_register(
@@ -810,36 +892,27 @@ impl GrpcInferenceService for GatewayService {
             check_key(&self.config.security.shm_key_prefix, &inner.key)
                 .map_err(Status::invalid_argument)?;
             check_extent(inner.offset, inner.byte_size).map_err(Status::invalid_argument)?;
-            match self.shm.admit(&inner.name, identity) {
-                Ok(()) => {}
-                Err(Refusal::Foreign) => {
-                    return Err(Status::permission_denied(format!(
-                        "die Region {} gehoert einem anderen Aufrufer",
-                        inner.name
-                    )));
-                }
-                Err(Refusal::Full { limit }) => {
-                    return Err(Status::resource_exhausted(format!(
-                        "hoechstens {limit} Regionen (backend.security.max_shm_regions)"
-                    )));
-                }
-            }
             let region = Region {
+                key: inner.key.clone(),
                 byte_size: inner.byte_size,
                 offset: inner.offset,
                 cuda: false,
                 owner: identity,
             };
-            let name = inner.name.clone();
-            let response = self
-                .raw()
-                .await?
-                .system_shared_memory_register(inner)
-                .await?;
-            // Erst nach der Bestaetigung buchen: sonst fuehrte Vigilant
-            // Regionen, die es im Backend gar nicht gibt.
-            self.shm.record(name, region);
-            Ok(response)
+            // Reservieren vor dem Backendaufruf, buchen erst nach dessen
+            // Bestaetigung: sonst saehen parallele Registrierungen denselben
+            // freien Platz (Review R07), und Vigilant fuehrte Regionen, die es
+            // im Backend gar nicht gibt.
+            let strict = self.config.trust == TrustMode::Strict;
+            let reservation = self
+                .shm
+                .reserve_registration(&inner.name, region, strict)
+                .map_err(|refusal| shm_refusal(&inner.name, refusal))?;
+            let mut client = self.raw().await?;
+            settle_shm(reservation, async move {
+                client.system_shared_memory_register(inner).await
+            })
+            .await
         })
         .await
     }
@@ -853,37 +926,23 @@ impl GrpcInferenceService for GatewayService {
         let admin = self.gate.is_admin(&request);
         Box::pin(async move {
             let inner = request.into_inner();
-            let name = inner.name.clone();
             // Ein leerer Name heisst im Protokoll „alle Regionen" — auch die
             // aller anderen Clients (Security-Review M4).
-            if name.is_empty() && !admin {
+            if inner.name.is_empty() && !admin {
                 return Err(Status::permission_denied(
                     "alle Regionen abmelden nur mit Administrationstoken",
                 ));
             }
-            if !name.is_empty() && !admin {
-                match self.shm.owner_of(&name) {
-                    Some(owner) if owner != identity => {
-                        return Err(Status::permission_denied(format!(
-                            "die Region {name} gehoert einem anderen Aufrufer"
-                        )));
-                    }
-                    None if self.config.trust == TrustMode::Strict => {
-                        return Err(Status::permission_denied(format!(
-                            "die Region {name} wurde nicht ueber diesen Governor \
-                             registriert; im strikten Modus meldet nur ihr Besitzer ab"
-                        )));
-                    }
-                    _ => {}
-                }
-            }
-            let response = self
-                .raw()
-                .await?
-                .system_shared_memory_unregister(inner)
-                .await?;
-            self.shm.forget(&name);
-            Ok(response)
+            let strict = self.config.trust == TrustMode::Strict;
+            let reservation = self
+                .shm
+                .reserve_unregistration(&inner.name, (!admin).then_some(identity), strict)
+                .map_err(|refusal| shm_refusal(&inner.name, refusal))?;
+            let mut client = self.raw().await?;
+            settle_shm(reservation, async move {
+                client.system_shared_memory_unregister(inner).await
+            })
+            .await
         })
         .await
     }
