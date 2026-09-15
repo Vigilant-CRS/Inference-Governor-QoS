@@ -17,8 +17,8 @@
 set -euo pipefail
 
 RUNTIME=${RUNTIME:-/run/media/dd/USB_4028/Projekte/InferenceQoS-runtime}
-LIBS=$RUNTIME/android-tflite
-MODELS=$RUNTIME/android-models
+LIBS=$RUNTIME/modelle/android-tflite
+MODELS=$RUNTIME/modelle/android-models
 mkdir -p "$LIBS" "$MODELS"
 
 fetch() { # Ziel URL SHA-256

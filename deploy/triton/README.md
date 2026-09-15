@@ -133,8 +133,8 @@ Projekt, nicht auf die Systemplatte.
 ### Image aus dem Archiv wiederherstellen
 
 ```bash
-docker load -i .../InferenceQoS-runtime/images/triton-vision-26.06.tar
-docker load -i .../InferenceQoS-runtime/images/triton-vllm-26.06.tar
+docker load -i .../InferenceQoS-runtime/modelle/images/triton-vision-26.06.tar
+docker load -i .../InferenceQoS-runtime/modelle/images/triton-vllm-26.06.tar
 ```
 
 Das spart den Download von 35 GB. Läuft ein Benchmark nicht mehr, weil das

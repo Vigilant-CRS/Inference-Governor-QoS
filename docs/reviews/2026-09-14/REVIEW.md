@@ -50,7 +50,7 @@ Die abgeschlossenen Berichte sagen mehr als der kopierte Zwischenstand:
 
 Belege: [Abnahme](../../benchmark/abnahme-2026-09-12.md),
 [Pilot mit Praemption](../../benchmark/pilot-praemption-2026-09-12.md).
-Die Rohdaten liegen unter `InferenceQoS-runtime/measure-abnahme-2026-09-12/`
+Die Rohdaten liegen unter `InferenceQoS-runtime/messungen/measure-abnahme-2026-09-12/`
 und `measure-pilot-praemption-2026-09-12/`; dort wurden unter anderem
 `c-ramp-supply.txt`, `manifest-neu.txt` und `plain/summary.json` gelesen.
 Eine erneute GPU-Messung wurde fuer dieses Review nicht gestartet.

@@ -14,7 +14,7 @@ Berichtspfad damit Fortschritt, ohne dass der Alarmpfad dafür bezahlt?
 Lastpunkte, drei Wiederholungen, eine Puffertiefe, 45 s je Zelle statt 60 s
 über zwei Puffertiefen. Das sind rund 30 min je Konfiguration; drei
 Konfigurationen samt Containerstarts passen so in zwei Stunden. Rohdaten:
-`InferenceQoS-runtime/measure-pilot-praemption-2026-09-12/` und
+`InferenceQoS-runtime/messungen/measure-pilot-praemption-2026-09-12/` und
 `.../measure-pilot-lane-2026-09-12/`.
 
 **Gültigkeit: keine Messzelle ist verschmutzt.** Der Wächter markierte im

@@ -4,7 +4,7 @@ Datum: 11.09.2026. Gerät: Pixel 2 (Snapdragon 835, Android 11) über USB;
 Bezug: RTX-3070-Laptop (i7-10870H). Werkzeuge: die `end_to_end`-Tests der
 Gateway-Crate, `vig serve`, `serve-latency` (`crates/vig-bench/src/bin/`),
 Ablauf `tools/arm/serve-on-phone.sh`. Rohdaten:
-`InferenceQoS-runtime/arm-serve-2026-09-11/`.
+`InferenceQoS-runtime/messungen/arm-serve-2026-09-11/`.
 
 ## Die Frage
 

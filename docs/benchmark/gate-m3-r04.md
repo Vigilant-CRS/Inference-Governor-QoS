@@ -3,7 +3,7 @@
 Datum: 11.09.2026. Maschine: RTX 3070 Laptop (8 GB), Kerneltreiber
 **580.178.04**, Triton 2.70.0 (26.06-py3, CUDA 13.3 im Forward-Compatibility-
 Modus), ONNX-Modelle, System Shared Memory. Rohprotokolle:
-`InferenceQoS-runtime/gate-m3-r04-driver178/`.
+`InferenceQoS-runtime/messungen/gate-m3-r04-driver178/`.
 
 ## Warum neu gemessen wurde
 

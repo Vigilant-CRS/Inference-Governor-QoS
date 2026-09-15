@@ -1,7 +1,7 @@
 # Lastspitzen und Frontier: zwei Schwächen, was davon echt ist
 
 Stand 11.09.2026. Grundlage sind die Läufe ohne Fremdlast aus
-`InferenceQoS-runtime/measure-nachlauf-2026-09-11e/` (Stand `b201c57`),
+`InferenceQoS-runtime/messungen/measure-nachlauf-2026-09-11e/` (Stand `b201c57`),
 dazu die verschmutzten Erstläufe aus `measure-chain-2026-09-11d/`. Die
 Nachstellung liegt in `crates/vig-sim/tests/bursts_and_frontier.rs`; die
 Tabellen unten druckt

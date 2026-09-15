@@ -9,7 +9,7 @@ dem Review und die Versorgungsfrist in der Variantenwahl.
 
 **Gültigkeit: sauber.** 03:38 bis 07:16, der Wächter markierte eine einzige
 von rund 430 Proben mit Fremdlast. Rohdaten:
-`InferenceQoS-runtime/measure-morgen-2026-09-12/`.
+`InferenceQoS-runtime/messungen/measure-morgen-2026-09-12/`.
 
 ## Gate M3: der Kernbefund hält
 

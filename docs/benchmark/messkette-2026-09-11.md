@@ -9,7 +9,7 @@ Korrektur lief ([arm-serve](arm-serve.md)).
 Zwei Läufe: die Kette `11d` (15:25–16:52) und ein Nachlauf `11e`
 (16:55–17:44) für die Blöcke, die der Lastwächter als verschmutzt markiert
 hatte oder die ein Aufbaufehler entwertet hatte. Rohdaten, Wächterprotokoll
-und Taktmitschnitt: `InferenceQoS-runtime/measure-chain-2026-09-11d/` und
+und Taktmitschnitt: `InferenceQoS-runtime/messungen/measure-chain-2026-09-11d/` und
 `.../measure-nachlauf-2026-09-11e/`.
 
 **Gültigkeit.** Der Wächter schreibt alle 30 s jeden fremden Prozess über

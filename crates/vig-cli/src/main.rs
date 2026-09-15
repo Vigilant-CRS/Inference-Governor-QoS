@@ -48,9 +48,10 @@ enum Command {
     /// that too.
     ///
     /// It runs the existing steps in order — read the models from the backend,
-    /// measure runtimes and interference, ask whether the governor is worth it
-    /// here, check the result — and writes a frozen configuration plus a
-    /// report in Markdown and JSON.
+    /// measure runtimes and interference, tune the governor's own settings
+    /// for this load (never your contracts, never the slots), ask whether the
+    /// tuned governor is worth it here, check the result — and writes a frozen
+    /// configuration plus a report in Markdown and JSON.
     ///
     /// What it will not do: issue a release. A discarded measurement series
     /// stays discarded and its value stays unset; a run under foreign load is
@@ -74,7 +75,7 @@ enum Command {
         /// Measure a smaller matrix: faster, and less precise about it.
         #[arg(long)]
         quick: bool,
-        /// Run a single step instead of all four.
+        /// Run a single step instead of all five.
         #[arg(long, value_enum, value_name = "STEP")]
         only: Option<autotune::Step>,
         /// Check the configuration only; do not contact the backend for it.

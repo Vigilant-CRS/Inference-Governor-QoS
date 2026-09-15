@@ -155,7 +155,7 @@ den Shim in Triton zu laden, nicht in den Governor. Der naheliegende Aufbau
 ohne eine Zeile Backendcode sind zwei Tritonprozesse auf einer GPU — die
 geschützten Modelle mit Priorität 1, das VLM mit Priorität 0 — und `xserver`
 mit HPF dazwischen. Das Startskript liegt unter
-`InferenceQoS-runtime/xsched-triton.sh`.
+`InferenceQoS-runtime/skripte/xsched-triton.sh`.
 
 **Der Build geht.** Im Triton-Image 26.06 (CUDA 13.3, GCC 13.3) baut XSched
 ohne den `-ccbin`-Umweg, den der Spike auf dem Host brauchte. `libshimcuda.so`,
@@ -271,5 +271,5 @@ nicht: der Governor hält das VLM mit `slots: 1` und `no_corun` weiter
 zurück, bis die Planung eine präemptierbare Hintergrundlast als gemessene
 Eigenschaft des Backends kennt. Das ist der nächste Schritt.
 
-Laborprotokoll, Patch und Startskript: `InferenceQoS-runtime/xsched-rootcause.md`,
+Laborprotokoll, Patch und Startskript: `InferenceQoS-runtime/archiv/xsched-rootcause.md`,
 `xsched-sm86-lv2.patch`, `xsched-triton-alt.sh`.

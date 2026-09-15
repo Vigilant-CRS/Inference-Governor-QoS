@@ -282,7 +282,7 @@ eigene Antwortfristen; der Connect-Timeout begrenzt keine hängende RPC-Antwort.
 ## 3. Funktions- und Messbewertung
 
 Positiv: Das TensorRT-Experiment ist tatsächlich vorhanden. Im eingesehenen
-[Rohprotokoll](../../../../InferenceQoS-runtime/gate-m3-trt-run/gate-m3-trt.txt)
+[Rohprotokoll](../../../../InferenceQoS-runtime/messungen/gate-m3-trt-run/gate-m3-trt.txt)
 stehen für den Detektor 90 % gegen 99 % Lieferfensterabdeckung und 13,3x
 weniger unabgedeckte Lieferfenster. Das ist **kein** 13,3x schnelleres Modell.
 

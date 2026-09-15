@@ -2,7 +2,7 @@
 
 Datum: 10.09.2026. Maschine: RTX 3070 Laptop, Treiber 580.173.02, Triton
 2.70.0, ONNX-Modelle, System Shared Memory. Rohprotokolle:
-`InferenceQoS-runtime/gate-m3-r03/`.
+`InferenceQoS-runtime/messungen/gate-m3-r03/`.
 
 ## Warum neu gemessen wurde
 

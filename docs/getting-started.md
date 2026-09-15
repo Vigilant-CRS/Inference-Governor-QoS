@@ -25,12 +25,13 @@ it can carry. And if it turns out you don't need us, it says that too.
 vig autotune --endpoint 127.0.0.1:8001 -c vig.yaml -o qualification
 ```
 
-This runs the whole chain below in one go — draft, measure, "is it worth it
-here?", check — and leaves behind:
+This runs the whole chain below in one go — draft, measure, tune, "is it worth
+it here?", check — and leaves behind:
 
 | File | What it is |
 |---|---|
-| `qualification/measured.yaml` | The frozen configuration: measured profiles, slots from the backend's **measured** concurrency, the interference table |
+| `qualification/measured.yaml` | The frozen configuration: measured profiles, slots from the backend's **measured** concurrency, the interference table, and the governor settings the `tune` step kept |
+| `qualification/tune/` | `untuned.yaml` as measured, every setting tried as `candidate-<n>.yaml`, and its evaluation as `eval-<n>.json` |
 | `qualification/qualification.md` | The report to read: what was measured, under what conditions, what was discarded, what does not hold |
 | `qualification/qualification.json` | The same for a machine — mail it, or hang it in CI |
 
@@ -46,6 +47,20 @@ make a run look successful. A step that ran while something else used the
 machine is marked contaminated. And if `vig-fit` finds the governor brings you
 nothing on this load, that sentence is the headline of the report
 ([ADR-0044](adr/0044-qualification-happens-at-the-users-site.md)).
+
+**It tunes the governor, not your promises.** Between measuring and judging,
+the `tune` step tries the governor's own settings on your load —
+`pipelining_depth`, `protect_supply`, `margin_learning`,
+`safety_margin_percent` — one at a time, in a single pass, each through
+`vig-fit` with the governor arm only (about four minutes). A setting is kept
+only if it beats the best one so far by more than a noise threshold, and
+never if it is worse for your protected streams than the measured
+configuration. The kept settings go into `measured.yaml`, so the "is it worth
+it here?" step judges the tuned governor. The report lists every setting
+tried, its numbers, and whether it was kept, rejected or refused. Contracts
+and `backend.slots` are never changed; if the step ran under foreign load,
+the untuned configuration is written back
+([ADR-0045](adr/0045-autotune-tunes-within-the-contracts.md)).
 
 **What it cannot measure are your contracts.** How often your camera delivers
 and how long a result stays useful is a promise you make to your application.

@@ -5,7 +5,7 @@ Triton 2.70.0, ONNX-Modelle, System Shared Memory. Last: die
 Gate-M3-Konfiguration (`examples/gate_m3/vig.yaml`), einmal mit
 `backend.prediction: shadow`, einmal mit `active`, abwechselnd je drei
 Läufe. Rohdaten und Taktmitschnitt (alle 5 s):
-`InferenceQoS-runtime/measure-2026-09-11/`.
+`InferenceQoS-runtime/messungen/measure-2026-09-11/`.
 
 ## Die Frage
 

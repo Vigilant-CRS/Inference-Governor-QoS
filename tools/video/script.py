@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Vigilant e.K.
 # SPDX-License-Identifier: BUSL-1.1
-"""Was das Video sagt, als Daten — Text, Quelle, Bild.
+"""Was die Videos sagen, als Daten — Text, Quelle, Bild.
 
 Jede Zahl, die gesprochen oder gezeigt wird, traegt hier ihren Beleg als
 `source`. Das ist keine Zierde: Ein Video altert schneller als ein Repository,
@@ -11,12 +11,12 @@ Der Sprechertext steht vollstaendig hier und nicht im Rendercode, damit eine
 Aenderung am Wortlaut keine Aenderung am Bild erzwingt — und damit der
 Untertitel aus derselben Quelle kommt wie die Stimme.
 
-**Fassung vom 15.09.2026.** Das Video sagt, was das System kann: das Problem,
-die vier Entscheidungen, die Messung, die Plattformen, `vig autotune`. Die
-Grenzen — wann es nichts bringt, was es kostet, was nicht belegt ist — stehen
-weiter vollstaendig in README, STATUS und den Berichten; ein Drei-Minuten-Film
-ist nicht der Ort, sie alle zu erzaehlen. Was das Video zeigt, bleibt belegt:
-jede Zahl kommt weiterhin aus einer Datei.
+**Zwei Schnitte.** `SCENES` ist das Erklaervideo (YouTube, Projektseite),
+`PROMO_SCENES` der Werbe-Cut (~75 s). Beide beginnen beim Markt — Roboter und
+Fahrzeuge buendeln ihre Software auf zentralen Rechnern, viele Modelle teilen
+sich einen Chip — und enden bei `vig autotune`. Die Grenzen (wann es nichts
+bringt, was es kostet, was nicht belegt ist) stehen vollstaendig in README,
+STATUS und den Berichten. Ein Urteil wird nie ohne seine Last gezeigt.
 """
 from __future__ import annotations
 
@@ -24,8 +24,8 @@ from dataclasses import dataclass, field
 
 #: Die Plattformen der Geraeteszene. Name, Chip und Backend stehen hier mit
 #: ihrem Beleg (`docs/benchmark/android-gpu.md`, `validierung-autotune.md`);
-#: Serienzahl und Urteil liest das Bild aus der jeweiligen
-#: `qualification.json` des genannten Laufs.
+#: was autotune dort gemessen und eingestellt hat, liest das Bild aus der
+#: jeweiligen `qualification.json` des genannten Laufs.
 DEVICES = [
     {"name": "Laptop GPU", "chip": "NVIDIA GeForce RTX 3070",
      "backend": "NVIDIA Triton 2.70", "run": "autotune-laptop-2026-09-15f"},
@@ -38,12 +38,10 @@ DEVICES = [
 #: Wo die Zahlen herkommen. Der Schluessel steht in `Scene.source`.
 SOURCES = {
     "gate-m3": "docs/benchmark/messkette-2026-09-12.md",
-    "run": "InferenceQoS-runtime/gate-m3-r03/gate-r1.txt",
-    "doctor": "InferenceQoS-runtime/measure-nachlauf-2026-09-11e/pre4-doctor.txt",
-    # Der Lauf mit dem ausgelieferten Stand vom 15.09. (`contaminated: false`,
-    # englisches Urteil, Verweigerung vorn).
-    "autotune": "InferenceQoS-runtime/autotune-laptop-2026-09-15f/qualification.json",
-    "devices": ", ".join(f"InferenceQoS-runtime/{d['run']}/qualification.json"
+    "run": "InferenceQoS-runtime/messungen/gate-m3-r03/gate-r1.txt",
+    "doctor": "InferenceQoS-runtime/messungen/measure-nachlauf-2026-09-11e/pre4-doctor.txt",
+    "autotune": "InferenceQoS-runtime/messungen/autotune-laptop-2026-09-15f/qualification.json",
+    "devices": ", ".join(f"InferenceQoS-runtime/messungen/{d['run']}/qualification.json"
                          for d in DEVICES),
 }
 
@@ -74,8 +72,6 @@ class Scene:
     hold: float = 0.0
     #: Freie Parameter fuer den Renderer.
     data: dict = field(default_factory=dict)
-    #: Gehoert die Szene in den 45-Sekunden-Schnitt?
-    short_cut: bool = False
 
 
 #: Die Kameraperiode, die Detektorlaufzeit und der unteilbare Hintergrundblock,
@@ -85,15 +81,18 @@ PERIOD_MS = 33
 DETECTOR_MS = 15
 BACKGROUND_MS = 95
 
+# ------------------------------------------------------------ Erklaervideo --
+
 SCENES = [
     Scene(
-        key="title",
+        key="trend",
         narration=(
-            "Your GPU is working flat out, and part of that work is on frames "
-            "your robot has already thrown away."
+            "Robots and cars are moving to central computers. Vision, planning "
+            "and language models now share one chip, and they all want it at "
+            "the same time."
         ),
-        visual="title",
-        chapter="Stop computing the past",
+        visual="trend",
+        chapter="Many models, one chip",
         pause=0.8,
     ),
     Scene(
@@ -101,14 +100,13 @@ SCENES = [
         narration=(
             "A robot camera gives you a frame every thirty-three milliseconds. "
             "Your detector needs fifteen. That fits, until something else wants "
-            "the same GPU. Now the detector waits behind a block it cannot "
+            "the same chip. Now the detector waits behind a block it cannot "
             "interrupt, and by the time its answer arrives, the robot has "
             "already moved."
         ),
         visual="timeline_fifo",
         chapter="What goes wrong at 33 milliseconds",
         pause=0.7,
-        short_cut=True,
     ),
     Scene(
         key="governor",
@@ -126,23 +124,23 @@ SCENES = [
     Scene(
         key="capabilities",
         narration=(
-            "Four decisions, all made before a request reaches the GPU. A newer "
+            "Four decisions, all made before a request reaches the chip. A newer "
             "frame replaces an older one that is still waiting. Work that would "
             "finish too late is never started. A long background job waits when "
             "protected work is due. And when time runs short, a smaller model "
             "variant takes over."
         ),
         visual="capabilities",
-        chapter="Four decisions before the GPU",
+        chapter="Four decisions before the chip",
         pause=0.7,
     ),
     Scene(
         key="usecases",
         narration=(
-            "It is built for machines where several models share one "
-            "accelerator. A humanoid robot, whose vision must not wait behind "
-            "its planner. Or driver assistance, with several cameras and a "
-            "slower scene analysis on the same chip."
+            "It is built for exactly that kind of machine. A humanoid robot, "
+            "whose vision must not wait behind its planner. Or a vehicle's "
+            "central computer, running several cameras and a slower scene "
+            "analysis on the same chip."
         ),
         visual="usecases",
         chapter="Built for robots and vehicles",
@@ -160,7 +158,6 @@ SCENES = [
         chapter="Measured against a tuned Triton",
         source="run",
         pause=0.8,
-        short_cut=True,
     ),
     Scene(
         key="devices",
@@ -168,7 +165,7 @@ SCENES = [
             "And it is not tied to one machine. The same governor runs in front "
             "of Triton on an NVIDIA GPU, and in front of TensorFlow Lite on the "
             "Adreno GPUs of two Android devices. On each of them, vig autotune "
-            "measured the hardware and gave its own answer."
+            "measured the hardware and set the governor up for it."
         ),
         visual="devices",
         chapter="Tested on edge hardware",
@@ -178,15 +175,14 @@ SCENES = [
     Scene(
         key="autotune",
         narration=(
-            "You do not have to take our numbers. One command, vig autotune, "
-            "measures your own machine: runtimes, concurrency, interference. It "
-            "freezes a configuration and answers the question that matters: is "
-            "the governor worth it here? On this laptop, above ninety percent "
-            "load, the protected stream goes from missing almost every cycle to "
-            "missing none. And where you do not need it, it tells you that too."
+            "You do not have to take our numbers, or our settings. One command, "
+            "vig autotune, measures your models on your machine, tries the "
+            "governor's settings against your contracts, and keeps the "
+            "configuration that serves your protected streams best. And if your "
+            "load does not need a governor, it tells you that too."
         ),
         visual="autotune",
-        chapter="vig autotune: is it worth it on your machine?",
+        chapter="vig autotune: tuned for your machine",
         source="autotune",
         pause=0.8,
     ),
@@ -205,9 +201,9 @@ SCENES = [
     Scene(
         key="close",
         narration=(
-            "Faster GPUs compute the past faster. Vigilant stops computing it. "
-            "Run vig autotune on the machine you already have, and let the "
-            "numbers decide."
+            "Faster chips compute the past faster. Vigilant stops computing it. "
+            "Run vig autotune on the machine you already have, and let it tune "
+            "the governor for your load."
         ),
         visual="close",
         chapter="Stop computing the past",
@@ -215,23 +211,86 @@ SCENES = [
     ),
 ]
 
-#: Nur fuer den Kurzschnitt: eine stumme Schlusskarte mit dem naechsten Schritt.
-SHORT_TAIL = Scene(
-    key="short-tail",
-    narration="",
-    visual="short_tail",
-    hold=5.5,
-    pause=0.0,
-)
+# ------------------------------------------------------------- Werbe-Cut --
+
+#: Rund 75 Sekunden: Markt, Problem, Loesung, Beleg, autotune, Schluss. Eigene,
+#: kuerzere Saetze — kein Zusammenschnitt aus dem Erklaervideo, weil ein
+#: Werbe-Cut einen anderen Takt braucht als eine Erklaerung.
+PROMO_SCENES = [
+    Scene(
+        key="trend",
+        narration=(
+            "Robots and cars are moving to one central computer. Vision, "
+            "planning and language models now share the same chip."
+        ),
+        visual="trend",
+        pause=0.6,
+    ),
+    Scene(
+        key="problem",
+        narration=(
+            "And when they share it, the camera waits. By the time the detector "
+            "answers, the robot has already moved."
+        ),
+        visual="timeline_fifo",
+        pause=0.5,
+    ),
+    Scene(
+        key="governor",
+        narration=(
+            "Vigilant decides before every dispatch what is still worth "
+            "computing. Stale frames are dropped, protected work goes first, and "
+            "a smaller model steps in when time runs short."
+        ),
+        visual="timeline_governor",
+        pause=0.5,
+    ),
+    Scene(
+        key="capabilities",
+        narration=(
+            "Four decisions, before the chip: drop what is stale, refuse what "
+            "would be late, protect what matters, and fit the time you have."
+        ),
+        visual="capabilities",
+        pause=0.6,
+    ),
+    Scene(
+        key="measured",
+        narration=(
+            "Against a tuned Triton on the same GPU: ninety-nine percent of "
+            "control cycles answered in time, instead of eighty-five."
+        ),
+        visual="terminal_run",
+        source="run",
+        pause=0.6,
+    ),
+    Scene(
+        key="autotune",
+        narration=(
+            "And vig autotune tunes it for your machine, in one command, against "
+            "your own contracts."
+        ),
+        visual="autotune",
+        source="autotune",
+        pause=0.6,
+    ),
+    Scene(
+        key="close",
+        narration="Stop computing the past. Vigilant Inference Governor.",
+        visual="close",
+        pause=1.4,
+    ),
+]
 
 #: Kapitelmarken und Beschreibung entstehen aus denselben Szenen; siehe
 #: make_video.py. Hier stehen nur die Texte, die kein Szenentext sind.
-YOUTUBE_TITLE = ("Stop Computing the Past — Inference QoS for Edge Robotics "
+YOUTUBE_TITLE = ("Stop Computing the Past — Inference QoS for Robots and Vehicles "
                  "| Vigilant Inference Governor")
+PROMO_TITLE = "Many Models, One Chip: Stop Computing the Past | Vigilant Inference Governor"
 
 YOUTUBE_TAGS = [
-    "edge ai", "inference", "gpu scheduling", "robotics", "triton inference server",
+    "edge ai", "central compute", "software defined vehicle", "humanoid robot",
+    "inference", "gpu scheduling", "robotics", "triton inference server",
     "tensorflow lite", "nvidia jetson", "real time", "computer vision", "ros 2",
-    "latency", "age of information", "humanoid robot", "adas",
-    "machine learning infrastructure",
+    "latency", "adas", "machine learning infrastructure",
 ]

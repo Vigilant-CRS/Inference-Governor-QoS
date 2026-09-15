@@ -31,7 +31,7 @@ set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 RUNTIME=/run/media/dd/USB_4028/Projekte/InferenceQoS-runtime
-ADB=${ADB:-$RUNTIME/tools/platform-tools/adb}
+ADB=${ADB:-$RUNTIME/werkzeuge/tools/platform-tools/adb}
 QUIET=${QUIET:-$RUNTIME/quiet-build.sh}
 SERIAL=${SERIAL:-FA82P1A01294}
 STEPS=${STEPS:-"budget serve"}

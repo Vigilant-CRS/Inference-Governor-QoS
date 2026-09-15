@@ -175,6 +175,7 @@ def doctor_lines(path: Path) -> list[str]:
 _AUTOTUNE_STEPS = {
     "discover": "read the models from the backend",
     "measure": "measure runtimes, concurrency, interference",
+    "tune": "tune the governor settings for this load",
     "fit": "is the governor worth it on this load?",
     "check": "check the resulting configuration",
 }

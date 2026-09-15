@@ -219,31 +219,12 @@ def write_srt(entries: list[tuple[float, float, str]], out: Path) -> None:
     out.write_text("\n".join(blocks), encoding="utf-8")
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out", default="/run/media/dd/USB_4028/Projekte/"
-                        "InferenceQoS-runtime/video",
-                        help="Ablage fuer Video, Ton und Bilder")
-    parser.add_argument("--fps", type=int, default=FPS)
-    parser.add_argument("--keep-frames", action="store_true")
-    parser.add_argument("--runtime", default="",
-                        help="Verzeichnis mit den Messprotokollen "
-                             "(Voreinstellung: neben dem Hauptcheckout gesucht)")
-    args = parser.parse_args()
+def attach_sources(scenes, runtime: Path) -> None:
+    """Belege an die Szenen haengen, die eine Datei zeigen.
 
-    here = Path(__file__).resolve()
-    runtime = Path(args.runtime) if args.runtime else find_runtime(here)
-    out = Path(args.out)
-    work = out / "work"
-    work.mkdir(parents=True, exist_ok=True)
-
-    pending = runtime / "measure-pending"
-    if pending.exists():
-        raise SystemExit("Es laeuft eine Messung (measure-pending). Spaeter rendern.")
-
-    # Belege an die Szenen haengen, die eine Datei zeigen. Die Messprotokolle
-    # liegen neben dem Repository, nicht darin.
-    for scene in script.SCENES:
+    Die Messprotokolle liegen neben dem Repository, nicht darin.
+    """
+    for scene in scenes:
         if scene.source in ("run", "doctor", "autotune"):
             relative = Path(script.SOURCES[scene.source]).relative_to(runtime.name)
             scene.data["path"] = str(runtime / relative)
@@ -252,13 +233,24 @@ def main() -> int:
             # Dateizeit — die verstellt schon ein Kopiervorgang.
             scene.data["date"] = script.SOURCE_DATES.get(scene.source, "")
         if scene.visual == "devices":
-            scene.data["paths"] = [str(runtime / d["run"] / "qualification.json")
+            scene.data["paths"] = [str(runtime / "messungen" / d["run"] / "qualification.json")
                                    for d in script.DEVICES]
 
+
+def build_cut(scenes, stem: str, out: Path, work: Path, fps: int,
+              keep_frames: bool) -> dict:
+    """Ein Schnitt: Stimme je Szene, Bilder, Ton, Untertitel, eingebrannte Fassung.
+
+    Erklaervideo und Werbe-Cut laufen durch dieselbe Strecke. Zwei Strecken
+    waeren zwei Stellen, an denen Untertitelstil, Lautheit oder Tonformat
+    auseinanderlaufen koennen.
+    """
+    work.mkdir(parents=True, exist_ok=True)
     segments, audio_parts, srt_entries, chapters = [], [], [], []
     clock = 0.0
+    print(f"\n{stem}")
     print(f"{'scene':<18}{'voice':>8}{'scene':>8}")
-    for index, scene in enumerate(script.SCENES):
+    for index, scene in enumerate(scenes):
         voice_path = None
         spoken = 0.0
         if scene.narration:
@@ -267,12 +259,12 @@ def main() -> int:
         seconds = max(scene.hold, spoken + scene.pause)
 
         frames_dir = work / f"frames-{index:02d}-{scene.key}"
-        render_scene(scene, seconds, frames_dir, args.fps)
+        render_scene(scene, seconds, frames_dir, fps)
         video = work / f"{index:02d}-{scene.key}.mp4"
-        segment(frames_dir, seconds, video, args.fps)
+        segment(frames_dir, seconds, video, fps)
         audio = work / f"{index:02d}-{scene.key}-mix.wav"
         audio_segment(voice_path, seconds, audio)
-        if not args.keep_frames:
+        if not keep_frames:
             shutil.rmtree(frames_dir)
 
         segments.append(video)
@@ -288,7 +280,6 @@ def main() -> int:
                 cursor += share
         clock += seconds
         print(f"{scene.key:<18}{spoken:>7.1f}s{seconds:>7.1f}s")
-
     print(f"{'total':<18}{'':>8}{clock:>7.1f}s")
 
     video_only = work / "video.mp4"
@@ -297,24 +288,22 @@ def main() -> int:
     concat(audio_parts, audio_raw, work, copy=False)
     audio_norm = work / "audio-norm.wav"
     # Lautheit auf Broadcast-Niveau, damit es neben anderen Videos nicht absaeuft.
+    # `-ar 48000` fest: loudnorm rechnet intern mit 192 kHz.
     run(["ffmpeg", "-y", "-v", "error", "-i", str(audio_raw),
          "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-ar", "48000", "-ac", "2",
          str(audio_norm)])
 
-    final = out / "vigilant-inference-governor.mp4"
+    final = out / f"{stem}.mp4"
     run(["ffmpeg", "-y", "-v", "error", "-i", str(video_only), "-i", str(audio_norm),
          "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(final)])
 
-    srt = out / "vigilant-inference-governor.en.srt"
+    srt = out / f"{stem}.en.srt"
     write_srt(srt_entries, srt)
 
-    burned = out / "vigilant-inference-governor-subtitled.mp4"
-    # Achtung, diese Zahlen sind keine Pixel. Der Untertitelfilter rechnet eine
-    # SRT-Datei auf einer eigenen, kleineren Buehne und skaliert das Ergebnis
-    # auf die Bildhoehe hoch; `original_size` aendert daran nichts (probiert,
-    # Schrift blieb riesig). Die Werte sind deshalb **am Bild kalibriert**:
-    # Fontsize 13 ergibt rund 36 Pixel und eine Zeile unter der Zeitachse,
-    # 16 draengt bereits in die Achse hinein.
+    burned = out / f"{stem}-subtitled.mp4"
+    # Achtung, diese Zahlen sind keine Pixel: der Untertitelfilter rechnet auf
+    # einer eigenen, kleineren Buehne. Am Bild kalibriert — Fontsize 13 ergibt
+    # rund 36 Pixel und eine Zeile unter der Zeitachse.
     style = ("FontName=DejaVu Sans,Fontsize=13,PrimaryColour=&H00F3EDE6,"
              "OutlineColour=&H00170D0D,BorderStyle=3,Outline=1,Shadow=0,"
              "MarginV=26")
@@ -322,78 +311,93 @@ def main() -> int:
          "-vf", f"subtitles={srt}:force_style='{style}'",
          "-c:v", "libx264", "-preset", "medium", "-crf", "18",
          "-pix_fmt", "yuv420p", "-c:a", "copy", str(burned)])
+    return {"final": final, "subtitled": burned, "srt": srt,
+            "chapters": chapters, "duration": clock}
 
-    short_indices = [i for i, s in enumerate(script.SCENES) if s.short_cut]
-    tail = script.SHORT_TAIL
-    tail_frames = work / "frames-short-tail"
-    render_scene(tail, tail.hold, tail_frames, args.fps)
-    tail_video = work / "short-tail.mp4"
-    segment(tail_frames, tail.hold, tail_video, args.fps)
-    tail_audio = work / "short-tail.wav"
-    audio_segment(None, tail.hold, tail_audio)
-    if not args.keep_frames:
-        shutil.rmtree(tail_frames)
 
-    short_video = work / "short-video.mp4"
-    short_audio = work / "short-audio.wav"
-    concat([segments[i] for i in short_indices] + [tail_video], short_video, work)
-    concat([audio_parts[i] for i in short_indices] + [tail_audio], short_audio,
-           work, copy=False)
-    short = out / "vigilant-inference-governor-short.mp4"
-    # `-ar 48000` ist hier nicht kosmetisch: loudnorm rechnet intern mit
-    # 192 kHz, und ohne feste Rate waehlt der AAC-Encoder danach 96 kHz. Der
-    # Kurzschnitt haette dann ein anderes Tonformat als das lange Video —
-    # beim langen faellt es nur deshalb nicht auf, weil dort normalisiert und
-    # gemuxt getrennt laufen und der Normalisierschritt die Rate festlegt.
-    run(["ffmpeg", "-y", "-v", "error", "-i", str(short_video), "-i", str(short_audio),
-         "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-c:v", "copy", "-c:a", "aac",
-         "-b:a", "192k", "-ar", "48000", "-ac", "2", "-shortest", str(short)])
+DESCRIPTION = [
+    "Robots and vehicles are moving to central computers, where vision,",
+    "planning and language models share one chip. An inference server works",
+    "in arrival order — including camera frames that are already stale by the",
+    "time they finish. The Vigilant Inference Governor sits in front of your",
+    "inference server (NVIDIA Triton, TensorFlow Lite) and decides before every",
+    "dispatch whether a result will still be useful when it is done.", "",
+    "What it does: it drops frames a newer one has replaced, refuses work",
+    "that would finish too late, holds back long background jobs when",
+    "protected work is due, and switches to a smaller model variant when",
+    "time runs short. It speaks the Open Inference Protocol, so your",
+    "client only changes the address.", "",
+    "Measured against a tuned Triton on the same GPU, the detector answers",
+    "in time in 99 % of control cycles instead of 85 % — twenty times fewer",
+    "missed cycles. Tested on an NVIDIA GPU and on the Adreno GPUs of two",
+    "Android devices.", "",
+    "vig autotune tunes it for your hardware: one command measures your models",
+    "on your machine, tries the governor's settings against your contracts and",
+    "keeps the configuration that serves your protected streams best.", "",
+    "Built for humanoid and mobile robots, vehicle central computers,",
+    "perception pipelines and ROS 2 systems: anywhere a late answer is worth",
+    "less than no answer.", "",
+    "Repository: https://github.com/Vigilant-CRS/Inference-Governor-QoS",
+    "Licence: BUSL-1.1 — free for evaluation and for up to three devices in production.",
+    "Vigilant e.K., Stuttgart — https://vigilant-crs.de", "",
+]
 
-    render.thumbnail(out / "thumbnail.png")
 
-    meta = out / "youtube.md"
-    lines = [f"# {script.YOUTUBE_TITLE}", "",
-             "When several AI models share one GPU on a robot or a vehicle, an",
-             "inference server works in arrival order — including camera frames",
-             "that are already stale by the time they finish. The Vigilant Inference",
-             "Governor sits in front of your inference server (NVIDIA Triton,",
-             "TensorFlow Lite) and decides before every dispatch whether a result",
-             "will still be useful when it is done.", "",
-             "What it does: it drops frames a newer one has replaced, refuses work",
-             "that would finish too late, holds back long background jobs when",
-             "protected work is due, and switches to a smaller model variant when",
-             "time runs short. It speaks the Open Inference Protocol, so your",
-             "client only changes the address.", "",
-             "Measured against a tuned Triton on the same GPU, the detector answers",
-             "in time in 99 % of control cycles instead of 85 % — twenty times fewer",
-             "missed cycles. Tested on an NVIDIA GPU and on the Adreno GPUs of two",
-             "Android devices.", "",
-             "Is it worth it for you? Run vig autotune on your own hardware: one",
-             "command measures runtimes, concurrency and interference and tells you",
-             "whether the governor pays off on your load — including when it does not.", "",
-             "Built for humanoid and mobile robots, driver-assistance development,",
-             "perception pipelines and ROS 2 systems: anywhere a late answer is worth",
-             "less than no answer.", "",
-             "Repository: https://github.com/Vigilant-CRS/Inference-Governor-QoS",
-             "Licence: BUSL-1.1 — free for evaluation and for up to three devices in production.",
-             "Vigilant e.K., Stuttgart — https://vigilant-crs.de", "",
-             "## Chapters", ""]
-    for start, key in chapters:
-        lines.append(f"{timecode(start)[3:8]} {key}")
-    # Die Belege stehen nicht in der Beschreibung: sie zeigen auf Dateien
-    # neben dem Repository, die ein Zuschauer nicht oeffnen kann. Sie stehen
-    # in script.SOURCES und im Bild selbst; die Beschreibung verweist aufs
-    # Repository.
-    lines += ["", "## Tags", "", ", ".join(script.YOUTUBE_TAGS), ""]
-    meta.write_text("\n".join(lines), encoding="utf-8")
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--out", default="/run/media/dd/USB_4028/Projekte/"
+                        "InferenceQoS-runtime/video",
+                        help="Ablage fuer Video, Ton und Bilder")
+    parser.add_argument("--fps", type=int, default=FPS)
+    parser.add_argument("--keep-frames", action="store_true")
+    parser.add_argument("--runtime", default="",
+                        help="Verzeichnis mit den Messprotokollen "
+                             "(Voreinstellung: neben dem Hauptcheckout gesucht)")
+    parser.add_argument("--only", choices=("explainer", "promo"), default="",
+                        help="nur einen der beiden Schnitte bauen")
+    args = parser.parse_args()
 
-    summary = {
-        "final": str(final), "subtitled": str(burned), "short": str(short),
-        "srt": str(srt), "thumbnail": str(out / "thumbnail.png"),
-        "duration_s": round(clock, 2),
-        "short_duration_s": round(duration_of(short), 2),
-        "voice": VOICE.name, "length_scale": LENGTH_SCALE, "fps": args.fps,
-    }
+    here = Path(__file__).resolve()
+    runtime = Path(args.runtime) if args.runtime else find_runtime(here)
+    out = Path(args.out)
+    work = out / "work"
+    work.mkdir(parents=True, exist_ok=True)
+
+    pending = runtime / "measure-pending"
+    if pending.exists():
+        raise SystemExit("Es laeuft eine Messung (measure-pending). Spaeter rendern.")
+
+    attach_sources(script.SCENES, runtime)
+    attach_sources(script.PROMO_SCENES, runtime)
+
+    summary = {"voice": VOICE.name, "length_scale": LENGTH_SCALE, "fps": args.fps}
+    if args.only in ("", "explainer"):
+        explainer = build_cut(script.SCENES, "vigilant-inference-governor", out,
+                              work / "explainer", args.fps, args.keep_frames)
+        render.thumbnail(out / "thumbnail.png")
+        lines = [f"# {script.YOUTUBE_TITLE}", "", *DESCRIPTION, "## Chapters", ""]
+        for start, key in explainer["chapters"]:
+            lines.append(f"{timecode(start)[3:8]} {key}")
+        lines += ["", "## Tags", "", ", ".join(script.YOUTUBE_TAGS), ""]
+        (out / "youtube.md").write_text("\n".join(lines), encoding="utf-8")
+        summary.update({
+            "final": str(explainer["final"]), "subtitled": str(explainer["subtitled"]),
+            "srt": str(explainer["srt"]), "thumbnail": str(out / "thumbnail.png"),
+            "duration_s": round(explainer["duration"], 2),
+        })
+    if args.only in ("", "promo"):
+        promo = build_cut(script.PROMO_SCENES, "vigilant-inference-governor-promo", out,
+                          work / "promo", args.fps, args.keep_frames)
+        promo_lines = [f"# {script.PROMO_TITLE}", "", *DESCRIPTION[:6], "",
+                       "Full explainer and repository: "
+                       "https://github.com/Vigilant-CRS/Inference-Governor-QoS", "",
+                       "## Tags", "", ", ".join(script.YOUTUBE_TAGS), ""]
+        (out / "youtube-promo.md").write_text("\n".join(promo_lines), encoding="utf-8")
+        summary.update({
+            "promo": str(promo["final"]), "promo_subtitled": str(promo["subtitled"]),
+            "promo_srt": str(promo["srt"]), "promo_duration_s": round(promo["duration"], 2),
+        })
+
     (out / "build.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(json.dumps(summary, indent=2))
     return 0

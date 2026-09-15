@@ -25,6 +25,16 @@
 //! Gemessen wird ueber den Kopierpfad, nicht ueber Shared Memory: beide Seiten
 //! zahlen denselben Transport, und das Werkzeug laeuft damit auch dort, wo es
 //! kein `/dev/shm` gibt. Der Vergleich bleibt einer des Schedulings.
+//!
+//! ## Nur der Governor-Arm
+//!
+//! `VIG_FIT_ARMS=governed` laesst den direkten Arm weg. Das ist **kein**
+//! Urteil ueber den Governor, sondern die Bewertung einer Einstellung:
+//! `vig autotune` vergleicht damit mehrere Einstellungen desselben Governors
+//! gegeneinander (ADR-0045) und braucht dafuer den direkten Weg nicht jedes
+//! Mal. Das JSON sagt es in `arms`, die direkten Felder stehen auf `null`,
+//! und der Satz nennt sich Abstimmungslauf — damit niemand eine Bewertung
+//! ohne Vergleich als „lohnt sich" liest.
 
 #![allow(
     clippy::print_stdout,
@@ -62,17 +72,47 @@ const POINTS: [u64; 4] = [90, 100, 110, 125];
 /// konservative Wahl und keine gemessene Grenze.
 const HURTS_PERMILLE: u64 = 50;
 
+/// Welche Arme gefahren werden.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Arms {
+    /// Direkt und ueber den Governor — die Frage „lohnt es sich?".
+    Both,
+    /// Nur ueber den Governor — die Bewertung einer Einstellung, ohne
+    /// Vergleich.
+    Governed,
+}
+
+impl Arms {
+    /// Aus `VIG_FIT_ARMS`; `None` bei einem unbekannten Wert.
+    fn from_env() -> Option<Self> {
+        match std::env::var("VIG_FIT_ARMS").ok().as_deref() {
+            None | Some("both") => Some(Self::Both),
+            Some("governed") => Some(Self::Governed),
+            Some(_) => None,
+        }
+    }
+
+    /// Das Wort im JSON.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Both => "both",
+            Self::Governed => "governed",
+        }
+    }
+}
+
 /// Eine Zeile des Ergebnisses.
 #[derive(Debug, Clone)]
 struct Row {
     load: u64,
     stream: String,
     protected: bool,
-    /// Unabgedeckte Abtastungen aus Verbrauchersicht, direkt am Backend.
-    direct: u64,
+    /// Unabgedeckte Abtastungen aus Verbrauchersicht, direkt am Backend;
+    /// `None`, wenn der direkte Arm nicht gefahren wurde.
+    direct: Option<u64>,
     /// Dasselbe ueber den Governor.
     governed: u64,
-    direct_gap_ms: u64,
+    direct_gap_ms: Option<u64>,
     governed_gap_ms: u64,
 }
 
@@ -94,8 +134,14 @@ async fn run() {
              Umgebung:\n  \
              VIG_FIT_SECONDS  Messdauer je Arm und Punkt (Vorgabe {SECONDS})\n  \
              VIG_FIT_POINTS   Lastpunkte in Prozent (Vorgabe {POINTS:?})\n  \
+             VIG_FIT_ARMS     both (Vorgabe) oder governed: nur der Governor-Arm,\n                   \
+             eine Bewertung ohne Vergleich (vig autotune, Schritt tune)\n  \
              VIG_FIT_JSON     Ergebnis zusaetzlich als JSON in diese Datei"
         );
+        std::process::exit(2);
+    };
+    let Some(arms) = Arms::from_env() else {
+        eprintln!("VIG_FIT_ARMS kennt nur `both` und `governed`.");
         std::process::exit(2);
     };
 
@@ -122,7 +168,12 @@ async fn run() {
     );
     let duration = Duration::from_secs(seconds);
 
-    println!("vig-fit: lohnt sich der Governor hier?");
+    match arms {
+        Arms::Both => println!("vig-fit: lohnt sich der Governor hier?"),
+        Arms::Governed => println!(
+            "vig-fit: Bewertung einer Governor-Einstellung (nur Governor-Arm, kein Vergleich)"
+        ),
+    }
     println!(
         "Backend {} · {} Modelle · geschuetzte serialisierte Auslastung {} % bei den \
          Vertragsperioden",
@@ -235,8 +286,14 @@ async fn run() {
                 .collect()
         };
 
-        print!("  {load:>3} % Last  direkt …");
-        let direct = drive(&base.backend_endpoint, &defs(false), duration, false).await;
+        print!("  {load:>3} % Last ");
+        let direct = match arms {
+            Arms::Both => {
+                print!(" direkt …");
+                Some(drive(&base.backend_endpoint, &defs(false), duration, false).await)
+            }
+            Arms::Governed => None,
+        };
 
         // Der Governor bekommt fuer jeden Punkt seine eigene Instanz: die
         // Vertraege unterscheiden sich, und ein Scheduler, der mit den
@@ -279,11 +336,17 @@ async fn run() {
         println!(" fertig");
 
         for logical in &resolved.model_names {
-            let (Some(a), Some(b)) = (
-                direct.iter().find(|r| r.name == logical.as_str()),
-                governed.iter().find(|r| r.name == logical.as_str()),
-            ) else {
+            let Some(b) = governed.iter().find(|r| r.name == logical.as_str()) else {
                 continue;
+            };
+            // Mit beiden Armen gilt eine Zeile nur, wenn beide geliefert
+            // haben — wie bisher. Ohne direkten Arm gibt es nichts zu suchen.
+            let a = match &direct {
+                Some(reports) => match reports.iter().find(|r| r.name == logical.as_str()) {
+                    Some(a) => Some(a),
+                    None => continue,
+                },
+                None => None,
             };
             let protected = config
                 .models
@@ -293,9 +356,9 @@ async fn run() {
                 load: *load,
                 stream: logical.clone(),
                 protected,
-                direct: a.coverage.consumer_uncovered_permille(),
+                direct: a.map(|a| a.coverage.consumer_uncovered_permille()),
                 governed: b.coverage.consumer_uncovered_permille(),
-                direct_gap_ms: a.coverage.longest_gap_ns / 1_000_000,
+                direct_gap_ms: a.map(|a| a.coverage.longest_gap_ns / 1_000_000),
                 governed_gap_ms: b.coverage.longest_gap_ns / 1_000_000,
             });
         }
@@ -305,6 +368,7 @@ async fn run() {
     println!("\n  Unabgedeckte Abtastungen aus Verbrauchersicht, je Promille.\n");
     println!("  Last | Strom            | Klasse      | direkt | Governor | laengste Luecke d/G");
     println!("  -----|------------------|-------------|--------|----------|--------------------");
+    let dash = || "—".to_owned();
     for row in &rows {
         println!(
             "  {:>3} % | {:<16} | {:<11} | {:>5} ‰ | {:>6} ‰ | {:>6} / {:<6} ms",
@@ -315,15 +379,15 @@ async fn run() {
             } else {
                 "nachrangig"
             },
-            row.direct,
+            row.direct.map_or_else(dash, |d| d.to_string()),
             row.governed,
-            row.direct_gap_ms,
+            row.direct_gap_ms.map_or_else(dash, |d| d.to_string()),
             row.governed_gap_ms,
         );
     }
 
     let load_after = foreign_load().await;
-    println!("\n{}", verdict(&rows, &points));
+    println!("\n{}", verdict(&rows, &points, arms));
     println!(
         "\n  Fremde Rechenzeit {} vor, {} nach dem Lauf. Gemessen wurde die\n  \
          Versorgung, nicht die Erkennungsqualitaet; die Zahlen gelten fuer diese\n  \
@@ -333,7 +397,7 @@ async fn run() {
     );
 
     if let Ok(path) = std::env::var("VIG_FIT_JSON") {
-        let json = as_json(&rows, &points, seconds, load_before, load_after);
+        let json = as_json(&rows, &points, seconds, load_before, load_after, arms);
         match std::fs::write(&path, json) {
             Ok(()) => println!("  JSON: {path}"),
             Err(error) => {
@@ -350,7 +414,22 @@ async fn run() {
 }
 
 /// Das Urteil in einem Satz — auch, wenn es negativ ausfaellt.
-fn verdict(rows: &[Row], points: &[u64]) -> String {
+fn verdict(rows: &[Row], points: &[u64], arms: Arms) -> String {
+    if rows.is_empty() {
+        return "  Kein Ergebnis: kein Strom hat geliefert. Laeuft das Backend, und \
+                passen die Modellnamen?"
+            .to_owned();
+    }
+    if arms == Arms::Governed {
+        let tuning = governed_only(rows);
+        return format!(
+            "  BEWERTUNG Abstimmungslauf ohne direkten Vergleich: Unter dem Governor\n  \
+             verfehlen die geschuetzten Stroeme hoechstens {} ‰ (bei {} % Last), die\n  \
+             nachrangigen hoechstens {} ‰. Ob sich der Governor hier lohnt, sagt nur\n  \
+             ein Lauf mit beiden Armen.",
+            tuning.protected_worst, tuning.protected_load, tuning.background_worst
+        );
+    }
     // Der erste Punkt, an dem der direkte Weg den geschuetzten Strom verliert.
     let Some(finding) = finding(rows, points) else {
         return "  Kein Ergebnis: kein Strom hat geliefert. Laeuft das Backend, und \
@@ -419,6 +498,7 @@ fn as_json(
     seconds: u64,
     before: Option<u64>,
     after: Option<u64>,
+    arms: Arms,
 ) -> String {
     let cells: Vec<serde_json::Value> = rows
         .iter()
@@ -436,6 +516,9 @@ fn as_json(
         .collect();
     serde_json::json!({
         "tool": "vig-fit",
+        // `governed`: nur der Governor-Arm lief. Dann sind die direkten
+        // Felder `null` — nicht gemessen, nicht null Promille.
+        "arms": arms.label(),
         "seconds_per_arm": seconds,
         "load_points_percent": points,
         // Hundertstel Kerne fremder Rechenzeit; `null`, wo nicht beobachtbar.
@@ -443,12 +526,12 @@ fn as_json(
         "foreign_cores_centi_after": after,
         "view": "consumer",
         "cells": cells,
-        "verdict": verdict(rows, points).trim().to_owned(),
+        "verdict": verdict(rows, points, arms).trim().to_owned(),
         // Dieselbe Aussage fuer den englischen Qualifikationsbericht von
         // `vig autotune`. Vorher stand dort der deutsche Satz mitten in einem
         // englischen Dokument — ein Urteil, das der Leser nicht lesen kann,
         // ist keines (validierung-autotune.md, Befund 5).
-        "verdict_en": verdict_en(rows, points),
+        "verdict_en": verdict_en(rows, points, arms),
         // Ohne Lieferung gibt es kein Urteil. Das Feld sagt es maschinenlesbar,
         // damit niemand „kein Strom hat geliefert" als Ergebnis uebernimmt.
         "conclusive": !rows.is_empty(),
@@ -457,7 +540,21 @@ fn as_json(
 }
 
 /// Das Urteil auf Englisch, mit denselben Zahlen wie [`verdict`].
-fn verdict_en(rows: &[Row], points: &[u64]) -> String {
+fn verdict_en(rows: &[Row], points: &[u64], arms: Arms) -> String {
+    if rows.is_empty() {
+        return "No result: no stream delivered. Is the backend running, and do the model \
+                names match?"
+            .to_owned();
+    }
+    if arms == Arms::Governed {
+        let tuning = governed_only(rows);
+        return format!(
+            "Tuning evaluation without a direct comparison: under the governor the protected \
+             streams miss at worst {} ‰ (at {} % load), the lower-priority streams at worst \
+             {} ‰. Whether the governor pays off here only a run with both arms can say.",
+            tuning.protected_worst, tuning.protected_load, tuning.background_worst
+        );
+    }
     let Some(finding) = finding(rows, points) else {
         return "No result: no stream delivered. Is the backend running, and do the model \
                 names match?"
@@ -524,7 +621,7 @@ fn finding(rows: &[Row], points: &[u64]) -> Option<Finding> {
     let worst = |load: u64, protected: bool, governed: bool| -> u64 {
         rows.iter()
             .filter(|r| r.load == load && r.protected == protected)
-            .map(|r| if governed { r.governed } else { r.direct })
+            .filter_map(|r| if governed { Some(r.governed) } else { r.direct })
             .max()
             .unwrap_or(0)
     };
@@ -543,6 +640,40 @@ fn finding(rows: &[Row], points: &[u64]) -> Option<Finding> {
         price_direct: worst(load, false, false),
         price_governed: worst(load, false, true),
     })
+}
+
+/// Was eine Bewertung ohne direkten Arm feststellt.
+struct GovernedOnly {
+    /// Der schlechteste geschuetzte Strom ueber alle Lastpunkte.
+    protected_worst: u64,
+    /// Der Lastpunkt, an dem er auftrat (der erste bei Gleichstand).
+    protected_load: u64,
+    /// Der schlechteste nachrangige Strom ueber alle Lastpunkte.
+    background_worst: u64,
+}
+
+/// Die Feststellung hinter dem Satz eines Abstimmungslaufs.
+///
+/// Bewusst nur Maxima und kein Urteil: Ohne direkten Arm gibt es nichts, wogegen
+/// ein „lohnt sich" stehen koennte. Die Zielgroesse, nach der `vig autotune`
+/// Einstellungen vergleicht, rechnet `autotune` selbst aus den Zellen.
+fn governed_only(rows: &[Row]) -> GovernedOnly {
+    let mut out = GovernedOnly {
+        protected_worst: 0,
+        protected_load: rows.first().map_or(0, |r| r.load),
+        background_worst: 0,
+    };
+    for row in rows {
+        if row.protected {
+            if row.governed > out.protected_worst {
+                out.protected_worst = row.governed;
+                out.protected_load = row.load;
+            }
+        } else {
+            out.background_worst = out.background_worst.max(row.governed);
+        }
+    }
+    out
 }
 
 fn element_size(datatype: &str) -> u64 {
@@ -589,17 +720,19 @@ fn cores(centi: Option<u64>) -> String {
 }
 
 #[cfg(test)]
+// `parsed["arms"]` ist hier die Zusicherung, dass das Feld existiert.
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
-    use super::{Row, verdict};
+    use super::{Arms, Row, as_json, verdict};
 
     fn row(load: u64, protected: bool, direct: u64, governed: u64) -> Row {
         Row {
             load,
             stream: if protected { "det" } else { "bg" }.to_owned(),
             protected,
-            direct,
+            direct: Some(direct),
             governed,
-            direct_gap_ms: 0,
+            direct_gap_ms: Some(0),
             governed_gap_ms: 0,
         }
     }
@@ -609,8 +742,60 @@ mod tests {
     #[test]
     fn below_saturation_the_verdict_says_no() {
         let rows = vec![row(90, true, 0, 0), row(100, true, 3, 2)];
-        let text = verdict(&rows, &[90, 100]);
+        let text = verdict(&rows, &[90, 100], Arms::Both);
         assert!(text.contains("lohnt sich der\n  Governor nicht"), "{text}");
+    }
+
+    /// Ohne direkten Arm stehen die direkten Felder auf `null`, und der Satz
+    /// nennt sich Bewertung — nie ein Urteil, das es ohne Vergleich nicht gibt.
+    #[test]
+    fn a_governed_only_run_is_a_tuning_evaluation_not_a_verdict() {
+        let governed_only = |load: u64, protected: bool, governed: u64| Row {
+            direct: None,
+            direct_gap_ms: None,
+            ..row(load, protected, 0, governed)
+        };
+        let rows = vec![
+            governed_only(110, true, 12),
+            governed_only(110, false, 40),
+            governed_only(125, true, 30),
+            governed_only(125, false, 90),
+        ];
+        let text = as_json(&rows, &[110, 125], 10, Some(3), None, Arms::Governed);
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["arms"], "governed");
+        assert_eq!(parsed["conclusive"], true);
+        let cells = parsed["cells"].as_array().unwrap();
+        assert_eq!(cells.len(), 4);
+        for cell in cells {
+            assert!(cell["direct_uncovered_permille"].is_null(), "{cell}");
+            assert!(cell["direct_longest_gap_ms"].is_null(), "{cell}");
+            assert!(cell["governed_uncovered_permille"].is_u64(), "{cell}");
+        }
+        let english = parsed["verdict_en"].as_str().unwrap();
+        assert!(english.starts_with("Tuning evaluation"), "{english}");
+        assert!(english.contains("30 ‰ (at 125 % load)"), "{english}");
+        assert!(english.contains("90 ‰"), "{english}");
+        assert!(!english.contains("not worth it"), "{english}");
+        assert!(
+            parsed["verdict"]
+                .as_str()
+                .unwrap()
+                .contains("ohne direkten Vergleich")
+        );
+
+        // Mit beiden Armen bleibt alles, wie es war.
+        let both = as_json(
+            &[row(110, true, 300, 12)],
+            &[110],
+            10,
+            None,
+            None,
+            Arms::Both,
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&both).unwrap();
+        assert_eq!(parsed["arms"], "both");
+        assert_eq!(parsed["cells"][0]["direct_uncovered_permille"], 300);
     }
 
     /// Ueber der Saettigung nennt das Urteil den Punkt und beide Zahlen.
@@ -621,7 +806,7 @@ mod tests {
             row(110, true, 340, 12),
             row(110, false, 20, 300),
         ];
-        let text = verdict(&rows, &[100, 110]);
+        let text = verdict(&rows, &[100, 110], Arms::Both);
         assert!(text.contains("Ab 110 % Last"), "{text}");
         assert!(text.contains("340 ‰"), "{text}");
         assert!(text.contains("12 ‰"), "{text}");
@@ -632,7 +817,7 @@ mod tests {
     #[test]
     fn a_result_against_us_is_reported_as_such() {
         let rows = vec![row(110, true, 200, 260)];
-        let text = verdict(&rows, &[110]);
+        let text = verdict(&rows, &[110], Arms::Both);
         assert!(text.contains("nicht weniger"), "{text}");
         assert!(text.contains("gegen uns"), "{text}");
     }
@@ -640,6 +825,6 @@ mod tests {
     /// Ohne Lieferung gibt es kein Urteil, sondern einen Hinweis.
     #[test]
     fn no_delivery_is_not_a_verdict() {
-        assert!(verdict(&[], &[100]).contains("Kein Ergebnis"));
+        assert!(verdict(&[], &[100], Arms::Both).contains("Kein Ergebnis"));
     }
 }

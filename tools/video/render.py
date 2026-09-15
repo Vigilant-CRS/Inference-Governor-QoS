@@ -625,6 +625,46 @@ def autotune(scene, progress: float) -> Image.Image:
     return image
 
 
+def trend(_scene, progress: float) -> Image.Image:
+    """Der Aufhaenger: viele Modelle, ein Chip.
+
+    Keine Marktzahl und keine Firmennamen — nur die Richtung, die in Fahrzeugen
+    und Robotern sichtbar ist: Rechenaufgaben wandern auf wenige zentrale
+    Rechner. Die Zahlen des Videos kommen spaeter, und aus Dateien.
+    """
+    image = base()
+    draw = ImageDraw.Draw(image)
+    kicker(draw, "central compute")
+    headline(draw, "Many models. One chip.", y=118, size=62)
+    models = ["camera detection", "pose estimation", "depth", "motion planning",
+              "language model"]
+    shown = int(min(len(models), 1 + progress * (len(models) + 1)))
+    box_w, box_h, gap = 470, 84, 26
+    left, top = 200, 280
+    chip = (1180, 400, 1640, 700)
+    chip_mid = ((chip[0] + chip[2]) // 2, (chip[1] + chip[3]) // 2)
+    for index, name in enumerate(models[:shown]):
+        y = top + index * (box_h + gap)
+        draw.line([(left + box_w, y + box_h // 2), (chip[0], chip_mid[1])],
+                  fill=FAINT, width=3)
+        draw.rectangle([left, y, left + box_w, y + box_h], fill=PANEL)
+        draw.line([(left, y), (left, y + box_h)], fill=ACCENT, width=5)
+        draw.text((left + 34, y + box_h // 2), name, font=font(SANS, 34), fill=TEXT,
+                  anchor="lm")
+    if progress > 0.45:
+        draw.rectangle(chip, fill=BAR, outline=ACCENT, width=4)
+        draw.text((chip_mid[0], chip_mid[1] - 26), "one accelerator",
+                  font=font(SANS_BOLD, 42), fill=TEXT, anchor="mm")
+        draw.text((chip_mid[0], chip_mid[1] + 32), "one queue",
+                  font=font(SANS, 32), fill=DIM, anchor="mm")
+    if progress > 0.7:
+        draw.text((200, 860),
+                  "Vehicles move to central computers. Humanoids run perception, "
+                  "planning and language on board.",
+                  font=font(SANS, 30), fill=DIM)
+    return image
+
+
 def capabilities(_scene, progress: float) -> Image.Image:
     """Die vier Entscheidungen, die vor der GPU fallen (README, „What it actually does")."""
     image = base()
@@ -708,6 +748,7 @@ RENDERERS = {
     "limits": limits,
     "autotune": autotune,
     "capabilities": capabilities,
+    "trend": trend,
     "devices": devices,
     "terminal_doctor": terminal_doctor,
     "close": close,
@@ -717,7 +758,7 @@ RENDERERS = {
 #: stehen gelassen — das spart Platz und Zeit, ohne dass man es sieht.
 ANIMATED = {"title", "timeline_fifo", "stale", "timeline_governor", "usecases",
             "terminal_run", "price", "limits", "autotune", "terminal_doctor",
-            "capabilities", "devices",
+            "capabilities", "devices", "trend",
             "close", "short_tail"}
 
 

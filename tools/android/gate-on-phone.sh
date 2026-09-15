@@ -38,9 +38,9 @@ RUNS=${RUNS:-3}
 COOLDOWN=${COOLDOWN:-120}
 SECONDS_PER_RUN=${SECONDS_PER_RUN:-30}
 GATE_MASK=${GATE_MASK:-f0}
-OUT=${OUT:-$RUNTIME/android-gpu-$(date +%Y-%m-%d)/$(date +%H%M%S)}
+OUT=${OUT:-$RUNTIME/messungen/android-gpu-$(date +%Y-%m-%d)/$(date +%H%M%S)}
 PHONE=/data/local/tmp/vigtfl
-# Logischer Name = Datei in $RUNTIME/android-models. Der Detektor mit NMS im
+# Logischer Name = Datei in $RUNTIME/modelle/android-models. Der Detektor mit NMS im
 # Graphen antwortet mit 25 Boxen statt 19 206 Ankern (7 MB) — auf dem
 # Kopierpfad eines Telefons ist das der Unterschied zwischen einer Messung
 # des Schedulings und einer des Transports.
@@ -66,7 +66,7 @@ thermal() { # Temperaturen laut Thermal-HAL; sysfs ist ohne Root gesperrt
   echo
 }
 
-SERVER=$RUNTIME/android-tflite/vig-tflite-server
+SERVER=$RUNTIME/modelle/android-tflite/vig-tflite-server
 if [ "${SKIP_BUILD:-0}" != 1 ]; then
   echo "== Bauen"
   cp "$(QUIET=$QUIET tools/android/build-backend.sh)" "$SERVER"
@@ -78,7 +78,7 @@ echo "== Schieben"
 adb shell mkdir -p $PHONE
 adb push "$SERVER" "$GATE" "$RUNTIME"/android-tflite/arm64/*.so $PHONE/ >/dev/null
 for m in "${MODELS[@]}"; do
-  adb push "$RUNTIME/android-models/${m#*=}" $PHONE/ >/dev/null
+  adb push "$RUNTIME/modelle/android-models/${m#*=}" $PHONE/ >/dev/null
 done
 for c in $CONFIGS; do adb push "$c" "$PHONE/$(basename "$c")" >/dev/null; done
 adb shell chmod 755 $PHONE/vig-tflite-server $PHONE/gate-m3

@@ -4,7 +4,7 @@ Datum: 11./12.09.2026. Gerät: Pixel 2 (Snapdragon 835, Adreno 540,
 Android 11, ungerootet, passiv gekühlt). Backend: `vig-tflite-server` (ADR-0039) mit
 TFLite 2.16.1 und GPU-Delegate V2 über GLES. Governor, Lastgenerator und
 Backend laufen auf dem Telefon; der Laptop schiebt nur Dateien. Rohdaten:
-`InferenceQoS-runtime/android-gpu-2026-09-11/`.
+`InferenceQoS-runtime/messungen/android-gpu-2026-09-11/`.
 
 ## Die Frage
 

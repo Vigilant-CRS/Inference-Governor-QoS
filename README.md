@@ -1,15 +1,23 @@
 # Vigilant Inference Governor
 
-**A scheduler for AI inference on robots and vehicles: when several models
-share one GPU, it keeps the results that matter fresh.** It sits in front of
-your inference server — NVIDIA Triton or TensorFlow Lite — and decides before
-every dispatch whether a result will still be useful when it is finished.
+**A scheduler for AI inference on central compute: when vision, planning and
+language models share one chip on a robot or a vehicle, it keeps the results
+that matter fresh.** It sits in front of your inference server — NVIDIA Triton
+or TensorFlow Lite — and decides before every dispatch whether a result will
+still be useful when it is finished.
 
-**Is it worth it on your hardware? `vig autotune` measures your machine in one
-command and tells you — including when you do not need it.**
+**`vig autotune` tunes it for your hardware:** it measures your models on your
+machine, tries the governor's settings against your contracts, and keeps the
+configuration that serves your protected streams best — and says plainly when
+your load does not need a governor at all.
 
 > **Stop computing the past.** A faster GPU computes stale frames faster. The
 > governor stops computing them.
+
+**Why now:** robots and vehicles are consolidating their software onto a few
+central computers. Perception, planning and language models increasingly share
+one accelerator — and that is exactly where first-come-first-served scheduling
+starts computing answers nobody can use any more.
 
 **What it does:** drops frames that a newer one has replaced · refuses work
 that would finish too late · holds back long jobs while protected work is due
@@ -245,7 +253,8 @@ release archive and the container image; `vig autotune` finds it there.
 configuration we had tuned by hand. It now arrives at the same structure: the
 same serialised model pair, the same two interference entries (within 6.4 %),
 solo profiles within 3.5 % — twelve of twelve series, not contaminated, and a
-clear answer: *on that load the governor is not worth it*. One occupancy level
+clear answer for that test load (slow contracts, about 35 % planned
+utilisation): *no governor needed there* — saying so is part of the job. One occupancy level
 of the detector differs, in the cautious direction. On a second device, a
 Pixel 5 with a different SoC and no hand-tuned reference, it derived the same
 structure with that phone's own, slower numbers — again twelve of twelve

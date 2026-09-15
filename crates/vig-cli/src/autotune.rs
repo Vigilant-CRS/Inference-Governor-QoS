@@ -10,8 +10,11 @@
 //!
 //! 1. `vig init` — was das Backend ueber seine Modelle weiss.
 //! 2. `vig calibrate` — Laufzeiten, Nebenlaeufigkeit, gerichtete Interferenz.
-//! 3. `vig-fit` — lohnt sich der Governor auf dieser Last ueberhaupt?
-//! 4. `vig doctor` — traegt die entstandene Konfiguration?
+//! 3. `tune` — die Stellgroessen des Governors auf dieser Last einstellen,
+//!    innerhalb der Vertraege (ADR-0045, [`tune`]).
+//! 4. `vig-fit` — lohnt sich der **eingestellte** Governor auf dieser Last
+//!    ueberhaupt?
+//! 5. `vig doctor` — traegt die entstandene Konfiguration?
 //!
 //! ## Was dieses Werkzeug nicht darf
 //!
@@ -54,6 +57,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+mod tune;
+
+pub(crate) use tune::{Evaluation, Tuning, Unevaluated};
+
 /// Ab so viel fremder Rechenzeit gilt die Maschine als nicht ruhig, in
 /// Hundertstel Kernen.
 ///
@@ -95,6 +102,11 @@ pub(crate) enum Step {
     Discover,
     /// Laufzeiten, Nebenlaeufigkeit, Interferenz.
     Measure,
+    /// Die Stellgroessen des Governors auf dieser Last einstellen.
+    ///
+    /// Vor `fit`: Die Frage „lohnt es sich?" gilt dem Governor, der in Betrieb
+    /// geht, nicht seiner Voreinstellung.
+    Tune,
     /// Lohnt es sich auf dieser Last?
     Fit,
     /// Traegt die entstandene Konfiguration?
@@ -103,13 +115,20 @@ pub(crate) enum Step {
 
 impl Step {
     /// Alle Schritte in ihrer Reihenfolge.
-    pub(crate) const ALL: [Self; 4] = [Self::Discover, Self::Measure, Self::Fit, Self::Check];
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Discover,
+        Self::Measure,
+        Self::Tune,
+        Self::Fit,
+        Self::Check,
+    ];
 
     /// Der Name, unter dem der Schritt im Bericht und im Zustand steht.
     pub(crate) const fn key(self) -> &'static str {
         match self {
             Self::Discover => "discover",
             Self::Measure => "measure",
+            Self::Tune => "tune",
             Self::Fit => "fit",
             Self::Check => "check",
         }
@@ -125,6 +144,7 @@ impl Step {
         match self {
             Self::Discover => "read the models from the backend",
             Self::Measure => "measure runtimes, concurrency and interference",
+            Self::Tune => "tune the governor settings for this load",
             Self::Fit => "is the governor worth it on this load?",
             Self::Check => "check the resulting configuration",
         }
@@ -138,6 +158,7 @@ impl Step {
         match self {
             Self::Discover => 5,
             Self::Measure => shape.measure_seconds(quick),
+            Self::Tune => tune::rough_seconds(quick),
             Self::Fit => {
                 if quick {
                     60
@@ -300,6 +321,8 @@ impl SeriesCount {
 pub(crate) struct Qualification {
     pub(crate) steps: Vec<StepResult>,
     pub(crate) series: SeriesCount,
+    /// Was `tune` versucht, behalten und verworfen hat.
+    pub(crate) tuning: Option<Tuning>,
     /// Das Urteil von `vig-fit`, woertlich — auch ein negatives.
     pub(crate) fit_verdict: Option<String>,
     /// Das Urteil von `vig doctor`: `READY`, `READY_WITH_WARNINGS`, `NOT_READY`.
@@ -317,6 +340,7 @@ impl Default for Qualification {
         Self {
             steps: Vec::new(),
             series: SeriesCount::default(),
+            tuning: None,
             fit_verdict: None,
             doctor: None,
             config: None,
@@ -447,14 +471,28 @@ pub(crate) trait Steps {
         quick: bool,
     ) -> Result<SeriesCount, String>;
 
-    /// Schritt 3: lohnt es sich? `None`, wenn das Werkzeug nicht da ist.
+    /// Schritt 3: eine Fassung der Konfiguration bewerten, nur der
+    /// Governor-Arm.
+    ///
+    /// Die Suche selbst liegt in [`tune`] und ist fuer alle Implementierungen
+    /// dieselbe; ersetzbar ist nur die Messung. So prueft ein Test ohne GPU,
+    /// was behalten wird, was verworfen und was verweigert.
+    ///
+    /// # Errors
+    ///
+    /// [`Unevaluated::Missing`] ohne `vig-fit`, [`Unevaluated::Refused`], wenn
+    /// die Konfigurationspruefung die Fassung ablehnt, sonst
+    /// [`Unevaluated::Failed`].
+    async fn evaluate(&mut self, config: &Path, quick: bool) -> Result<Evaluation, Unevaluated>;
+
+    /// Schritt 4: lohnt es sich? `None`, wenn das Werkzeug nicht da ist.
     ///
     /// # Errors
     ///
     /// Wenn `vig-fit` gefunden wurde, aber nicht durchlief.
     async fn fit(&mut self, config: &Path, quick: bool) -> Result<Option<String>, String>;
 
-    /// Schritt 4: die entstandene Konfiguration pruefen.
+    /// Schritt 5: die entstandene Konfiguration pruefen.
     ///
     /// # Errors
     ///
@@ -662,6 +700,10 @@ pub(crate) fn markdown(q: &Qualification, endpoint: &str) -> String {
         );
     }
 
+    if let Some(tuning) = &q.tuning {
+        tune::markdown(tuning, &mut out);
+    }
+
     if let Some(verdict) = &q.fit_verdict {
         let _ = write!(
             out,
@@ -734,6 +776,7 @@ pub(crate) fn json(q: &Qualification, endpoint: &str) -> String {
             "skipped_models": q.series.skipped_models,
         },
         "clock": clock,
+        "tuning": q.tuning.as_ref().map(tune::to_json),
         "fit_verdict": q.fit_verdict,
         "doctor": q.doctor,
         "config": q.config.as_ref().map(|p| p.display().to_string()),
@@ -786,7 +829,7 @@ pub(crate) async fn execute<S: Steps + ?Sized>(
         // Lesevorgangs: `discover` und `check` rechnen nicht. Beobachtet wird
         // davor und danach, wenn das Backend ruht — nie waehrend der eigenen
         // Last, die sonst als fremde zaehlte.
-        let measuring = matches!(*step, Step::Measure | Step::Fit);
+        let measuring = matches!(*step, Step::Measure | Step::Tune | Step::Fit);
         let before = if measuring {
             steps.foreign_load().await
         } else {
@@ -799,6 +842,14 @@ pub(crate) async fn execute<S: Steps + ?Sized>(
         // `measured.yaml` im Bericht, die es so nicht mehr gibt.
         if *step == Step::Measure {
             q.series = SeriesCount::default();
+            q.tuning = None;
+            q.fit_verdict = None;
+            q.doctor = None;
+        }
+        // Dasselbe fuer eine neue Einstellung: `fit` und `check` sprachen
+        // ueber eine Fassung, die danach eine andere sein kann.
+        if *step == Step::Tune {
+            q.tuning = None;
             q.fit_verdict = None;
             q.doctor = None;
         }
@@ -811,22 +862,36 @@ pub(crate) async fn execute<S: Steps + ?Sized>(
                 }
                 Err(reason) => Outcome::Failed { reason },
             },
-            Step::Measure => match steps.measure(config, out_config, quick).await {
-                Ok(series) => {
-                    q.series = series;
-                    if series.discarded > 0 {
-                        notes.push(format!(
-                            "{} of {} series discarded; the values they would have produced are \
-                             not set, earlier values stay unmeasured",
-                            series.discarded,
-                            series.total()
-                        ));
+            Step::Measure => {
+                // Eine neue Messung hat eine neue unverstellte Fassung; die
+                // eines frueheren `tune` darf danach nicht als Ausgangspunkt
+                // gelten.
+                let measured = match tune::forget(out_config) {
+                    Ok(()) => steps.measure(config, out_config, quick).await,
+                    Err(reason) => Err(reason),
+                };
+                match measured {
+                    Ok(series) => {
+                        q.series = series;
+                        if series.discarded > 0 {
+                            notes.push(format!(
+                                "{} of {} series discarded; the values they would have \
+                                 produced are not set, earlier values stay unmeasured",
+                                series.discarded,
+                                series.total()
+                            ));
+                        }
+                        q.config = Some(out_config.to_path_buf());
+                        Outcome::Done
                     }
-                    q.config = Some(out_config.to_path_buf());
-                    Outcome::Done
+                    Err(reason) => Outcome::Failed { reason },
                 }
-                Err(reason) => Outcome::Failed { reason },
-            },
+            }
+            Step::Tune => {
+                let (outcome, tuning) = tune::run(steps, out_config, quick, &mut notes).await;
+                q.tuning = tuning;
+                outcome
+            }
             Step::Fit => match steps.fit(out_config, quick).await {
                 Ok(Some(verdict)) => {
                     q.fit_verdict = Some(verdict);
@@ -861,6 +926,22 @@ pub(crate) async fn execute<S: Steps + ?Sized>(
                 }
             }
             other => other,
+        };
+        // Unter Fremdlast traegt der Vergleich zwischen den Fassungen nicht:
+        // Ob der Vorsprung von der Einstellung kam oder von der anderen
+        // Arbeit, weiss niemand. Also bleibt die unverstellte Fassung stehen.
+        let outcome = match (&outcome, q.tuning.as_mut()) {
+            (Outcome::Contaminated { reason }, Some(tuning)) if *step == Step::Tune => {
+                let why = format!(
+                    "the settings were compared under foreign load ({reason}), so the \
+                     difference is not attributable to the setting"
+                );
+                match tune::withhold(out_config, tuning, &why) {
+                    Ok(()) => outcome,
+                    Err(reason) => Outcome::Failed { reason },
+                }
+            }
+            _ => outcome,
         };
 
         println!(
@@ -1085,6 +1166,88 @@ impl Steps for Live {
             .and_then(serde_json::Value::as_str)
             .map(|verdict| Some(verdict.to_owned()))
             .ok_or_else(|| "the fit result carries no verdict".to_owned())
+    }
+
+    async fn evaluate(&mut self, config: &Path, quick: bool) -> Result<Evaluation, Unevaluated> {
+        let Some(binary) = Self::fit_binary() else {
+            return Err(Unevaluated::Missing);
+        };
+        // `candidate-3.yaml` wird `eval-3.json`, `untuned.yaml` wird
+        // `eval-untuned.json`: Fassung und Bewertung liegen erkennbar
+        // nebeneinander.
+        let name = config
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("candidate");
+        let label = name.strip_prefix("candidate-").unwrap_or(name);
+        let json_path = self.out_dir.join("tune").join(format!("eval-{label}.json"));
+        // Wie bei `fit`: eine Bewertung aus einem frueheren Lauf darf nicht als
+        // diese gelesen werden.
+        match std::fs::remove_file(&json_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(Unevaluated::Failed {
+                    reason: format!("the old {} could not be removed: {e}", json_path.display()),
+                });
+            }
+        }
+        // stderr wird mitgelesen: Bei einer abgelehnten Fassung stehen dort
+        // die Befunde, und die gehoeren in den Bericht, nicht nur ins Terminal.
+        let output = tokio::process::Command::new(&binary)
+            .arg(config)
+            .env("VIG_FIT_ARMS", "governed")
+            .env("VIG_FIT_JSON", &json_path)
+            .env("VIG_FIT_SECONDS", tune::eval_seconds(quick).to_string())
+            .env("VIG_FIT_POINTS", tune::eval_points(quick))
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| Unevaluated::Failed {
+                reason: format!("{} could not be started: {e}", binary.display()),
+            })?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprint!("{stderr}");
+        let findings: Vec<&str> = stderr
+            .lines()
+            .filter(|line| line.starts_with("  "))
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .take(6)
+            .collect();
+        // Exitcode 2 heisst bei `vig-fit`: offene Befunde der Konfiguration.
+        if output.status.code() == Some(2) {
+            return Err(Unevaluated::Refused {
+                reason: if findings.is_empty() {
+                    format!("{} exited with {}", binary.display(), output.status)
+                } else {
+                    findings.join("; ")
+                },
+            });
+        }
+        if !output.status.success() {
+            let said = stderr
+                .lines()
+                .map(str::trim)
+                .rfind(|line| !line.is_empty())
+                .map_or_else(String::new, |line| format!(": {line}"));
+            return Err(Unevaluated::Failed {
+                reason: format!(
+                    "{} exited with {}{said}; no evaluation is taken from it",
+                    binary.display(),
+                    output.status
+                ),
+            });
+        }
+        let text = std::fs::read_to_string(&json_path).map_err(|e| Unevaluated::Failed {
+            reason: format!("{} wrote no result: {e}", binary.display()),
+        })?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| Unevaluated::Failed {
+                reason: format!("evaluation unreadable: {e}"),
+            })?;
+        tune::evaluation_from_fit_json(&parsed).map_err(|reason| Unevaluated::Failed { reason })
     }
 
     async fn check(&mut self, config: &Path) -> Result<String, String> {
@@ -1337,6 +1500,9 @@ fn prior_state(state_path: &Path) -> PriorRun {
                 .unwrap_or(0),
         };
     }
+    // Ein Zustand aus der Fassung mit vier Schritten hat kein `tuning`; dann
+    // fehlt `tune` unter den erledigten Schritten und laeuft einfach.
+    q.tuning = parsed.get("tuning").and_then(tune::from_json);
     q.fit_verdict = parsed
         .get("fit_verdict")
         .and_then(serde_json::Value::as_str)
@@ -1400,6 +1566,7 @@ fn state_json(q: &Qualification, fingerprint: &str) -> String {
             "discarded": q.series.discarded,
             "skipped_models": q.series.skipped_models,
         },
+        "tuning": q.tuning.as_ref().map(tune::to_json),
         "fit_verdict": q.fit_verdict,
         "doctor": q.doctor,
         "config": q.config.as_ref().map(|p| p.display().to_string()),
@@ -1545,11 +1712,17 @@ pub(crate) async fn run(
 // nicht weil etwas zu tun waere.
 #[allow(clippy::unwrap_used, clippy::panic, clippy::unused_async_trait_impl)]
 mod tests {
+    use super::tune::{Decision, LoadPoint, Objective, StreamMiss, decide};
     use super::{
-        Clock, Outcome, Qualification, Release, RunShape, SeriesCount, Step, StepResult, Steps,
-        estimate_seconds, execute, headline, json, markdown, plan, quiet_enough, summary,
+        Clock, Evaluation, Outcome, Qualification, Release, RunShape, SeriesCount, Step,
+        StepResult, Steps, Unevaluated, estimate_seconds, execute, headline, json, markdown, plan,
+        prior_state, quiet_enough, state_json, summary,
     };
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Wie eine Fassung abschneidet — die Tests setzen es je Fall.
+    type Score = fn(&vig_config::Config) -> Result<Evaluation, Unevaluated>;
 
     /// Ein Lauf mit austauschbarem Ausgang, damit sich die Ehrlichkeitsregeln
     /// ohne GPU pruefen lassen.
@@ -1561,8 +1734,13 @@ mod tests {
         load: Option<u64>,
         measure_fails: Option<String>,
         fit_missing: bool,
+        evaluate_missing: bool,
+        /// Ohne Angabe schneidet jede Fassung gleich ab.
+        score: Option<Score>,
         clock_blind: bool,
         persisted: usize,
+        /// Welche Methoden in welcher Reihenfolge gerufen wurden.
+        calls: Vec<&'static str>,
     }
 
     impl Steps for Fake {
@@ -1571,6 +1749,7 @@ mod tests {
             _endpoint: &str,
             _config: &Path,
         ) -> Result<Vec<String>, String> {
+            self.calls.push("discover");
             Ok(vec!["detector".to_owned()])
         }
         async fn measure(
@@ -1579,9 +1758,25 @@ mod tests {
             _out: &Path,
             _quick: bool,
         ) -> Result<SeriesCount, String> {
+            self.calls.push("measure");
             self.measure_fails.clone().map_or(Ok(self.series), Err)
         }
+        async fn evaluate(
+            &mut self,
+            config: &Path,
+            _quick: bool,
+        ) -> Result<Evaluation, Unevaluated> {
+            self.calls.push("evaluate");
+            if self.evaluate_missing {
+                return Err(Unevaluated::Missing);
+            }
+            let parsed =
+                vig_config::Config::from_yaml(&std::fs::read_to_string(config).unwrap()).unwrap();
+            self.score
+                .map_or_else(|| Ok(evaluation(20, 100)), |score| score(&parsed))
+        }
         async fn fit(&mut self, _config: &Path, _quick: bool) -> Result<Option<String>, String> {
+            self.calls.push("fit");
             if self.fit_missing {
                 return Ok(None);
             }
@@ -1590,6 +1785,7 @@ mod tests {
             })))
         }
         async fn check(&mut self, _config: &Path) -> Result<String, String> {
+            self.calls.push("check");
             Ok(if self.doctor.is_empty() {
                 "READY".to_owned()
             } else {
@@ -1613,28 +1809,133 @@ mod tests {
         }
     }
 
+    /// Eine eingefrorene Konfiguration, wie `measure` sie hinterlaesst: ein
+    /// geschuetzter und ein nachrangiger Strom, beide mit Profil.
+    const MEASURED: &str = "version: 1
+backend:
+  type: triton
+  grpc_endpoint: \"127.0.0.1:9001\"
+  slots: 1
+models:
+  detector:
+    class: protected
+    queue: { policy: latest, capacity: 1 }
+    contract: { period_ms: 33, deadline_ms: 33, max_age_ms: 66 }
+    variants:
+      - id: main
+        backend_model: detector
+        quality: { value: 1.0, source: measured }
+        profile: { p50_us: 8000, p95_us: 9000, p99_us: 10000, samples: 1000 }
+  tracker:
+    class: best_effort
+    queue: { policy: fifo, capacity: 4 }
+    contract: { period_ms: 100, deadline_ms: 200, max_age_ms: 300 }
+    variants:
+      - id: main
+        backend_model: tracker
+        quality: { value: 1.0, source: measured }
+        profile: { p50_us: 20000, p95_us: 22000, p99_us: 25000, samples: 1000 }
+";
+
+    /// Ein eigenes Verzeichnis je Test, mit `measured.yaml` darin.
+    fn workdir(measured: &str) -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "vig-autotune-unit-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("measured.yaml"), measured).unwrap();
+        dir
+    }
+
+    /// Dieselbe Versorgung an zwei Lastpunkten.
+    fn evaluation(protected: u64, background: u64) -> Evaluation {
+        let point = |load_percent| LoadPoint {
+            load_percent,
+            streams: vec![
+                StreamMiss {
+                    stream: "detector".to_owned(),
+                    protected: true,
+                    governed_permille: protected,
+                },
+                StreamMiss {
+                    stream: "tracker".to_owned(),
+                    protected: false,
+                    governed_permille: background,
+                },
+            ],
+        };
+        Evaluation {
+            points: vec![point(110), point(125)],
+        }
+    }
+
+    fn measured_config(dir: &Path, file: &str) -> vig_config::Config {
+        vig_config::Config::from_yaml(&std::fs::read_to_string(dir.join(file)).unwrap()).unwrap()
+    }
+
     async fn run(fake: &mut Fake) -> Qualification {
-        execute(
+        let dir = workdir(MEASURED);
+        let q = execute(
             fake,
             &Step::ALL,
             "127.0.0.1:8001",
-            Path::new("vig.yaml"),
-            Path::new("measured.yaml"),
+            &dir.join("vig.yaml"),
+            &dir.join("measured.yaml"),
             false,
             Qualification::default(),
         )
-        .await
+        .await;
+        let _ = std::fs::remove_dir_all(&dir);
+        q
+    }
+
+    /// Nur der Schritt `tune`, auf einer gegebenen eingefrorenen Fassung.
+    async fn tune_only(fake: &mut Fake, measured: &str) -> (Qualification, PathBuf) {
+        let dir = workdir(measured);
+        let q = execute(
+            fake,
+            &[Step::Tune],
+            "127.0.0.1:8001",
+            &dir.join("vig.yaml"),
+            &dir.join("measured.yaml"),
+            false,
+            Qualification::default(),
+        )
+        .await;
+        (q, dir)
+    }
+
+    fn outcome_of(q: &Qualification, step: Step) -> Outcome {
+        q.steps
+            .iter()
+            .find(|s| s.step == step)
+            .map(|s| s.outcome.clone())
+            .unwrap()
+    }
+
+    /// Die Testfassung muss die Konfigurationspruefung bestehen — sonst
+    /// pruefen die Tests unten nur die Verweigerung.
+    #[test]
+    fn the_test_configuration_passes_the_check() {
+        let config = vig_config::Config::from_yaml(MEASURED).unwrap();
+        assert!(config.diagnose().is_empty(), "{:?}", config.diagnose());
     }
 
     /// Eine Fortsetzung darf den Bericht nicht kuerzen.
     ///
     /// Der Fall aus dem Review: Lauf 1 misst und verwirft drei von vier
-    /// Reihen, dann bricht er ab. Lauf 2 faehrt nur noch `fit` und `check`.
-    /// Vorher begann dieser zweite Lauf mit einer leeren `Qualification` und
-    /// ueberschrieb den Bericht damit — die verworfenen Reihen, die
-    /// eingefrorene Konfiguration und die beiden ersten Schritte waren weg.
+    /// Reihen, dann bricht er ab. Lauf 2 faehrt nur noch `tune`, `fit` und
+    /// `check`. Vorher begann dieser zweite Lauf mit einer leeren
+    /// `Qualification` und ueberschrieb den Bericht damit — die verworfenen
+    /// Reihen, die eingefrorene Konfiguration und die beiden ersten Schritte
+    /// waren weg.
     #[tokio::test]
     async fn resuming_keeps_what_the_earlier_run_measured() {
+        let dir = workdir(MEASURED);
         let prior = Qualification {
             steps: vec![
                 StepResult {
@@ -1655,22 +1956,26 @@ mod tests {
                 discarded: 3,
                 skipped_models: 0,
             },
-            config: Some(PathBuf::from("measured.yaml")),
+            config: Some(dir.join("measured.yaml")),
             ..Qualification::default()
         };
         let mut fake = clean();
         let q = execute(
             &mut fake,
-            &[Step::Fit, Step::Check],
+            &[Step::Tune, Step::Fit, Step::Check],
             "127.0.0.1:8001",
-            Path::new("vig.yaml"),
-            Path::new("measured.yaml"),
+            &dir.join("vig.yaml"),
+            &dir.join("measured.yaml"),
             false,
             prior,
         )
         .await;
 
-        assert!(q.complete(), "alle vier Schritte im Bericht: {:?}", q.steps);
+        assert!(
+            q.complete(),
+            "alle fuenf Schritte im Bericht: {:?}",
+            q.steps
+        );
         assert_eq!(
             q.series,
             SeriesCount {
@@ -1682,7 +1987,7 @@ mod tests {
         );
         assert_eq!(
             q.config,
-            Some(PathBuf::from("measured.yaml")),
+            Some(dir.join("measured.yaml")),
             "und die eingefrorene Konfiguration ebenfalls"
         );
         let Release::Refused { reasons } = q.release() else {
@@ -1696,6 +2001,7 @@ mod tests {
             markdown(&q, "x").contains("not set"),
             "und der Bericht muss weiterhin sagen, dass Werte fehlen"
         );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn clean() -> Fake {
@@ -1764,7 +2070,7 @@ mod tests {
         assert!(q.contaminated(), "Fremdlast muss auffallen");
         for step in &q.steps {
             match step.step {
-                Step::Measure | Step::Fit => assert!(
+                Step::Measure | Step::Tune | Step::Fit => assert!(
                     matches!(step.outcome, Outcome::Contaminated { .. }),
                     "{:?} misst und muss als verschmutzt gelten",
                     step.step
@@ -1835,6 +2141,29 @@ mod tests {
         assert!(matches!(q.release(), Release::Refused { .. }));
     }
 
+    /// Ohne `vig-fit` wird nichts eingestellt — und das ist offen, nicht
+    /// erledigt. Die eingefrorene Fassung bleibt, wie sie gemessen wurde.
+    #[tokio::test]
+    async fn without_the_fit_tool_nothing_is_tuned_and_the_run_is_incomplete() {
+        let mut fake = Fake {
+            evaluate_missing: true,
+            ..clean()
+        };
+        let (q, dir) = tune_only(&mut fake, MEASURED).await;
+        let Outcome::Skipped { reason } = outcome_of(&q, Step::Tune) else {
+            panic!("ohne vig-fit uebersprungen: {:?}", q.steps);
+        };
+        assert!(reason.contains("vig-fit"), "{reason}");
+        assert!(!q.failed());
+        assert!(!q.complete());
+        assert!(q.tuning.is_none(), "ohne Bewertung gibt es keine Suche");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("measured.yaml")).unwrap(),
+            MEASURED
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Ein gescheiterter Schritt beendet den Lauf; die folgenden laufen nicht.
     #[tokio::test]
     async fn a_failed_step_ends_the_run() {
@@ -1880,14 +2209,397 @@ mod tests {
         );
     }
 
+    /// `tune` laeuft nach `measure` und vor `fit`: Das Urteil gilt dem
+    /// eingestellten Governor.
+    #[tokio::test]
+    async fn the_steps_run_in_the_order_discover_measure_tune_fit_check() {
+        let mut fake = clean();
+        let q = run(&mut fake).await;
+        let keys: Vec<&str> = q.steps.iter().map(|s| s.step.key()).collect();
+        assert_eq!(keys, ["discover", "measure", "tune", "fit", "check"]);
+        let first = |name: &str| fake.calls.iter().position(|c| *c == name).unwrap();
+        let last = |name: &str| fake.calls.iter().rposition(|c| *c == name).unwrap();
+        assert!(first("measure") < first("evaluate"), "{:?}", fake.calls);
+        assert!(last("evaluate") < first("fit"), "{:?}", fake.calls);
+        assert!(first("fit") < first("check"), "{:?}", fake.calls);
+    }
+
     #[test]
     fn resuming_skips_what_is_done() {
         assert_eq!(
             plan(None, &[Step::Discover, Step::Measure]),
-            vec![Step::Fit, Step::Check]
+            vec![Step::Tune, Step::Fit, Step::Check]
         );
         assert_eq!(plan(Some(Step::Check), &[]), vec![Step::Check]);
         assert_eq!(plan(None, &Step::ALL), Vec::new());
+    }
+
+    /// `--only tune` faehrt genau diesen Schritt, und clap kennt das Wort.
+    #[test]
+    fn only_tune_runs_the_tune_step_alone() {
+        assert_eq!(plan(Some(Step::Tune), &[]), vec![Step::Tune]);
+        assert_eq!(
+            plan(Some(Step::Tune), &[Step::Discover, Step::Measure]),
+            vec![Step::Tune]
+        );
+        assert_eq!(
+            <Step as clap::ValueEnum>::from_str("tune", false),
+            Ok(Step::Tune)
+        );
+    }
+
+    /// Ein Zustand aus der Fassung mit vier Schritten laedt, und `tune` fehlt
+    /// darin einfach — also laeuft es, und alles danach mit.
+    #[tokio::test]
+    async fn a_state_with_four_steps_resumes_by_running_tune() {
+        let dir = workdir(MEASURED);
+        let entry = |step: &str| {
+            serde_json::json!({
+                "step": step, "outcome": "done", "reason": null, "seconds": 1, "notes": []
+            })
+        };
+        let old = serde_json::json!({
+            "done": ["discover", "measure", "fit", "check"],
+            "fingerprint": "127.0.0.1:8001|abc",
+            "steps": [entry("discover"), entry("measure"), entry("fit"), entry("check")],
+            "series": { "qualified": 4, "discarded": 0, "skipped_models": 0 },
+            "fit_verdict": "Up to 125 % offered load the direct path loses nothing either.",
+            "doctor": "READY",
+            "config": dir.join("measured.yaml").display().to_string(),
+        });
+        let state = dir.join("state.json");
+        std::fs::write(&state, old.to_string()).unwrap();
+
+        let prior = prior_state(&state);
+        assert_eq!(
+            prior.done,
+            vec![Step::Discover, Step::Measure, Step::Fit, Step::Check]
+        );
+        assert_eq!(prior.fingerprint.as_deref(), Some("127.0.0.1:8001|abc"));
+        assert!(prior.qualification.tuning.is_none());
+        assert!(!prior.qualification.complete(), "ohne tune unvollstaendig");
+        let steps = plan(None, &prior.done);
+        assert_eq!(steps, vec![Step::Tune, Step::Fit, Step::Check]);
+
+        let mut fake = clean();
+        let q = execute(
+            &mut fake,
+            &steps,
+            "127.0.0.1:8001",
+            &dir.join("vig.yaml"),
+            &dir.join("measured.yaml"),
+            false,
+            prior.qualification,
+        )
+        .await;
+        assert!(q.complete(), "{:?}", q.steps);
+        assert_eq!(q.steps.len(), 5);
+        assert!(q.tuning.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Eine echte Verbesserung wird behalten, geschrieben und berichtet — und
+    /// kein Vertrag, kein Slot hat sich dabei bewegt.
+    #[tokio::test]
+    async fn tuning_keeps_a_real_improvement() {
+        let mut fake = Fake {
+            score: Some(|c| {
+                Ok(if c.backend.protect_supply {
+                    evaluation(10, 100)
+                } else {
+                    evaluation(40, 100)
+                })
+            }),
+            ..clean()
+        };
+        let (q, dir) = tune_only(&mut fake, MEASURED).await;
+        assert_eq!(outcome_of(&q, Step::Tune), Outcome::Done, "{:?}", q.steps);
+        let tuning = q.tuning.clone().unwrap();
+        assert!(tuning.improved() && tuning.applied);
+        assert_eq!(
+            tuning.untuned,
+            Objective {
+                protected_worst: 40,
+                background_mean: 100
+            }
+        );
+        assert_eq!(tuning.tuned.protected_worst, 10);
+        let kept: Vec<&str> = tuning
+            .candidates
+            .iter()
+            .filter(|c| c.decision == Decision::Kept)
+            .map(|c| c.change.as_str())
+            .collect();
+        assert_eq!(kept, ["backend.protect_supply → true"]);
+        assert_eq!(
+            tuning.candidates.len(),
+            5,
+            "Tiefe, Versorgungsschutz, Kalibrierung, zwei Margen: {:?}",
+            tuning.candidates
+        );
+
+        // Geschrieben: die beste Fassung nach `measured.yaml`, die unverstellte
+        // bleibt daneben liegen.
+        assert!(
+            measured_config(&dir, "measured.yaml")
+                .backend
+                .protect_supply
+        );
+        let untuned = measured_config(&dir, "tune/untuned.yaml");
+        assert!(!untuned.backend.protect_supply);
+
+        // Vertraege, Modelle und Slots jeder Fassung sind die gemessenen.
+        for candidate in &tuning.candidates {
+            let path = dir.join(format!("tune/candidate-{}.yaml", candidate.number));
+            let text = std::fs::read_to_string(&path).unwrap();
+            let tried = vig_config::Config::from_yaml(&text).unwrap();
+            assert_eq!(tried.backend.slots, untuned.backend.slots);
+            assert_eq!(
+                serde_json::to_value(&tried.models).unwrap(),
+                serde_json::to_value(&untuned.models).unwrap(),
+                "{} hat an einem Modell gedreht",
+                candidate.change
+            );
+        }
+
+        // Bericht, JSON und Zustand tragen das Ergebnis.
+        let report = markdown(&q, "x");
+        assert!(report.contains("## Tuning"), "{report}");
+        assert!(
+            report.contains(
+                "Tuned: the protected streams miss at worst 10 ‰ instead of 40 ‰ with the \
+                 untuned governor; the lower-priority streams 100 ‰ instead of 100 ‰."
+            ),
+            "{report}"
+        );
+        assert!(report.contains("| # | Setting tried |"), "{report}");
+        assert!(report.contains("**one pass**"), "{report}");
+        assert!(json(&q, "x").contains("\"tuning\":{"));
+        let state = dir.join("state.json");
+        std::fs::write(&state, state_json(&q, "fp")).unwrap();
+        assert_eq!(prior_state(&state).qualification.tuning, q.tuning);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Ein Vorsprung unterhalb der Rauschschwelle ist Rauschen und wird nicht
+    /// behalten — die Datei bleibt Byte fuer Byte die gemessene.
+    #[tokio::test]
+    async fn an_improvement_below_the_noise_threshold_is_not_kept() {
+        let mut fake = Fake {
+            score: Some(|c| {
+                Ok(if c.backend.protect_supply {
+                    // 4 ‰ besser; die Schwelle ist max(5, 40/10) = 5.
+                    evaluation(36, 100)
+                } else if c.backend.margin_learning.is_some() {
+                    // 9 ‰ besser; die Schwelle ist max(10, 100/10) = 10.
+                    evaluation(40, 91)
+                } else {
+                    evaluation(40, 100)
+                })
+            }),
+            ..clean()
+        };
+        let (q, dir) = tune_only(&mut fake, MEASURED).await;
+        let tuning = q.tuning.clone().unwrap();
+        assert!(!tuning.improved(), "{:?}", tuning.candidates);
+        assert_eq!(tuning.tuned, tuning.untuned);
+        assert!(
+            tuning
+                .candidates
+                .iter()
+                .filter(|c| c.objective != Some(tuning.untuned))
+                .all(|c| c.reason.contains("noise threshold")),
+            "{:?}",
+            tuning.candidates
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("measured.yaml")).unwrap(),
+            MEASURED
+        );
+        assert!(
+            markdown(&q, "x")
+                .contains("The measured configuration was already the best of 6 settings tried.")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Was fuer die geschuetzten Stroeme schlechter ist als die unverstellte
+    /// Fassung, wird nie behalten — egal, was es den anderen bringt.
+    #[tokio::test]
+    async fn a_setting_worse_for_the_protected_streams_than_untuned_is_never_kept() {
+        let mut fake = Fake {
+            score: Some(|c| {
+                Ok(if c.backend.pipelining_depth == 0 {
+                    evaluation(41, 0)
+                } else {
+                    evaluation(40, 100)
+                })
+            }),
+            ..clean()
+        };
+        let (q, dir) = tune_only(&mut fake, MEASURED).await;
+        let tuning = q.tuning.clone().unwrap();
+        let depth = tuning.candidates.first().unwrap();
+        assert_eq!(depth.change, "backend.pipelining_depth → 0");
+        assert_eq!(depth.decision, Decision::Rejected);
+        assert!(depth.reason.contains("untuned"), "{}", depth.reason);
+        assert!(!tuning.improved());
+        assert_eq!(
+            measured_config(&dir, "measured.yaml")
+                .backend
+                .pipelining_depth,
+            1
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Die Regel selbst, an ihren Kanten.
+    #[test]
+    fn the_decision_rule_holds_at_its_edges() {
+        let o = |protected_worst, background_mean| Objective {
+            protected_worst,
+            background_mean,
+        };
+        // Geschuetzt: max(5 ‰, ein Zehntel).
+        assert!(decide(o(35, 100), o(40, 100), o(40, 100)).is_ok());
+        assert!(decide(o(36, 100), o(40, 100), o(40, 100)).is_err());
+        assert!(decide(o(180, 100), o(200, 100), o(200, 100)).is_ok());
+        assert!(decide(o(181, 100), o(200, 100), o(200, 100)).is_err());
+        // Nachrangig: max(10 ‰, ein Zehntel), geschuetzt nicht schlechter.
+        assert!(decide(o(40, 90), o(40, 100), o(40, 100)).is_ok());
+        assert!(decide(o(40, 91), o(40, 100), o(40, 100)).is_err());
+        assert!(decide(o(41, 0), o(40, 100), o(45, 100)).is_err());
+        // Nie schlechter als unverstellt, auch wenn die bisher beste es waere.
+        assert!(decide(o(41, 0), o(60, 100), o(40, 100)).is_err());
+        // Unter der Schwelle gibt es geschuetzt nichts mehr zu gewinnen.
+        assert!(decide(o(0, 100), o(3, 100), o(3, 100)).is_err());
+    }
+
+    /// Eine verweigerte Fassung steht mit Grund in der Liste, und die Suche
+    /// geht weiter — von der Konfigurationspruefung verweigert wie von
+    /// `vig-fit`.
+    #[tokio::test]
+    async fn a_refused_setting_is_listed_as_refused_and_does_not_abort() {
+        // `max_factor_percent: 120` laesst eine Marge von 125 nicht zu.
+        let measured = MEASURED.replace(
+            "  slots: 1\n",
+            "  slots: 1\n  margin_learning: { max_factor_percent: 120 }\n",
+        );
+        let mut fake = Fake {
+            score: Some(|c| {
+                if c.backend.pipelining_depth == 0 {
+                    Err(Unevaluated::Refused {
+                        reason: "backend.pipelining_depth: the backend says no".to_owned(),
+                    })
+                } else {
+                    Ok(evaluation(40, 100))
+                }
+            }),
+            ..clean()
+        };
+        let (q, dir) = tune_only(&mut fake, &measured).await;
+        assert_eq!(outcome_of(&q, Step::Tune), Outcome::Done, "{:?}", q.steps);
+        let tuning = q.tuning.clone().unwrap();
+        let changes: Vec<(&str, Decision)> = tuning
+            .candidates
+            .iter()
+            .map(|c| (c.change.as_str(), c.decision))
+            .collect();
+        assert_eq!(
+            changes,
+            [
+                ("backend.pipelining_depth → 0", Decision::Refused),
+                ("backend.protect_supply → true", Decision::Rejected),
+                ("backend.margin_learning → off", Decision::Rejected),
+                ("backend.safety_margin_percent → 125", Decision::Refused),
+                ("backend.safety_margin_percent → 100", Decision::Rejected),
+            ]
+        );
+        for refused in tuning
+            .candidates
+            .iter()
+            .filter(|c| c.decision == Decision::Refused)
+        {
+            assert!(
+                refused
+                    .reason
+                    .starts_with("refused by the configuration check: "),
+                "{}",
+                refused.reason
+            );
+            assert!(refused.objective.is_none(), "keine Zahl ohne Messung");
+        }
+        assert_eq!(
+            fake.calls.iter().filter(|c| **c == "evaluate").count(),
+            5,
+            "die unverstellte und vier Fassungen; die von der Pruefung verweigerte nicht"
+        );
+        let report = markdown(&q, "x");
+        assert!(report.contains("| refused — refused by the configuration check"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Unter Fremdlast wird nichts geschrieben: Ob der Vorsprung von der
+    /// Einstellung kam, weiss dann niemand.
+    #[tokio::test]
+    async fn a_tune_under_foreign_load_writes_nothing() {
+        let mut fake = Fake {
+            load: Some(300),
+            score: Some(|c| {
+                Ok(if c.backend.protect_supply {
+                    evaluation(10, 100)
+                } else {
+                    evaluation(40, 100)
+                })
+            }),
+            ..clean()
+        };
+        let (q, dir) = tune_only(&mut fake, MEASURED).await;
+        assert!(matches!(
+            outcome_of(&q, Step::Tune),
+            Outcome::Contaminated { .. }
+        ));
+        let tuning = q.tuning.clone().unwrap();
+        assert!(tuning.improved() && !tuning.applied);
+        assert!(tuning.withheld.is_some());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("measured.yaml")).unwrap(),
+            MEASURED
+        );
+        assert!(markdown(&q, "x").contains("**not** written"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Das JSON von `vig-fit` mit nur dem Governor-Arm wird zur Bewertung.
+    #[test]
+    fn a_governed_fit_result_is_read_as_an_evaluation() {
+        let parsed = serde_json::json!({
+            "tool": "vig-fit",
+            "arms": "governed",
+            "cells": [
+                { "load_percent": 110, "stream": "detector", "protected": true,
+                  "direct_uncovered_permille": null, "governed_uncovered_permille": 12 },
+                { "load_percent": 110, "stream": "tracker", "protected": false,
+                  "direct_uncovered_permille": null, "governed_uncovered_permille": 40 },
+                { "load_percent": 125, "stream": "detector", "protected": true,
+                  "direct_uncovered_permille": null, "governed_uncovered_permille": 30 },
+                { "load_percent": 125, "stream": "tracker", "protected": false,
+                  "direct_uncovered_permille": null, "governed_uncovered_permille": 91 },
+            ],
+            "conclusive": true,
+        });
+        let evaluation = super::tune::evaluation_from_fit_json(&parsed).unwrap();
+        assert_eq!(evaluation.points.len(), 2);
+        assert_eq!(
+            evaluation.objective(),
+            Some(Objective {
+                protected_worst: 30,
+                // (40 + 91) / 2, abgerundet.
+                background_mean: 65,
+            })
+        );
+        let empty = serde_json::json!({ "cells": [], "conclusive": false });
+        assert!(super::tune::evaluation_from_fit_json(&empty).is_err());
     }
 
     /// Die Zusage gilt fuer die Groesse, mit der sie validiert wurde.
@@ -1903,6 +2615,23 @@ mod tests {
             estimate_seconds(&Step::ALL, true, reference)
                 < estimate_seconds(&Step::ALL, false, reference)
         );
+    }
+
+    /// Die Schaetzung fuer `tune` rechnet mit denselben Lastpunkten und
+    /// Sekunden, die `Live::evaluate` an `vig-fit` gibt.
+    #[test]
+    fn the_tune_estimate_matches_what_is_run() {
+        for quick in [false, true] {
+            let points = u64::try_from(super::tune::eval_points(quick).split(',').count()).unwrap();
+            let per_evaluation = points
+                .checked_mul(super::tune::eval_seconds(quick))
+                .unwrap();
+            assert!(
+                super::tune::rough_seconds(quick) >= per_evaluation.checked_mul(6).unwrap(),
+                "sechs Bewertungen passen nicht in die Schaetzung"
+            );
+        }
+        assert_eq!(super::tune::rough_seconds(false), 240);
     }
 
     /// Und sie muss reissen koennen — sonst ist die Warnung toter Code.
@@ -1967,6 +2696,7 @@ mod tests {
     /// Ein einmal gescheiterter Schritt verweigert nicht jeden spaeteren Lauf.
     #[tokio::test]
     async fn a_step_that_failed_once_does_not_refuse_every_later_run() {
+        let dir = workdir(MEASURED);
         let prior = Qualification {
             steps: vec![
                 StepResult {
@@ -1991,8 +2721,8 @@ mod tests {
             &mut fake,
             &plan(None, &[Step::Discover]),
             "127.0.0.1:8001",
-            Path::new("vig.yaml"),
-            Path::new("measured.yaml"),
+            &dir.join("vig.yaml"),
+            &dir.join("measured.yaml"),
             false,
             prior,
         )
@@ -2002,8 +2732,9 @@ mod tests {
             "der alte Fehlschlag ist ersetzt: {:?}",
             q.steps
         );
-        assert_eq!(q.steps.len(), 4, "jeder Schritt steht einmal da");
+        assert_eq!(q.steps.len(), 5, "jeder Schritt steht einmal da");
         assert_eq!(q.release(), Release::NotIssued);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Wird neu gemessen, laeuft alles nach, was auf der alten Messung beruhte.
@@ -2011,7 +2742,7 @@ mod tests {
     fn a_new_measurement_reruns_what_depended_on_the_old_one() {
         assert_eq!(
             plan(None, &[Step::Discover, Step::Check]),
-            vec![Step::Measure, Step::Fit, Step::Check]
+            vec![Step::Measure, Step::Tune, Step::Fit, Step::Check]
         );
     }
 

@@ -84,7 +84,7 @@ Versionsverzeichnisse; die Korrektur steht in
 
 `measured.yaml` samt vollstaendigen Profilmanifesten liegt neben den
 Messdaten ausserhalb dieses Repositories
-(`InferenceQoS-runtime/variants-2026-09-10/`). Jedes Profil traegt
+(`InferenceQoS-runtime/messungen/variants-2026-09-10/`). Jedes Profil traegt
 Artefakt-Digest, Serverversion, Geraet, Treiber, Aufteilung und
 Gueltigkeitsdomaene; nachvollziehbar mit
 

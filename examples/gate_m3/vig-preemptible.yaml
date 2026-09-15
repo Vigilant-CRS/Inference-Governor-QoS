@@ -1,7 +1,7 @@
 # Gate M3 mit praemptierbarem VLM (ADR-0035, NV-15).
 #
 # Zwei Triton-Prozesse auf einer GPU unter XSched, gestartet mit
-# InferenceQoS-runtime/xsched-triton-alt.sh:
+# InferenceQoS-runtime/skripte/xsched-triton-alt.sh:
 #
 #   A  127.0.0.1:9201  rfdetr, pose_main, depth_main   Prioritaet 1
 #   B  127.0.0.1:9101  vlm_main                        Prioritaet 0 (wird unterbrochen)

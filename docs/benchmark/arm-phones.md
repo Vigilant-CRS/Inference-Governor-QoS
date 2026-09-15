@@ -4,7 +4,7 @@ Datum: 11.09.2026. Geräte: Pixel 2 (Snapdragon 835, Android 11) und Pixel 5
 (Snapdragon 765G, Android 14) über USB; Bezug: RTX-3070-Laptop
 (i7-10870H). Werkzeug: `decision-bench` (`crates/vig-sim/src/bin/`),
 Ablauf `tools/arm/build-and-run.sh`. Rohdaten:
-`InferenceQoS-runtime/arm-phones-2026-09-11/`.
+`InferenceQoS-runtime/messungen/arm-phones-2026-09-11/`.
 
 ## Die Frage
 

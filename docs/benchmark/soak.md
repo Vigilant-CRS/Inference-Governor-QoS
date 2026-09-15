@@ -250,7 +250,7 @@ soll — Speicher, Fehler, Drift — hängt daran nicht.
   den Detektor und bezahlt mit dem Strom, der es am ehesten verträgt.
 - **Kein Fehler, kein Absturz, kein Backendausfall** in acht Stunden.
 
-Rohdaten: `InferenceQoS-runtime/soak-2026-09-11/` (Fensterprotokoll,
+Rohdaten: `InferenceQoS-runtime/messungen/soak-2026-09-11/` (Fensterprotokoll,
 Metrikabzug, Taktmitschnitt, Wächterprotokoll, Manifest).
 
 ## Dritter Lauf, 14./15.09.2026: zum ersten Mal mit einem echten Sprachmodell

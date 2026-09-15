@@ -6,8 +6,8 @@ Aufbauten dasselbe herausbekommt wie wir**. Wo die Zahlen abweichen, ist das
 ein Befund ueber `autotune` und nicht ueber die Maschine.
 
 Rohdaten:
-`InferenceQoS-runtime/autotune-laptop-2026-09-14/` und
-`InferenceQoS-runtime/autotune-pixel2-2026-09-14/` (der Lauf ohne Vorlauf
+`InferenceQoS-runtime/messungen/autotune-laptop-2026-09-14/` und
+`InferenceQoS-runtime/messungen/autotune-pixel2-2026-09-14/` (der Lauf ohne Vorlauf
 darin unter `ohne-vorlauf/`).
 
 ## Was hier ausdruecklich nicht steht
@@ -400,12 +400,12 @@ kennt — „The estimate scales with that matrix, not with your hardware."
 
 Stand `99f66c7` (dazu `rustls` 0.23.45, ohne Einfluss auf eine Messung ueber
 Loopback). Gleiche Eingabe, gleiche Kernbindung, gleiche Probenzahl wie am
-14.09. Die Tabellen hat `InferenceQoS-runtime/compare-measured.py` aus den
+14.09. Die Tabellen hat `InferenceQoS-runtime/skripte/compare-measured.py` aus den
 beiden eingefrorenen Dateien erzeugt, nicht aus diesem Text.
 
 ### Pixel 2: `autotune` ergibt jetzt die Struktur der Handkonfiguration
 
-Lauf `InferenceQoS-runtime/autotune-pixel2-2026-09-15/`, `taskset f0`, 200
+Lauf `InferenceQoS-runtime/messungen/autotune-pixel2-2026-09-15/`, `taskset f0`, 200
 Proben, `vig-slots2-base.yaml`. Kalt gestartet bei 32 °C, Ende 39 °C. Die
 `loadavg` stand vor dem Lauf bei **3,46** — und der Lauf ist trotzdem
 **nicht** verschmutzt, weil jetzt fremde CPU-Zeit gemessen wird (Befund 1).
@@ -476,7 +476,7 @@ Was das heisst:
 
 ### Pixel 2, zweiter Lauf: wie gut wiederholt sich das?
 
-Lauf `InferenceQoS-runtime/autotune-pixel2-2026-09-15b/`, 13:21–13:33, gleiches
+Lauf `InferenceQoS-runtime/messungen/autotune-pixel2-2026-09-15b/`, 13:21–13:33, gleiches
 Geraet, gleiche Eingabe, Binaries auf dem Stand `2c1f3d0` (mit der
 gemeinsamen CPU-Messung). Wieder **vollstaendig und unverschmutzt**: 12 von 12
 Reihen, fremde Rechenzeit 0,02 Kerne vor und 0,06 nach `vig-fit`, Freigabe
@@ -512,7 +512,7 @@ Was das heisst:
 
 ### Laptop: die Verweigerung steht vorn
 
-Lauf `InferenceQoS-runtime/autotune-laptop-2026-09-15f/`, gleiche Bedingungen
+Lauf `InferenceQoS-runtime/messungen/autotune-laptop-2026-09-15f/`, gleiche Bedingungen
 wie `15e`. **2 von 4** Reihen verworfen (`SwPowerCap` wechselte waehrend der
 Reihe), `contaminated: false`, Freigabe verweigert. Der Bericht beginnt jetzt
 mit „This run did not qualify this machine: 2 of 4 measurement series were
@@ -525,7 +525,7 @@ Stroeme 559 ‰ → 1000 ‰.
 Zweites Geraet ohne Handkonfiguration (Snapdragon 765G, Adreno 620),
 dieselben Modelle, dieselbe Eingabe, dieselben Binaries (`2c1f3d0`),
 `taskset c0` (die beiden A76-Kerne). Lauf
-`InferenceQoS-runtime/autotune-pixel5-2026-09-15/`, 13:01–13:13, 33 °C zu
+`InferenceQoS-runtime/messungen/autotune-pixel5-2026-09-15/`, 13:01–13:13, 33 °C zu
 Beginn, 35 °C am Ende.
 
 Ein erster Versuch um 12:02 brach ab, weil das Geraet mitten in der

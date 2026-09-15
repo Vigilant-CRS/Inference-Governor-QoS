@@ -93,9 +93,9 @@
   "reviewed_measurement_sha256": {
     "/run/media/dd/USB_4028/Projekte/InferenceQoS/docs/benchmark/abnahme-2026-09-12.md": "22bed6e8fc36fa337ca5f8781f6ddd6abde127e5d4e5726d4df8515001d4549f",
     "/run/media/dd/USB_4028/Projekte/InferenceQoS/docs/benchmark/pilot-praemption-2026-09-12.md": "de131b36b4e7fbccfab5d2de641a7f8418898051a9d1a3b29aa6764eae1f04c3",
-    "/run/media/dd/USB_4028/Projekte/InferenceQoS-runtime/measure-abnahme-2026-09-12/c-ramp-supply.txt": "7ce0d570b14ecea5c4ab6568fedede29773b7be395330960adf4a9573d5b2c68",
-    "/run/media/dd/USB_4028/Projekte/InferenceQoS-runtime/measure-abnahme-2026-09-12/manifest-neu.txt": "eb7e6e022952fffb372906e4ed981b091681c4f9eb02ac655842bb157ee9e74a",
-    "/run/media/dd/USB_4028/Projekte/InferenceQoS-runtime/measure-pilot-praemption-2026-09-12/plain/summary.json": "cfa7fcc22da0a51ca19649e9d21a35e56e1776f5db690ffc81015c55b8262e25"
+    "/run/media/dd/USB_4028/Projekte/InferenceQoS-runtime/messungen/measure-abnahme-2026-09-12/c-ramp-supply.txt": "7ce0d570b14ecea5c4ab6568fedede29773b7be395330960adf4a9573d5b2c68",
+    "/run/media/dd/USB_4028/Projekte/InferenceQoS-runtime/messungen/measure-abnahme-2026-09-12/manifest-neu.txt": "eb7e6e022952fffb372906e4ed981b091681c4f9eb02ac655842bb157ee9e74a",
+    "/run/media/dd/USB_4028/Projekte/InferenceQoS-runtime/messungen/measure-pilot-praemption-2026-09-12/plain/summary.json": "cfa7fcc22da0a51ca19649e9d21a35e56e1776f5db690ffc81015c55b8262e25"
   },
   "missing_measurement_paths": []
 }

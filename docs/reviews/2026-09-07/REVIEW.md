@@ -153,7 +153,7 @@ werden.
 - `cargo clippy --workspace --all-targets --all-features --locked --offline -- -D warnings`: bestanden.
 - `cargo fmt --all --check`: bestanden.
 - Zusätzliche Prüfungen gegen unveränderte Produktbibliotheken: **21 Tests, davon 17 fehlgeschlagene Soll-Eigenschaften und 4 erfolgreiche Kontrollen/Gegenbeispiele**. Ein Fehler wird zum Teil auf zwei Ebenen geprüft; dies ist keine Zählung von 17 voneinander unabhängigen Bugs und keine statistische Fehlerquote.
-- Vorhandene achtstündige Messdaten mit `python3 tools/soak-report.py ../InferenceQoS-runtime/soak` erneut ausgewertet: 1.440 CSV-Zeilen; publizierte Werte für Coverage, Margen und Speicherverlauf reproduziert.
+- Vorhandene achtstündige Messdaten mit `python3 tools/soak-report.py ../InferenceQoS-runtime/messungen/soak` erneut ausgewertet: 1.440 CSV-Zeilen; publizierte Werte für Coverage, Margen und Speicherverlauf reproduziert.
 - Aktuelle Primärquellen zu Triton, CUDA, Holoscan, ROS/GStreamer und einschlägiger Forschung geprüft. Kein neuer GPU-Leistungsvergleich, kein erneuter Acht-Stunden-Lauf, keine Modellgüte-Evaluation und kein Penetrationstest.
 
 Die Gegenbeispiele stehen in [repros/tests/invariants.rs](repros/tests/invariants.rs), das Ausführungsergebnis in [repro-results.txt](repro-results.txt). Auf dem geprüften Stand `1d703ac` war ein fehlgeschlagener Lauf beabsichtigt: Die Tests behaupten die gewünschte Eigenschaft, die der Produktcode verletzt. Sie sind als eigenes Cargo-Workspace vom normalen Testlauf getrennt. **Nach den Reparaturen bestehen sie; maßgeblich sind seither die ins Repo gehobenen Regressionstests**, siehe „Stand der Umsetzung".

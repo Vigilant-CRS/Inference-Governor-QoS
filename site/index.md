@@ -2,13 +2,15 @@
 
 <h1>Stop computing the past.</h1>
 
-<p class="zeile">Vigilant is a scheduler for AI inference on robots and
-vehicles: when several models share one GPU, it keeps the results that matter
-fresh. It sits in front of your inference server and decides, before every
-dispatch, whether a result will still be useful when it is finished.</p>
+<p class="zeile">Vigilant is a scheduler for AI inference on central compute:
+when vision, planning and language models share one chip on a robot or a
+vehicle, it keeps the results that matter fresh. It sits in front of your
+inference server and decides, before every dispatch, whether a result will
+still be useful when it is finished.</p>
 
-<p class="zeile"><code>vig autotune</code> measures your own hardware in one
-command and tells you whether you need it — including when you do not.</p>
+<p class="zeile"><code>vig autotune</code> tunes it for your hardware: it
+measures your models, tries the governor's settings against your contracts and
+keeps the configuration that serves your protected streams best.</p>
 
 <div class="marken">
 <span>Qualifies itself on your hardware</span>
@@ -144,8 +146,9 @@ the governor **0 ‰** — and the lower-priority streams pay for all of it
 (559 ‰ → 1000 ‰). It kept two of four measurement series, threw two away
 because the power-capped GPU changed state mid-series, and therefore **refused
 to sign off**. On a Pixel 2 and a Pixel 5 it ran clean, twelve of twelve series
-each, derived the same configuration structure on both, and said the opposite:
-on that load the governor is **not worth it**
+each, derived the same configuration structure on both, and said the opposite
+for that test load — slow contracts at about 35 % planned utilisation: **no
+governor needed there**
 ([report](docs/benchmark/validierung-autotune.md)).
 
 ```bash

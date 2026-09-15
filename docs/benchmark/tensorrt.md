@@ -115,5 +115,5 @@ Executor ohne Triton ist NV-09 und nicht gebaut.
 
 ## Rohdaten
 
-`InferenceQoS-runtime/gate-m3-trt-run/` — beide A/B-Protokolle, der
+`InferenceQoS-runtime/messungen/gate-m3-trt-run/` — beide A/B-Protokolle, der
 Wiederholungslauf und die gemessenen Konfigurationen samt Profilmanifesten.

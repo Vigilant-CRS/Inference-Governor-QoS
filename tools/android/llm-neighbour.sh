@@ -28,7 +28,7 @@ LLM_MASK=${LLM_MASK:-f0}
 GATE_MASK=${GATE_MASK:-0f}
 LLM_THREADS=${LLM_THREADS:-4}
 LLM_REPS=${LLM_REPS:-30}
-OUT=${OUT:-$RUNTIME/android-gpu-$(date +%Y-%m-%d)/llm-$(date +%H%M%S)}
+OUT=${OUT:-$RUNTIME/messungen/android-gpu-$(date +%Y-%m-%d)/llm-$(date +%H%M%S)}
 PHONE=/data/local/tmp/vigtfl
 GGUF=qwen2.5-0.5b-instruct-q4_k_m.gguf
 
@@ -46,7 +46,7 @@ llm() { # Wiederholungen -> CSV von llama-bench (nur Generierung, 64 Token)
 }
 
 echo "== Schieben"
-adb push "$RUNTIME/android-llm/bin/llama-bench" "$RUNTIME/android-llm/$GGUF" $PHONE/ >/dev/null
+adb push "$RUNTIME/modelle/android-llm/bin/llama-bench" "$RUNTIME/modelle/android-llm/$GGUF" $PHONE/ >/dev/null
 adb push "$CONFIG" "$PHONE/$(basename "$CONFIG")" >/dev/null
 adb shell chmod 755 $PHONE/llama-bench
 

@@ -5,6 +5,36 @@ bedeutet, steht in [docs/releases.md](docs/releases.md).
 
 ## [Unveroeffentlicht]
 
+### Hinzugefuegt
+
+- **`vig autotune` stellt den Governor ein, statt ihn nur zu beurteilen**
+  ([ADR-0045](docs/adr/0045-autotune-tunes-within-the-contracts.md)). Neuer
+  Schritt `tune` zwischen `measure` und `fit`: `pipelining_depth` (0 ↔ 1),
+  `protect_supply`, `margin_learning` (aus ↔ Voreinstellungen) und
+  `safety_margin_percent` (± 15, in den Grenzen 100 bis 300) werden in dieser
+  Reihenfolge je einmal umgestellt und mit `vig-fit` bewertet, nur der
+  Governor-Arm, bei 100, 110 und 125 % Last. Behalten wird eine Umstellung
+  nur jenseits der Rauschschwelle — geschuetzte Stroeme mindestens
+  `max(5 ‰, ein Zehntel)` besser, oder bei nicht schlechteren geschuetzten
+  die nachrangigen mindestens `max(10 ‰, ein Zehntel)` —, und nie, wenn sie
+  fuer die geschuetzten Stroeme schlechter ist als die gemessene Fassung.
+  Die beste Fassung steht danach in `measured.yaml`, `fit` urteilt ueber
+  sie; die unverstellte bleibt als `tune/untuned.yaml`, jede versuchte als
+  `tune/candidate-<n>.yaml`. Der Bericht fuehrt jede Fassung mit
+  Entscheidung und Grund (Abschnitt „Tuning", JSON-Feld `tuning`). Vertraege
+  und `backend.slots` werden nie angefasst. Unter Fremdlast wird die
+  unverstellte Fassung zurueckgeschrieben. Der Schritt kostet in der
+  Schaetzung rund vier Minuten; die zugesagte halbe Stunde haelt fuer die
+  Referenzgroesse weiter (529 s geschaetzt).
+- **`vig-fit` kennt `VIG_FIT_ARMS=governed`**: nur der Governor-Arm, eine
+  Bewertung ohne Vergleich. Das JSON traegt `arms` (`both` oder
+  `governed`); ohne direkten Arm stehen `direct_uncovered_permille` und
+  `direct_longest_gap_ms` auf `null`, und der Satz nennt sich
+  Abstimmungslauf. Ohne die Variable bleibt alles, wie es war.
+- Ein `state.json` aus der Fassung mit vier Schritten wird weiter gelesen;
+  `tune` fehlt darin und laeuft beim Fortsetzen, `fit` und `check` danach
+  erneut.
+
 ### Geaendert
 
 - **Das JSON von `vig-fit` traegt `foreign_cores_centi_before` und
