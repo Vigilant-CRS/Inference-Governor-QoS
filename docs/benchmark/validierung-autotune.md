@@ -510,6 +510,108 @@ Was das heisst:
 - **Die Laststufe des Detektors** liegt diesmal bei 1,09x (242 826 us) statt
   1,23x, beide unter der Warteschlangen-Grenze; die Handkonfiguration hat keine.
 
+## Tuning auf Hardware, 15.09.2026 nachmittags
+
+Seit ADR-0045 hat `vig autotune` den Schritt `tune`: Es probiert
+Pipelining, Versorgungsschutz, gelernte Marge und Sicherheitsmarge in einem
+Durchgang gegen die Vertraege und behaelt nur, was die geschuetzten Stroeme
+ueber die Rauschschwelle hinaus besser versorgt. Drei Laeufe, alle vollstaendig
+und unverschmutzt.
+
+### Laptop, Gate-M3-Last: die Handkonfiguration ist schon die beste
+
+`messungen/autotune-laptop-2026-09-15-tuned/` (14:16, erste Zielgroesse) und
+`messungen/autotune-laptop-2026-09-15-tuned-mean/` (14:29, Mittelwert der
+nachrangigen Stroeme, Stand `08cf0ff`). Beide: sechs Fassungen, **keine
+behalten**. Der zweite Lauf:
+
+| # | Einstellung | geschuetzt, schlechtester ‰ | nachrangig, Mittel ‰ | Entscheidung |
+|---:|---|---:|---:|---|
+| 0 | ungetunt (wie gemessen) | 3 | 333 | Ausgangspunkt |
+| 1 | `pipelining_depth → 0` | 0 | 333 | im Rauschen |
+| 2 | `protect_supply → true` | 0 | 333 | im Rauschen |
+| 3 | `margin_learning → an` | 0 | 333 | im Rauschen |
+| 4 | `safety_margin_percent → 125` | 2 | 333 | im Rauschen |
+| 5 | `safety_margin_percent → 100` | 0 | 333 | im Rauschen |
+
+- **Die geschuetzten Stroeme liegen in jeder Fassung bei 0 bis 3 ‰.** Auf
+  dieser Last gibt es dort nichts zu gewinnen, und die Schwelle von 5 ‰
+  verhindert, dass ein Zufallsunterschied als Einstellung festgeschrieben wird.
+- **Die 333 ‰ sind `pose` und `depth` bei 0 ‰ und der VLM-Block bei 1000 ‰.**
+  Der unteilbare 95-ms-Block passt neben einer 33-ms-Periode nie (ADR-0012).
+  In der ersten Zielgroesse, dem *schlechtesten* nachrangigen Strom, stand er
+  in jeder Fassung als 1000 ‰ und haette jede Verbesserung anderer Stroeme
+  verdeckt; deshalb zaehlt seit `08cf0ff` der Mittelwert.
+- **Das ist eine Bestaetigung, kein Leerlauf.** `examples/gate_m3/vig.yaml`
+  ist die von Hand abgestimmte Konfiguration (unter anderem
+  `pipelining_depth: 1`). autotune findet keine bessere — und schreibt deshalb
+  keine andere.
+
+### Pixel 2, Overload-Vertraege: ungesaettigt, nichts zu tunen
+
+`messungen/autotune-pixel2-2026-09-15-tuned/`, Eingabe
+`vig-slots2-overload.yaml`. 12 von 12 Reihen. Die Datei plant **138 % auf
+einem Slot**; autotune misst aber `slots: 2`, also rund 69 % je Slot, und
+`vig-fit` faehrt bis 125 % davon. Das Telefon ist damit nicht gesaettigt:
+Der direkte Weg verliert bis 125 % nichts, und alle sechs Fassungen liegen bei
+0 ‰ geschuetzt und 0 bis 15 ‰ nachrangig — im Rauschen.
+
+**Die Lehre fuer Werkzeug und Anwender:** Tuning braucht eine Last, auf der
+etwas zu retten ist. Ohne Saettigung ist „die gemessene Konfiguration ist schon
+die beste" die richtige Antwort, und sie sagt nichts ueber das Geraet.
+
+### Pixel 2, Heavy-Vertraege: ein Gewinn, der nicht haelt
+
+`messungen/autotune-pixel2-2026-09-15-tuned-heavy/`, Eingabe
+`vig-slots2-heavy.yaml` (277 % auf einem Slot, rund 138 % je Slot), Stand
+`08cf0ff`. 12 von 12 Reihen, unverschmutzt (fremde Rechenzeit 0,02 / 0,17
+Kerne), Geraet 36 → 41 °C.
+
+Das Tuning **behielt zwei Einstellungen**: Versorgungsschutz an, dann
+Sicherheitsmarge 100.
+
+| # | Einstellung | geschuetzt, schlechtester ‰ | nachrangig, Mittel ‰ | Entscheidung |
+|---:|---|---:|---:|---|
+| 0 | ungetunt | 220 | 820 | Ausgangspunkt |
+| 1 | `pipelining_depth → 1` | 220 | 817 | im Rauschen |
+| 2 | `protect_supply → true` | 75 | 783 | **behalten** |
+| 3 | `margin_learning → an` | 440 | 837 | schlechter als ungetunt |
+| 4 | `safety_margin_percent → 125` | 260 | 849 | schlechter als ungetunt |
+| 5 | `safety_margin_percent → 100` | 50 | 730 | **behalten** |
+
+**Der Bestaetigungslauf widerspricht.** `fit` misst danach genau diese
+getunte Konfiguration noch einmal, gegen den direkten Weg:
+
+| geschuetzter Strom (Detektor), getunte Konfiguration | im Tuning, 10 s | in `fit`, 10 s |
+|---|---:|---:|
+| 100 % Last | 50 ‰ | 25 ‰ |
+| 110 % Last | 22 ‰ | 90 ‰ |
+| 125 % Last | 40 ‰ | **440 ‰** |
+
+Dieselbe Konfiguration, einmal 40 und einmal 440 ‰: Auf einem gesaettigten,
+sich erwaermenden Telefon streut ein einzelnes 10-Sekunden-Fenster weit mehr,
+als die behaltene Einstellung bewirkt. **Der Gewinn 220 → 50 ‰ ist deshalb
+nicht belegt** und wird nirgends als Ergebnis genannt.
+
+Dazu kommt: `vig doctor` meldet fuer diese Vertraege **NOT_READY** —
+geschuetzte Auslastung 126 % ueber zwei Slots. Keine Einstellung des Governors
+kann eine Zusage tragen, die die Hardware nicht traegt; das Tuning haette gar
+nicht erst suchen duerfen.
+
+**Zwei Fehler im Werkzeug, beide in Arbeit:** (1) eine Machbarkeitspruefung vor
+dem Tuning — bei NOT_READY wird nicht getunt, mit Begruendung; (2) ein
+Bestaetigungsschritt — ungetunt und getunt werden abwechselnd erneut gemessen,
+und uebernommen wird nur, was in jedem Paar haelt.
+
+Fuer einen belastbaren Tuning-Nachweis auf dem Telefon braucht es eine Last,
+die **gesaettigt, aber planbar** ist: `vig-slots2-saturated.yaml`. Ein erster
+Entwurf lockerte nur den Detektor (250 → 350 ms) und blieb bei 123 % NOT_READY
+— die geschuetzte Auslastung zaehlt auch `pose` und `depth` (Klasse `high`).
+Die Datei nimmt deshalb alle drei Perioden von Overload mal 0,74 (Detektor
+370 ms, `pose` 185 ms, `depth` 740 ms): `vig doctor` offline **95 %,
+READY_WITH_WARNINGS**. `vig-fit` faehrt davon 100 bis 125 % und saettigt die
+zwei Slots.
+
 ### Laptop: die Verweigerung steht vorn
 
 Lauf `InferenceQoS-runtime/messungen/autotune-laptop-2026-09-15f/`, gleiche Bedingungen
