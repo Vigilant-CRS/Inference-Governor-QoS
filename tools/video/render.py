@@ -799,7 +799,72 @@ def tuning(scene, progress: float) -> Image.Image:
     return image
 
 
+#: Szenen, deren Bild ein aufgezeichneter Demo-Clip ist. Sie laufen nicht durch
+#: den Einzelbild-Renderer: make_video.clip_segment dekodiert den Clip mit
+#: ffmpeg nach RGB, skaliert ihn in `clip_area()` und legt ihn auf das Bild,
+#: das `demo_clip` zeichnet (Beschriftungsleiste oben, sonst leerer Grund).
+CLIP_VISUALS = {"demo_clip"}
+
+#: Hoehe der Beschriftungsleiste ueber dem Clip. Der Clip wird dafuer um knapp
+#: 8 % verkleinert statt ueberdeckt: seine eigene Kopfzeile nennt Modell,
+#: Takt, Blind-Schwelle und GPU, und die darf keine Leiste verstecken.
+STRIP_H = 84
+
+
+def clip_area() -> tuple[int, int, int, int]:
+    """(x, y, Breite, Hoehe) des Clips im Bild, gerade Masse, 16:9 erhalten."""
+    height = (H - STRIP_H) // 2 * 2
+    width = int(round(W * height / H / 2)) * 2
+    return (W - width) // 2, STRIP_H, width, height
+
+
+def demo_clip(scene, _progress: float = 0.0) -> Image.Image:
+    """Grund der Demo-Szene: eine duenne Leiste oben, darunter Platz fuer den Clip.
+
+    Links steht, wie aufgenommen wurde; rechts der Anteil frischer Takte ueber
+    den *ganzen* Clip — der Ausschnitt, der gerade laeuft, zeigt nur seine
+    laufenden Zaehler, und die sind am Anfang des Ausschnitts noch nicht die
+    Endzahl. Beide Zahlen kommen aus `report.demo_facts`, also aus den zwei
+    Zeitachsen neben dem Clip. Zweite Zeile: die Namensnennung des Materials,
+    die CC BY verlangt — sie steht auch im Clip selbst, dort aber in 15 Punkt
+    und im Band, das der eingebrannte Untertitel ueberdeckt.
+    """
+    facts = scene.data["facts"]
+    image = Image.new("RGB", (W, H), BG)
+    draw = ImageDraw.Draw(image)
+    x, _y, width, _h = clip_area()
+    left, right = x, x + width
+
+    caption = scene.data.get("caption", "").format(**facts)
+    cap_font = font(SANS_BOLD, 26)
+    draw.text((left, 30), caption, font=cap_font, fill=TEXT, anchor="lm")
+
+    label, value = font(SANS, 24), font(SANS_BOLD, 24)
+    parts = [(f"{facts['stream']} camera fresh, whole {facts['clip_text']} clip:  ",
+              label, DIM),
+             (facts["left_fresh_text"], value, TEXT), ("  →  ", label, DIM),
+             (facts["right_fresh_text"], value, OK)]
+    total = sum(draw.textlength(text, font=f) for text, f, _c in parts)
+    if total > right - left - draw.textlength(caption, font=cap_font) - 40:
+        raise SystemExit("demo_clip: Beschriftung und Zahlen passen nicht in eine Zeile")
+    cursor = right - total
+    for text, f, colour in parts:
+        draw.text((cursor, 30), text, font=f, fill=colour, anchor="lm")
+        cursor += draw.textlength(text, font=f)
+
+    attribution = facts["attribution"]
+    size = 21
+    while size > 15 and draw.textlength(attribution, font=font(SANS, size)) > right - left:
+        size -= 1
+    if draw.textlength(attribution, font=font(SANS, size)) > right - left:
+        raise SystemExit("demo_clip: Namensnennung zu lang fuer die Leiste — "
+                         "abschneiden ist bei CC BY keine Option")
+    draw.text((left, 64), attribution, font=font(SANS, size), fill=DIM, anchor="lm")
+    return image
+
+
 RENDERERS = {
+    "demo_clip": demo_clip,
     "title": title,
     "short_tail": short_tail,
     "timeline_fifo": timeline_fifo,

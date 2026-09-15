@@ -1,139 +1,187 @@
 WEBVTT
 
-00:00.000 --> 00:03.058
+00:00.000 --> 00:03.191
 Robots and cars are moving to central computers.
 
-00:03.058 --> 00:05.988
+00:03.191 --> 00:06.249
 Vision, planning and language models now share
 
-00:05.988 --> 00:09.046
+00:06.249 --> 00:09.440
 one chip, and they all want it at the same time.
 
-00:09.846 --> 00:13.989
+00:10.233 --> 00:14.444
 A robot camera gives you a frame every thirty-three milliseconds.
 
-00:13.989 --> 00:15.773
+00:14.444 --> 00:16.258
 Your detector needs fifteen.
 
-00:15.773 --> 00:19.087
+00:16.258 --> 00:19.627
 That fits, until something else wants the same chip.
 
-00:19.087 --> 00:22.720
+00:19.627 --> 00:23.320
 Now the detector waits behind a block it cannot interrupt
 
-00:22.720 --> 00:26.799
+00:23.320 --> 00:27.466
 and by the time its answer arrives, the robot has already moved.
 
-00:27.499 --> 00:30.113
+00:28.167 --> 00:30.789
 Vigilant sits in front of your inference
 
-00:30.113 --> 00:33.445
+00:30.789 --> 00:34.132
 server and asks one question before every dispatch:
 
-00:33.445 --> 00:36.908
+00:34.132 --> 00:37.607
 will this result still be useful when it is finished?
 
-00:36.908 --> 00:40.567
+00:37.607 --> 00:41.278
 Work that cannot be is dropped before it costs anything.
 
-00:40.567 --> 00:42.331
+00:41.278 --> 00:43.048
 Same protocol, same models.
 
-00:42.331 --> 00:45.010
+00:43.048 --> 00:45.736
 In your client, only the address changes.
 
-00:45.710 --> 00:49.741
+00:46.433 --> 00:50.389
 Four decisions, all made before a request reaches the chip.
 
-00:49.741 --> 00:53.703
+00:50.389 --> 00:54.277
 A newer frame replaces an older one that is still waiting.
 
-00:53.703 --> 00:57.051
+00:54.277 --> 00:57.562
 Work that would finish too late is never started.
 
-00:57.051 --> 01:00.808
+00:57.562 --> 01:01.249
 A long background job waits when protected work is due.
 
-01:00.808 --> 01:04.975
+01:01.249 --> 01:05.338
 And when time runs short, a smaller model variant takes over.
 
-01:05.675 --> 01:08.544
+01:06.033 --> 01:09.099
 It is built for exactly that kind of machine.
 
-01:08.544 --> 01:12.624
+01:09.099 --> 01:13.459
 A humanoid robot, whose vision must not wait behind its planner.
 
-01:12.624 --> 01:15.685
+01:13.459 --> 01:16.729
 Or a vehicle's central computer, running several
 
-01:15.685 --> 01:19.064
+01:16.729 --> 01:20.339
 cameras and a slower scene analysis on the same chip.
 
-01:19.764 --> 01:22.499
+01:21.033 --> 01:23.803
 Measured against a tuned Triton on the same GPU
 
-01:22.499 --> 01:26.515
+01:23.803 --> 01:27.868
 with a real detector and a background job that cannot be interrupted:
 
-01:26.515 --> 01:29.018
+01:27.868 --> 01:30.402
 the detector answers in time in ninety-nine
 
-01:29.018 --> 01:31.870
+01:30.402 --> 01:33.289
 percent of control cycles instead of eighty-five.
 
-01:31.870 --> 01:33.790
+01:33.289 --> 01:35.234
 Twenty times fewer missed cycles.
 
-01:34.590 --> 01:36.807
+01:36.033 --> 01:37.941
+Here is what that looks like.
+
+01:37.941 --> 01:41.559
+Four cameras and a language model share one laptop GPU:
+
+01:41.559 --> 01:43.599
+more work than the chip can do.
+
+01:43.599 --> 01:46.954
+Triton alone computes every frame in arrival order.
+
+01:46.954 --> 01:52.479
+Its detections arrive a third of a second late, so the vehicle is effectively blind.
+
+01:52.479 --> 01:56.887
+With Vigilant, the front camera stays fresh in every control cycle.
+
+01:56.887 --> 02:00.768
+The price is visible too: the language model answered once.
+
+02:00.768 --> 02:05.505
+Without the governor, two hundred and twenty-two times in forty seconds.
+
+02:06.100 --> 02:08.925
+On a sidewalk robot, with four cameras as well:
+
+02:08.925 --> 02:13.674
+the front camera is fresh in zero point two percent of cycles with Triton alone
+
+02:13.674 --> 02:15.958
+and one hundred percent with Vigilant.
+
+02:16.467 --> 02:19.008
+And the head camera of a humanoid robot:
+
+02:19.008 --> 02:21.613
+zero point one percent with Triton alone,
+
+02:21.613 --> 02:24.535
+ninety-nine point eight percent with Vigilant.
+
+02:24.535 --> 02:26.950
+With room to spare on the chip, Triton
+
+02:26.950 --> 02:29.936
+alone keeps up, and the governor does not help.
+
+02:30.733 --> 02:32.974
 And it is not tied to one machine.
 
-01:36.807 --> 01:40.588
+02:32.974 --> 02:36.795
 The same governor runs in front of Triton on an NVIDIA GPU
 
-01:40.588 --> 01:45.412
+02:36.795 --> 02:41.671
 and in front of TensorFlow Lite on the Adreno GPUs of two Android devices.
 
-01:45.412 --> 01:50.823
+02:41.671 --> 02:47.141
 On each of them, vig autotune measured the hardware and set the governor up for it.
 
-01:51.623 --> 01:54.875
+02:47.933 --> 02:51.288
 You do not have to take our numbers, or our settings.
 
-01:54.875 --> 01:58.740
+02:51.288 --> 02:55.276
 One command, vig autotune, measures your models on your machine
 
-01:58.740 --> 02:01.931
+02:55.276 --> 02:58.567
 tries the governor's settings against your contracts
 
-02:01.931 --> 02:04.876
+02:58.567 --> 03:01.605
 and only keeps what holds up when it runs again.
 
-02:04.876 --> 02:07.637
+03:01.605 --> 03:04.453
 On a Pixel 2 carrying a delivery robot's load
 
-02:07.637 --> 02:11.257
+03:04.453 --> 03:08.188
 the governor cut the detector's missed cycles by two thirds
 
-02:11.257 --> 02:13.650
+03:08.188 --> 03:10.656
 paid for by the lower-priority streams.
 
-02:14.450 --> 02:17.735
+03:11.467 --> 03:14.608
 Point it at the inference server you already run.
 
-02:17.735 --> 02:21.826
+03:14.608 --> 03:18.518
 Same protocol, same models, and your client changes one line.
 
-02:21.826 --> 02:26.050
+03:18.518 --> 03:22.557
 Free for evaluation, and for up to three devices in production.
 
-02:26.750 --> 02:29.205
+03:23.267 --> 03:25.757
 Faster chips compute the past faster.
 
-02:29.205 --> 02:31.063
+03:25.757 --> 03:27.642
 Vigilant stops computing it.
 
-02:31.063 --> 02:33.916
+03:27.642 --> 03:30.536
 Run vig autotune on the machine you already
 
-02:33.916 --> 02:37.167
+03:30.536 --> 03:33.834
 have, and let it tune the governor for your load.

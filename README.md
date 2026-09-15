@@ -45,7 +45,7 @@ vig autotune --endpoint 127.0.0.1:8001 -c vig.yaml -o qualification
 Where your contracts come from — freshness from motion, class from consequence
 — and the loads we measured: [use cases](docs/use-cases.md).
 
-[![Watch the video: Stop computing the past (2½ min)](site/assets/video-poster.png)](https://vigilant-crs.github.io/Inference-Governor-QoS/#video)
+[![Watch the video: Stop computing the past, with four-camera demos (3½ min)](site/assets/video-poster.png)](https://vigilant-crs.github.io/Inference-Governor-QoS/#video)
 
 [![Status](https://img.shields.io/badge/status-pre--production-orange)](#status-what-works-and-what-does-not)
 [![Tests](https://img.shields.io/badge/tests-900%20passing-brightgreen)](#build-and-verify)

@@ -155,6 +155,116 @@ Projektseite es abspielen kann (`<video>` mit WebVTT-Untertiteln). Die
 GitHub-README verlinkt ein Vorschaubild dorthin; ein Player direkt in der README
 braucht einen Upload ueber die Weboberflaeche von GitHub.
 
+## Die Demo-Szene: echtes Bildmaterial
+
+Seit dem 15.09. zeigen beide Schnitte aufgezeichnete Demo-Clips
+(`tools/demo/render.py`, Bericht `docs/benchmark/demo-2026-09-15.md`): links
+„NVIDIA Triton alone", rechts „with Vigilant", vier Kameras und ein
+Sprachmodell auf einer Laptop-GPU. Im Erklaervideo folgt direkt **nach**
+`measured` eine Folge aus drei Szenen: `demo` (Fahrzeug, Krakau, mit Preis
+des Sprachmodells), `demo-sidewalk` (Lieferroboter, Edinburgh) und
+`demo-humanoid` (Kopfkamera eines Humanoiden, TUM RGB-D). Die letzte endet mit
+der Grenze: ohne Ueberlastung hilft der Governor nicht. Die beiden kurzen
+Szenen tragen `chapter_break=False` und gehoeren zum Kapitel „On camera" —
+YouTube verlangt je Kapitel mindestens zehn Sekunden. Im Werbe-Cut steht nach
+`measured` nur der Krakau-Clip als kurze Fassung (rund 8 s).
+
+**Warum nach und nicht statt `measured`.** Die beiden Szenen belegen
+Verschiedenes. `measured` ist die Zahl gegen einen *getunten* Triton mit einem
+unteilbaren Hintergrundblock (85 → 99 %), die Demo ein anderer, deutlich
+ueberlasteter Aufbau. Die Demo ersetzt die Tabelle nicht, sie zeigt, wie das
+Problem aussieht. Ersetzt man `measured`, faellt die einzige Zahl gegen einen
+getunten Triton aus dem Film — und die Beschreibung nennt sie trotzdem.
+
+**Was woher kommt.**
+
+| Teil | Quelle |
+|---|---|
+| Clip und Zeitachsen | `script.DEMOS`: Laufordner unter `InferenceQoS-runtime/`, `demo.mp4`, `direct.jsonl`, `governed.jsonl`. Referenziert, nicht kopiert — ein neu gerenderter Clip zieht beim naechsten Bau nach |
+| Zahlen in Sprechertext, Kapitel, Leiste, Beschreibung | `report.demo_facts`: laedt `tools/demo/render.py` und rechnet mit dessen `Timeline`/`ArmState` genau die Zusammenfassung, die der Clip am Ende zeigt (Fenster bis zum letzten Bild). Dazu Kameraanzahl aus dem Kopf und Median des Detektoralters bei Ankunft |
+| Sprechertext | Vorlage in `script.py` mit Feldern wie `{Cameras}`, `{left_age_spoken}`, `{right_answers_spoken}`; Zahlen werden ausgeschrieben (`report.number_words`), 336 ms werden „a third of a second" (`report.spoken_ms`) |
+| Namensnennung | `DEMOS[...]["attribution"]`, in der Leiste der Szene (zweite Zeile) und unter „Credits" in `youtube.md` / `youtube-promo.md` |
+
+**Was der Text behaupten darf.** `report.assert_demo_claims` bricht den Bau ab,
+wenn der direkte Arm mehr als 5 % frische Takte hat oder der Governor-Arm unter
+95 % faellt: dann stimmen „effectively blind" und „stays fresh" nicht mehr,
+und die Szene muss fuer diesen Lauf neu geschrieben werden. Der letzte Satz
+(„With room to spare on the chip, Triton alone keeps up") bleibt stehen, weil
+der Bericht genau das misst: ohne Ueberlastung hilft der Governor nicht.
+
+**Zaehlweise.** Gezaehlt wird wie im Clip: Antworten des Sprachmodells, die bis
+zum letzten Bild ankamen. Das ergibt fuer `krakow-cams4-1825` **222 → 1**. Der
+Bericht nennt 223 → 2, weil er auch die zwei Antworten mitzaehlt, die erst nach
+Sekunde 40 eintrafen (40,03 s und 40,18 s). Frische Takte: 0,17 % → 100 %.
+Leiste, Sprechertext und Beschreibung zeigen eine Nachkommastelle
+(`report.percent_text`: „0.2 %", „99.8 %") und runden nie auf 100 hoch oder
+auf 0 herunter; der Clip selbst zeigt ganze Prozent.
+
+**Der Ausschnitt.** `clip_segment` in `make_video.py` dekodiert den Clip ab
+`start_s` mit ffmpeg nach RGB (BT.709), verkleinert ihn um knapp 8 % unter eine
+84 Pixel hohe Leiste (die Kopfzeile des Clips mit Modell, Takt und
+Blind-Schwelle bleibt so sichtbar) und kodiert wie die uebrigen Szenen. Ist die
+Sprechzeit laenger als der Rest des Clips, bleibt das letzte Bild stehen —
+keine Schleife, sonst sprange die Uhr im Clip zurueck. Mit `align_end` endet
+der Ausschnitt mit dem Clip, damit die Zusammenfassungskarte unter dem Satz
+ueber den Preis steht; `start_s` ist dann der frueheste Anfang.
+
+**Ein weiterer Clip** (Lieferroboter, Humanoid): ein Eintrag in `DEMOS` mit
+demselben Ordneraufbau und eine Szene mit `visual="demo_clip"`,
+`data={"demo": <Schluessel>, "start_s": ...}`. Traegt der Lauf einen anderen
+Ausgang, schlaegt `assert_demo_claims` an — dann den Sprechertext anpassen,
+nicht die Schwelle.
+
+## Probeschnitt und Rechenbudget
+
+```bash
+# nur die Demo-Szenen, in ein Arbeitsverzeichnis, zwei Prozesse, Kerne 6-7
+nice -n 19 taskset -c 6-7 python3 tools/video/make_video.py \
+    --out /tmp/video-preview --scenes demo --jobs 2
+```
+
+`--scenes` baut beide Schnitte nur aus den genannten Szenen und schreibt
+`<stem>-preview.*`; `youtube*.md`, `thumbnail.png` und `build.json` bleiben
+unberuehrt. `--jobs` begrenzt die Prozesse fuer die Einzelbilder (Voreinstellung
+min(8, Kerne)). Laeuft auf dem Rechner parallel eine Latenzmessung ohne
+`measure-pending`-Marke, gehoert der Bau auf zwei Kerne: `--jobs 2` und
+`taskset -c 6-7`.
+
+## Schwarze Bilder: was `blackdetect` meldet
+
+Gemeldet war „kurze schwarze Bilder, wie Aussetzer der Kamera". Gemessen am
+15.09.2026 an beiden Schnitten:
+
+- `blackdetect=d=0.03:pix_th=0.10` meldet im Erklaervideo 0–4,4 s, 27,5–27,8 s
+  und 45,7–49,7 s, im Werbe-Cut 0–3,7 s, 15,6–15,8 s und 26,7–28,4 s. Das sind
+  **keine schwarzen Bilder**: der Grund aller Szenen (#0d1117) hat eine Luma um
+  30 und liegt unter der 10-%-Schwelle; gemeldet werden Szenen, deren Bild sich
+  gerade erst aufbaut (`trend`, `governor`, `capabilities`). YMIN 23, YMAX um
+  225 — Text auf dunklem Grund. Die Paketzeitstempel laufen ohne Luecke durch.
+- Echte Aussetzer stecken **im Demo-Clip selbst**, nicht in dieser Strecke:
+  `tools/demo/render.py` dimmt eine Seite fuer jedes Bild, in dem das neueste
+  Ergebnis aelter als `max_age_ms` ist. Rechts („with Vigilant") trifft das in
+  `krakow-cams4-1825` 37 einzelne Bilder (Alter kurz ueber 100 ms, laengste
+  Luecke 11 ms, also kuerzer als ein Bild) — abgedunkelt, roter Rahmen, BLIND,
+  ein Bild lang. Das sieht aus wie ein Kameraaussetzer. Die Taktstatistik (100 %)
+  ist davon nicht beruehrt; die Darstellung liegt in `tools/demo/render.py`.
+  Die am 15.09. abends neu gerenderten Clips (alle drei Laeufe) enthalten
+  diese Ein-Bild-Blitze laut Demo-Renderer nicht mehr; das Video liest die
+  Clips per Pfad und uebernimmt die Korrektur beim naechsten Bau.
+
+`build_cut` prueft jedes fertige Video mit `pix_th=0.02` (Luma unter rund 20,
+also echtes Schwarz), schreibt Funde als `WARNING` und nach `build.json`
+(`black`, `promo_black`). Ausserdem wird die Szenendauer jetzt vor dem Bau auf
+ganze Bilder gerundet, damit Bild, Ton, Untertitel und Kapitel dieselbe Laenge
+rechnen.
+
+Ein echter Fehler fand sich dabei doch, nur nicht schwarz: Das Zusammenfuehren
+von Bild und Ton lief mit `-shortest` und schnitt im Werbe-Cut vom 15.09. die
+letzten vier Bilder ab (2131 Bilder im Schnitt, 2127 im Ergebnis, Bild 70,90 s
+gegen Ton 71,03 s) — am Ende der Schlusskarte, also ohne Versatz in der Mitte.
+Jetzt wird der Ton aufgefuellt und beide Stroeme werden auf die Szenenuhr
+geschnitten (`-af apad -t <Dauer>`).
+
 ## Voraussetzungen
 
 `ffmpeg`, `python3` mit Pillow, `piper` mit einer englischen Stimme unter

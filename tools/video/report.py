@@ -20,6 +20,7 @@ dieses Modul tut nicht so, als gaebe es sie.
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path
 
@@ -293,6 +294,199 @@ def device_summary(path: Path) -> dict:
         count(entries, "interference entry", "interference entries"),
     ]
     return {"lines": [assert_english(line, path) for line in lines]}
+
+
+# -------------------------------------------------------------- Demo-Clips --
+
+_ONES = ("zero one two three four five six seven eight nine ten eleven twelve "
+         "thirteen fourteen fifteen sixteen seventeen eighteen nineteen").split()
+_TENS = "_ _ twenty thirty forty fifty sixty seventy eighty ninety".split()
+
+
+def number_words(n: int) -> str:
+    """Eine ganze Zahl (0..9999) so, wie der Sprecher sie sagen soll.
+
+    Der Sprechertext der uebrigen Szenen schreibt Zahlen aus ("ninety-nine",
+    "thirty-three"), damit die Stimme sie nicht nach eigenem Ermessen liest;
+    hier geschieht dasselbe, nur aus der Datei statt von Hand.
+    """
+    if not 0 <= n <= 9999:
+        raise SystemExit(f"number_words: {n} ausserhalb 0..9999")
+    if n < 20:
+        return _ONES[n]
+    if n < 100:
+        tens, ones = divmod(n, 10)
+        return _TENS[tens] + (f"-{_ONES[ones]}" if ones else "")
+    if n < 1000:
+        hundreds, rest = divmod(n, 100)
+        return f"{_ONES[hundreds]} hundred" + (f" and {number_words(rest)}" if rest else "")
+    thousands, rest = divmod(n, 1000)
+    joiner = " and " if 0 < rest < 100 else " "
+    return f"{_ONES[thousands]} thousand" + (f"{joiner}{number_words(rest)}" if rest else "")
+
+
+def spoken_times(n: int) -> str:
+    return {0: "not once", 1: "once", 2: "twice"}.get(n, f"{number_words(n)} times")
+
+
+#: Sprechbare Brueche einer Sekunde. Getroffen wird nur, was innerhalb von 12 %
+#: liegt; sonst sagt der Sprecher die Millisekunden. 336 ms sind "a third of a
+#: second", 250 ms "a quarter", 420 ms bleiben "four hundred and twenty".
+_FRACTIONS = ((250.0, "a quarter of a second"), (1000.0 / 3, "a third of a second"),
+              (500.0, "half a second"), (1000.0, "a full second"))
+
+
+def spoken_ms(ms: float) -> str:
+    for value, words in _FRACTIONS:
+        if abs(ms - value) <= 0.12 * value:
+            return words
+    return f"{number_words(int(round(ms, -1)))} milliseconds"
+
+
+def percent_text(share: float) -> str:
+    """Anteil fuer Bild und Beschreibung, eine Nachkommastelle wo noetig.
+
+    Der Demo-Renderer zeigt ganze Prozent, also "0 %" fuer 0,17 % und "100 %"
+    fuer 99,8 %. Hier steht die genauere Zahl: "0 %" behauptet, es habe
+    keinen einzigen frischen Takt gegeben, und "100 %" behauptet, es habe
+    keinen verpassten gegeben. Deshalb wird nie auf 100 hoch- und nie auf 0
+    heruntergerundet.
+    """
+    if share >= 1.0:
+        return "100 %"
+    pct = round(share * 100, 1)
+    if pct >= 100.0:
+        pct = math.floor(share * 1000) / 10
+    if pct <= 0.0:
+        return "0 %" if share <= 0 else "< 0.1 %"
+    return f"{pct:.1f} %" if pct % 1 else f"{pct:.0f} %"
+
+
+def spoken_percent(share: float) -> str:
+    """Derselbe Anteil wie `percent_text`, zum Sprechen: "ninety-nine point eight percent"."""
+    text = percent_text(share).replace(" %", "")
+    if text.startswith("<"):
+        return "less than a tenth of a percent"
+    whole, _, tenth = text.partition(".")
+    words = number_words(int(whole)) + (f" point {number_words(int(tenth))}" if tenth else "")
+    return f"{words} percent"
+
+
+def _demo_renderer():
+    """tools/demo/render.py laden — unter anderem Namen.
+
+    Beide Module heissen `render`; ein normaler Import holte je nach
+    sys.path das falsche. Die Zahlen werden mit genau dem Code gerechnet,
+    der auch die Zusammenfassungskarte im Clip zeichnet.
+    """
+    import importlib.util
+    path = Path(__file__).resolve().parent.parent / "demo" / "render.py"
+    spec = importlib.util.spec_from_file_location("demo_render", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def demo_facts(clip: Path, left: Path, right: Path, render_start_s: float = 0.0) -> dict:
+    """Die Kennzahlen eines Demo-Clips, aus seinen beiden Zeitachsen.
+
+    Gerechnet wie die Zusammenfassung von `tools/demo/render.py`: Fenster vom
+    Renderstart bis zum letzten gerenderten Bild, "frisch" = zum Abtastzeitpunkt
+    (alle `period_ms`) war das neueste angekommene Ergebnis hoechstens
+    `max_age_ms` alt, Sprachmodell-Antworten = ok-Antworten mit
+    `start <= done_ms <= Ende`. Antworten, die erst nach dem letzten Bild
+    ankamen, zaehlen nicht — der Clip zeigt sie ja auch nicht.
+
+    Dazu das mittlere Alter eines Detektorergebnisses bei Ankunft (Median ueber
+    alle ok-Ergebnisse im Fenster) und die Anzahl der Kameras aus dem Kopf
+    (`detector` plus `aux_cameras`). Fehlt etwas, bricht der Bau ab.
+    """
+    d = _demo_renderer()
+    for path in (clip, left, right):
+        if not path.is_file():
+            raise SystemExit(f"{path}: fehlt — Demo-Szene ohne Clip oder Zeitachse")
+    duration, fps = d.probe(str(clip))
+    nframes = max(1, int(round(duration * fps)))
+    start_ms = render_start_s * 1000.0
+    end_ms = start_ms + (nframes - 1) * 1000.0 / fps
+
+    arms = []
+    for side, path in (("left", left), ("right", right)):
+        tl = d.Timeline(str(path), side)
+        if tl.header is None or tl.no_data:
+            raise SystemExit(f"{path}: Zeitachse ohne Kopf oder ohne Ergebnisse")
+        max_age = float(tl.hget("detector", "max_age_ms"))
+        period = float(tl.hget("detector", "period_ms"))
+        arm = d.ArmState(tl, max_age, period, start_ms, end_ms)
+        share = arm.fresh_share(end_ms)
+        if share is None:
+            raise SystemExit(f"{path}: Clip kuerzer als max_age_ms, kein Takt bewertet")
+        ages = sorted(r["done"] - r["capture"] for r in tl.det
+                      if start_ms <= r["capture"] <= end_ms)
+        if not ages:
+            raise SystemExit(f"{path}: kein Detektorergebnis im Clipfenster")
+        arms.append({"tl": tl, "share": share, "answers": arm.vlm_answers(end_ms),
+                     "age_p50": ages[len(ages) // 2] if len(ages) % 2 else
+                     (ages[len(ages) // 2 - 1] + ages[len(ages) // 2]) / 2,
+                     "max_age": max_age, "period": period})
+    (lt, rt) = (arms[0]["tl"], arms[1]["tl"])
+    if lt.arm != "direct" or rt.arm != "governed":
+        raise SystemExit(f"{left}/{right}: links muss der direkte, rechts der "
+                         f"geregelte Arm stehen (gefunden {lt.arm}/{rt.arm})")
+    if arms[0]["max_age"] != arms[1]["max_age"] or arms[0]["period"] != arms[1]["period"]:
+        raise SystemExit(f"{left}/{right}: die Arme haben verschiedene Vertraege")
+
+    stream = "protected"
+    with open(right, encoding="utf-8") as fh:
+        for line in fh:
+            if '"type":"detector"' in line.replace(" ", ""):
+                stream = json.loads(line).get("stream") or stream
+                break
+    cameras = 1 + len(rt.hget("aux_cameras", default=[]) or [])
+    gpu = str(rt.hget("gpu", default="GPU"))
+    clip_s = (end_ms - start_ms + 1000.0 / fps) / 1000.0
+    return {
+        "cameras": cameras,
+        "Cameras": number_words(cameras).capitalize(),
+        "cameras_word": number_words(cameras),
+        "gpu": gpu,
+        "gpu_kind": "laptop GPU" if "laptop" in gpu.lower() else "GPU",
+        "stream": stream,
+        "left_label": lt.label, "right_label": rt.label,
+        "left_fresh": arms[0]["share"], "right_fresh": arms[1]["share"],
+        "left_fresh_text": percent_text(arms[0]["share"]),
+        "right_fresh_text": percent_text(arms[1]["share"]),
+        "right_fresh_spoken": ("every control cycle" if arms[1]["share"] >= 1.0 else
+                               f"{spoken_percent(arms[1]['share'])} of control cycles"),
+        "left_pct_spoken": spoken_percent(arms[0]["share"]),
+        "right_pct_spoken": spoken_percent(arms[1]["share"]),
+        "left_age_ms": arms[0]["age_p50"], "right_age_ms": arms[1]["age_p50"],
+        "left_age_spoken": spoken_ms(arms[0]["age_p50"]),
+        "left_answers": arms[0]["answers"], "right_answers": arms[1]["answers"],
+        "left_answers_spoken": spoken_times(arms[0]["answers"]),
+        "right_answers_spoken": spoken_times(arms[1]["answers"]),
+        "max_age_ms": arms[0]["max_age"], "period_ms": arms[0]["period"],
+        "clip_s": clip_s,
+        "clip_text": f"{clip_s:.1f}".rstrip("0").rstrip(".") + " s",
+        "clip_spoken": f"{number_words(int(round(clip_s)))} seconds",
+        "clip_duration_s": duration,
+    }
+
+
+def assert_demo_claims(facts: dict, where: str) -> None:
+    """Was der Sprechertext der Demo-Szene behauptet, muss der Lauf hergeben.
+
+    Der Text sagt "Triton alone ... effectively blind" und "with Vigilant the
+    front camera stays fresh". Ein neuer Lauf, in dem das nicht mehr stimmt
+    (weil die GPU nicht mehr ueberlastet ist, oder weil der Governor verliert),
+    bricht hier ab, statt die alten Saetze ueber neue Zahlen zu legen.
+    """
+    if not facts["left_fresh"] < 0.05:
+        raise SystemExit(f"{where}: direkter Arm {facts['left_fresh_text']} frisch — "
+                         "der Text nennt ihn blind. Szene fuer diesen Lauf umschreiben.")
+    if not facts["right_fresh"] >= 0.95:
+        raise SystemExit(f"{where}: Governor-Arm nur {facts['right_fresh_text']} frisch — "
+                         "der Text nennt die Kamera frisch. Szene umschreiben.")
 
 
 # ------------------------------------------------------------ Tuning-Szene --

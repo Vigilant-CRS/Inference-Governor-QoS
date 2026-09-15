@@ -27,7 +27,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import re  # noqa: E402
+import textwrap  # noqa: E402
+
 import render  # noqa: E402
+import report  # noqa: E402
 import script  # noqa: E402
 
 FPS = 30
@@ -92,7 +96,7 @@ def _render_one(job: tuple) -> None:
     image.save(path)
 
 
-def render_scene(scene, seconds: float, frames_dir: Path, fps: int) -> int:
+def render_scene(scene, seconds: float, frames_dir: Path, fps: int, workers: int) -> int:
     frames_dir.mkdir(parents=True, exist_ok=True)
     count = max(1, int(round(seconds * fps)))
     jobs = []
@@ -100,9 +104,71 @@ def render_scene(scene, seconds: float, frames_dir: Path, fps: int) -> int:
         progress = index / max(1, count - 1)
         jobs.append((scene.key, scene.visual, scene.data, index, progress,
                      frames_dir / f"{index:05d}.png"))
-    with multiprocessing.Pool(processes=min(8, os.cpu_count() or 4)) as pool:
+    with multiprocessing.Pool(processes=max(1, workers)) as pool:
         pool.map(_render_one, jobs, chunksize=4)
     return count
+
+
+def clip_segment(scene, seconds: float, work: Path, out: Path, fps: int) -> dict:
+    """Ein Ausschnitt eines Demo-Clips als Szene, exakt `seconds` lang.
+
+    ffmpeg dekodiert den Clip ab `start_s` nach RGB (BT.709 wie gerendert),
+    skaliert ihn in `render.clip_area()` und legt ihn auf den Grund mit der
+    Beschriftungsleiste. Zurueck nach yuv420p geht es ueber dieselbe
+    Standardmatrix wie bei den PNG-Szenen, sonst saehe der Grund der Demo-Szene
+    eine Spur anders aus als der Grund der Nachbarszene.
+
+    Ist die Sprechzeit laenger als der Rest des Clips, bleibt das letzte Bild
+    stehen (`eof_action=repeat`) — keine Schleife: ein Clip, der wieder bei
+    "BLIND" anfaengt, wuerde eine zweite Aufnahme behaupten, und seine Uhr
+    oben rechts sprange zurueck. Mit `align_end` endet der Ausschnitt mit dem
+    Clip; `start_s` ist dann der frueheste Anfang.
+    """
+    data = scene.data
+    duration = float(data["facts"]["clip_duration_s"])
+    frame = 1.0 / fps
+    start = float(data.get("start_s", 0.0))
+    if data.get("align_end"):
+        start = max(start, duration - seconds)
+    start = min(max(0.0, start), max(0.0, duration - frame))
+    played = min(seconds, duration - start)
+    held = max(0.0, seconds - played)
+
+    background = work / f"{out.stem}-strip.png"
+    render.demo_clip(scene).save(background)
+    x, y, width, height = render.clip_area()
+    count = max(1, int(round(seconds * fps)))
+    graph = (f"[0:v]format=gbrp[bg];"
+             f"[1:v]fps={fps},scale={width}:{height}:flags=lanczos:"
+             f"in_color_matrix=bt709:in_range=tv,format=gbrp[clip];"
+             f"[bg][clip]overlay={x}:{y}:eof_action=repeat:format=gbrp,"
+             f"format=yuv420p[v]")
+    run(["ffmpeg", "-y", "-v", "error", "-loop", "1", "-framerate", str(fps),
+         "-i", str(background), "-ss", f"{start:.3f}", "-i", data["clip"],
+         "-filter_complex", graph, "-map", "[v]", "-an", "-frames:v", str(count),
+         "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+         "-pix_fmt", "yuv420p", "-r", str(fps), str(out)])
+    return {"start_s": round(start, 3), "played_s": round(played, 3),
+            "held_s": round(held, 3)}
+
+
+def black_frames(path: Path, pix_th: float = 0.02) -> list[tuple[float, float]]:
+    """Wirklich schwarze Stellen im fertigen Video, fuer build.json.
+
+    Die Schwelle ist bewusst 0.02 und nicht die uebliche 0.10: der Grund aller
+    Szenen (#0d1117) hat eine Luma von rund 30 und liegt damit *unter* 10 %.
+    `blackdetect` mit 0.10 meldet deshalb jede Szene, deren Bild noch fast leer
+    ist (Anfang von `trend`, `governor`, `capabilities`), als "schwarz" —
+    gemessen am 15.09.: YMIN 23, YMAX um 225, also Text auf dunklem Grund. Mit
+    0.02 (Luma unter rund 20) meldet der Test nur noch echtes Schwarz, etwa
+    ein fehlendes Bild an einer Szenengrenze.
+    """
+    proc = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostats", "-i", str(path), "-an",
+         "-vf", f"blackdetect=d=0.03:pix_th={pix_th}", "-f", "null", "-"],
+        capture_output=True, text=True)
+    return [(float(a), float(b)) for a, b in
+            re.findall(r"black_start:([\d.]+) black_end:([\d.]+)", proc.stderr)]
 
 
 def segment(frames_dir: Path, seconds: float, out: Path, fps: int) -> None:
@@ -235,10 +301,76 @@ def attach_sources(scenes, runtime: Path) -> None:
         if scene.visual == "devices":
             scene.data["paths"] = [str(runtime / "messungen" / d["run"] / "qualification.json")
                                    for d in script.DEVICES]
+        if scene.visual in render.CLIP_VISUALS:
+            attach_demo(scene, runtime)
+
+
+def attach_demo(scene, runtime: Path) -> None:
+    """Clip, Zeitachsen und Kennzahlen an eine Demo-Szene haengen.
+
+    Sprechertext und Kapitel der Szene sind Vorlagen; ausgefuellt werden sie
+    hier, aus `report.demo_facts`, also aus den Zeitachsen. Die Vorlage wird
+    aufgehoben, damit ein zweiter Aufruf nicht auf schon eingesetzten Zahlen
+    arbeitet.
+    """
+    demo = script.DEMOS[scene.data["demo"]]
+    folder = runtime / demo["run"]
+    clip, left, right = (folder / demo[part] for part in ("clip", "left", "right"))
+    facts = report.demo_facts(clip, left, right, float(demo.get("render_start_s", 0.0)))
+    report.assert_demo_claims(facts, str(folder))
+    facts.update(subject=demo["subject"], attribution=demo["attribution"],
+                 report=demo["report"])
+    scene.data.update(clip=str(clip), left=str(left), right=str(right), facts=facts)
+    scene.data.setdefault("narration_template", scene.narration)
+    scene.data.setdefault("chapter_template", scene.chapter)
+    scene.narration = scene.data["narration_template"].format(**facts)
+    scene.chapter = scene.data["chapter_template"].format(**facts)
+
+
+def demo_description(scenes) -> tuple[list[str], list[str]]:
+    """Absatz und Namensnennung fuer die YouTube-Beschreibung, aus den Zeitachsen.
+
+    Der Absatz nennt auch den Preis und die Grenze: ohne Ueberlastung hilft
+    der Governor nicht. Eine Beschreibung, die nur 0,2 % → 100 % nennt, waere
+    der Satz, den der Bericht ausdruecklich nicht macht.
+    """
+    sentences, credits, reports = [], [], []
+    seen = set()
+    for scene in scenes:
+        if scene.visual not in render.CLIP_VISUALS or scene.data["demo"] in seen:
+            continue
+        seen.add(scene.data["demo"])
+        f = scene.data["facts"]
+        answers = f"{f['right_answers']} answer{'' if f['right_answers'] == 1 else 's'}"
+        left_label = f["left_label"][:1].upper() + f["left_label"][1:]
+        right_label = f["right_label"][:1].upper() + f["right_label"][1:]
+        if not sentences:
+            sentences.append(
+                f"On camera, a {f['subject']}: {f['cameras_word']} cameras and a language "
+                f"model on one {f['gpu']}, more work than the GPU can do. "
+                f"{left_label}: the {f['stream']} camera was fresh in "
+                f"{f['left_fresh_text']} of control cycles, detections arrived "
+                f"{f['left_age_ms']:.0f} ms old (median). {right_label}: "
+                f"{f['right_fresh_text']} of cycles fresh. The price is the language "
+                f"model: {answers} in {f['clip_text']} instead of {f['left_answers']}.")
+        else:
+            sentences.append(
+                f"The same on a {f['subject']} ({f['stream']} camera, "
+                f"{f['cameras_word']} cameras): fresh {f['left_fresh_text']} → "
+                f"{f['right_fresh_text']}, language model {f['left_answers']} → "
+                f"{answers} in {f['clip_text']}.")
+        credits.append(f["attribution"])
+        if f["report"] not in reports:
+            reports.append(f["report"])
+    if not sentences:
+        return [], []
+    sentences.append("On a GPU with room to spare the governor does not help; details "
+                     f"in {', '.join(reports)}.")
+    return textwrap.wrap(" ".join(sentences), 74) + [""], credits
 
 
 def build_cut(scenes, stem: str, out: Path, work: Path, fps: int,
-              keep_frames: bool) -> dict:
+              keep_frames: bool, workers: int) -> dict:
     """Ein Schnitt: Stimme je Szene, Bilder, Ton, Untertitel, eingebrannte Fassung.
 
     Erklaervideo und Werbe-Cut laufen durch dieselbe Strecke. Zwei Strecken
@@ -246,7 +378,7 @@ def build_cut(scenes, stem: str, out: Path, work: Path, fps: int,
     auseinanderlaufen koennen.
     """
     work.mkdir(parents=True, exist_ok=True)
-    segments, audio_parts, srt_entries, chapters = [], [], [], []
+    segments, audio_parts, srt_entries, chapters, clips = [], [], [], [], []
     clock = 0.0
     print(f"\n{stem}")
     print(f"{'scene':<18}{'voice':>8}{'scene':>8}")
@@ -257,19 +389,30 @@ def build_cut(scenes, stem: str, out: Path, work: Path, fps: int,
             voice_path = work / f"{index:02d}-{scene.key}.wav"
             spoken = synthesise(scene.narration, voice_path)
         seconds = max(scene.hold, spoken + scene.pause)
+        # Auf ganze Bilder runden, *bevor* Ton, Untertitel und Kapitel daraus
+        # gerechnet werden. Sonst ist jede Szene im Bild bis zu ein halbes
+        # Bild laenger oder kuerzer als im Ton, und die Abweichung wandert
+        # ueber zehn Szenen durch den Film.
+        seconds = max(1, int(round(seconds * fps))) / fps
 
-        frames_dir = work / f"frames-{index:02d}-{scene.key}"
-        render_scene(scene, seconds, frames_dir, fps)
         video = work / f"{index:02d}-{scene.key}.mp4"
-        segment(frames_dir, seconds, video, fps)
+        if scene.visual in render.CLIP_VISUALS:
+            placed = clip_segment(scene, seconds, work, video, fps)
+            clips.append({"scene": scene.key, "at_s": round(clock, 3),
+                          "seconds": round(seconds, 3), **placed})
+        else:
+            frames_dir = work / f"frames-{index:02d}-{scene.key}"
+            render_scene(scene, seconds, frames_dir, fps, workers)
+            segment(frames_dir, seconds, video, fps)
+            if not keep_frames:
+                shutil.rmtree(frames_dir)
         audio = work / f"{index:02d}-{scene.key}-mix.wav"
         audio_segment(voice_path, seconds, audio)
-        if not keep_frames:
-            shutil.rmtree(frames_dir)
 
         segments.append(video)
         audio_parts.append(audio)
-        chapters.append((clock, scene.chapter or scene.key))
+        if scene.chapter_break or not chapters:
+            chapters.append((clock, scene.chapter or scene.key))
         if scene.narration:
             chunks = srt_chunks(scene.narration)
             total = sum(len(c) for c in chunks) or 1
@@ -294,8 +437,15 @@ def build_cut(scenes, stem: str, out: Path, work: Path, fps: int,
          str(audio_norm)])
 
     final = out / f"{stem}.mp4"
+    # Nicht `-shortest`: mit kopiertem Video schnitt es am 15.09. die letzten
+    # vier Bilder des Werbe-Cuts ab (2131 Bilder im Schnitt, 2127 im Ergebnis),
+    # weil loudnorm den Ton um Millisekunden verschiebt und ffmpeg nach dem
+    # zuerst endenden Strom puffert. Stattdessen: Ton auffuellen und beide
+    # Stroeme auf die Szenenuhr schneiden, die Bild, Untertitel und Kapitel
+    # ohnehin teilen.
     run(["ffmpeg", "-y", "-v", "error", "-i", str(video_only), "-i", str(audio_norm),
-         "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(final)])
+         "-c:v", "copy", "-af", "apad", "-c:a", "aac", "-b:a", "192k",
+         "-t", f"{clock:.3f}", str(final)])
 
     srt = out / f"{stem}.en.srt"
     write_srt(srt_entries, srt)
@@ -311,8 +461,12 @@ def build_cut(scenes, stem: str, out: Path, work: Path, fps: int,
          "-vf", f"subtitles={srt}:force_style='{style}'",
          "-c:v", "libx264", "-preset", "medium", "-crf", "18",
          "-pix_fmt", "yuv420p", "-c:a", "copy", str(burned)])
+    blacks = black_frames(final)
+    for start, end in blacks:
+        print(f"WARNING {final.name}: black {start:.2f}-{end:.2f} s")
     return {"final": final, "subtitled": burned, "srt": srt,
-            "chapters": chapters, "duration": clock}
+            "chapters": chapters, "duration": clock, "clips": clips,
+            "black": blacks}
 
 
 DESCRIPTION = [
@@ -355,6 +509,14 @@ def main() -> int:
                              "(Voreinstellung: neben dem Hauptcheckout gesucht)")
     parser.add_argument("--only", choices=("explainer", "promo"), default="",
                         help="nur einen der beiden Schnitte bauen")
+    parser.add_argument("--scenes", default="",
+                        help="Probeschnitt nur aus diesen Szenen (Schluessel, mit "
+                             "Komma getrennt, z. B. demo,devices). Schreibt "
+                             "<stem>-preview.* und laesst youtube*.md, "
+                             "thumbnail.png und build.json unberuehrt")
+    parser.add_argument("--jobs", type=int, default=min(8, os.cpu_count() or 4),
+                        help="Prozesse fuer die Einzelbilder (Voreinstellung "
+                             "min(8, Kerne); neben einer Messung: 2)")
     args = parser.parse_args()
 
     here = Path(__file__).resolve()
@@ -367,8 +529,20 @@ def main() -> int:
     if pending.exists():
         raise SystemExit("Es laeuft eine Messung (measure-pending). Spaeter rendern.")
 
-    attach_sources(script.SCENES, runtime)
-    attach_sources(script.PROMO_SCENES, runtime)
+    wanted = {key.strip() for key in args.scenes.split(",") if key.strip()}
+    preview = bool(wanted)
+
+    def pick(scenes):
+        return [s for s in scenes if not wanted or s.key in wanted]
+
+    # Nur die Szenen mit Belegen versehen, die gebaut werden: ein Probeschnitt
+    # der Demo-Szene soll nicht an einem Protokoll scheitern, das er nicht zeigt.
+    if args.only in ("", "explainer"):
+        attach_sources(pick(script.SCENES), runtime)
+    if args.only in ("", "promo"):
+        attach_sources(pick(script.PROMO_SCENES), runtime)
+
+    suffix = "-preview" if preview else ""
 
     # Ergaenzen statt ersetzen: `--only promo` darf die Angaben zum
     # Erklaervideo nicht loeschen, und umgekehrt.
@@ -378,33 +552,52 @@ def main() -> int:
     except (OSError, ValueError):
         summary = {}
     summary.update({"voice": VOICE.name, "length_scale": LENGTH_SCALE, "fps": args.fps})
-    if args.only in ("", "explainer"):
-        explainer = build_cut(script.SCENES, "vigilant-inference-governor", out,
-                              work / "explainer", args.fps, args.keep_frames)
-        render.thumbnail(out / "thumbnail.png")
-        lines = [f"# {script.YOUTUBE_TITLE}", "", *DESCRIPTION, "## Chapters", ""]
+    if args.only in ("", "explainer") and pick(script.SCENES):
+        scenes = pick(script.SCENES)
+        explainer = build_cut(scenes, "vigilant-inference-governor" + suffix, out,
+                              work / ("explainer" + suffix), args.fps, args.keep_frames,
+                              args.jobs)
+        demo_lines, credits = demo_description(scenes)
+        lines = [f"# {script.YOUTUBE_TITLE}", "", *DESCRIPTION[:-4], *demo_lines,
+                 *DESCRIPTION[-4:], "## Chapters", ""]
         for start, key in explainer["chapters"]:
             lines.append(f"{timecode(start)[3:8]} {key}")
+        if credits:
+            lines += ["", "## Credits", "", *credits]
         lines += ["", "## Tags", "", ", ".join(script.YOUTUBE_TAGS), ""]
-        (out / "youtube.md").write_text("\n".join(lines), encoding="utf-8")
         summary.update({
             "final": str(explainer["final"]), "subtitled": str(explainer["subtitled"]),
             "srt": str(explainer["srt"]), "thumbnail": str(out / "thumbnail.png"),
             "duration_s": round(explainer["duration"], 2),
+            "clips": explainer["clips"], "black": explainer["black"],
         })
-    if args.only in ("", "promo"):
-        promo = build_cut(script.PROMO_SCENES, "vigilant-inference-governor-promo", out,
-                          work / "promo", args.fps, args.keep_frames)
+        if preview:
+            (out / "youtube-preview.md").write_text("\n".join(lines), encoding="utf-8")
+        else:
+            render.thumbnail(out / "thumbnail.png")
+            (out / "youtube.md").write_text("\n".join(lines), encoding="utf-8")
+    if args.only in ("", "promo") and pick(script.PROMO_SCENES):
+        scenes = pick(script.PROMO_SCENES)
+        promo = build_cut(scenes, "vigilant-inference-governor-promo" + suffix, out,
+                          work / ("promo" + suffix), args.fps, args.keep_frames, args.jobs)
+        _demo_lines, credits = demo_description(scenes)
         promo_lines = [f"# {script.PROMO_TITLE}", "", *DESCRIPTION[:6], "",
                        "Full explainer and repository: "
-                       "https://github.com/Vigilant-CRS/Inference-Governor-QoS", "",
-                       "## Tags", "", ", ".join(script.YOUTUBE_TAGS), ""]
-        (out / "youtube-promo.md").write_text("\n".join(promo_lines), encoding="utf-8")
+                       "https://github.com/Vigilant-CRS/Inference-Governor-QoS", ""]
+        if credits:
+            promo_lines += ["## Credits", "", *credits, ""]
+        promo_lines += ["## Tags", "", ", ".join(script.YOUTUBE_TAGS), ""]
         summary.update({
             "promo": str(promo["final"]), "promo_subtitled": str(promo["subtitled"]),
             "promo_srt": str(promo["srt"]), "promo_duration_s": round(promo["duration"], 2),
+            "promo_clips": promo["clips"], "promo_black": promo["black"],
         })
+        if not preview:
+            (out / "youtube-promo.md").write_text("\n".join(promo_lines), encoding="utf-8")
 
+    if preview:
+        print(json.dumps(summary, indent=2, default=str))
+        return 0
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(json.dumps(summary, indent=2))
     return 0

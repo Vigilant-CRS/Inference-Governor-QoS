@@ -35,6 +35,59 @@ DEVICES = [
      "backend": "TensorFlow Lite, GPU delegate", "run": "autotune-pixel5-2026-09-15-usecase-fenster"},
 ]
 
+#: Aufgezeichnete Demo-Clips (tools/demo/render.py): links der direkte Weg,
+#: rechts der Governor, dieselben Frames nacheinander auf derselben GPU. Ein
+#: Eintrag braucht nur den Laufordner (relativ zu InferenceQoS-runtime/), den
+#: Clip und seine zwei Zeitachsen; alle Zahlen in Bild und Sprechertext rechnet
+#: `report.demo_facts` daraus. `subject` ist das Wort fuer die Maschine im
+#: Sprechertext, `attribution` die Namensnennung des Materials (CC BY verlangt
+#: sie; sie steht in der Szene und in der YouTube-Beschreibung).
+#:
+#: Der Clip wird referenziert, nicht kopiert: wird er neu gerendert, zieht das
+#: Video beim naechsten Bau nach. Weitere Clips (Lieferroboter, Humanoid) mit
+#: derselben Ordnerstruktur sind ein weiterer Eintrag und eine Szene mit
+#: `data={"demo": <Schluessel>}`.
+DEMOS = {
+    "krakow-cams4": {
+        "run": "demo/runs/krakow-cams4-1825",
+        "clip": "demo.mp4",
+        "left": "direct.jsonl",
+        "right": "governed.jsonl",
+        #: Ab welcher Sekunde der Zeitachsen der Clip gerendert wurde
+        #: (render.py --start-s). Der Clip zeigt "0.0 s" im ersten Bild.
+        "render_start_s": 0.0,
+        "subject": "vehicle",
+        "report": "docs/benchmark/demo-2026-09-15.md",
+        "attribution": ("Video: 'City Driving 4K: Kraków Poland 2024' by Relaxing Roads 4K, "
+                        "CC BY 3.0, via Wikimedia Commons. RF-DETR (Apache-2.0), "
+                        "SmolVLM (Apache-2.0)."),
+    },
+    "sidewalk-cams4": {
+        "run": "demo/runs/sidewalk-cams4-2033",
+        "clip": "demo.mp4",
+        "left": "direct.jsonl",
+        "right": "governed.jsonl",
+        "render_start_s": 0.0,
+        "subject": "sidewalk robot",
+        "report": "docs/benchmark/demo-2026-09-15.md",
+        "attribution": ("Video: 'Walking in EDINBURGH – Scotland (UK)' by POPtravel, "
+                        "CC BY 3.0, via Wikimedia Commons. RF-DETR (Apache-2.0), "
+                        "SmolVLM (Apache-2.0)."),
+    },
+    "humanoid-cams4": {
+        "run": "demo/runs/humanoid-cams4-2039",
+        "clip": "demo.mp4",
+        "left": "direct.jsonl",
+        "right": "governed.jsonl",
+        "render_start_s": 0.0,
+        "subject": "humanoid robot",
+        "report": "docs/benchmark/demo-2026-09-15.md",
+        "attribution": ("TUM RGB-D benchmark (fr3/walking_halfsphere), Computer Vision "
+                        "Group, TU Munich, CC BY 4.0. RF-DETR (Apache-2.0), "
+                        "SmolVLM (Apache-2.0)."),
+    },
+}
+
 #: Wo die Zahlen herkommen. Der Schluessel steht in `Scene.source`.
 SOURCES = {
     "gate-m3": "docs/benchmark/messkette-2026-09-12.md",
@@ -48,6 +101,10 @@ SOURCES = {
     "devices": ", ".join(f"InferenceQoS-runtime/messungen/{d['run']}/qualification.json"
                          for d in DEVICES),
 }
+for _key, _demo in DEMOS.items():
+    SOURCES[f"demo-{_key}"] = ", ".join(
+        f"InferenceQoS-runtime/{_demo['run']}/{_demo[part]}"
+        for part in ("clip", "left", "right")) + f" (report: {_demo['report']})"
 
 #: Messdaten fuer Protokolle, deren Pfad kein Datum traegt. Sie stehen im
 #: zugehoerigen Bericht — `gate-m3-r03.md` nennt den 10.09.2026 — und nicht
@@ -70,6 +127,10 @@ class Scene:
     source: str = ""
     #: Kapiteltitel unter dem Video, in der Sprache des Zuschauers.
     chapter: str = ""
+    #: False: die Szene setzt das vorige Kapitel fort. YouTube verlangt je
+    #: Kapitel mindestens zehn Sekunden; die kurzen Demo-Szenen fuer
+    #: Lieferroboter und Humanoid gehoeren deshalb zum Kapitel davor.
+    chapter_break: bool = True
     #: Sekunden Stille nach der Szene, damit nichts hetzt.
     pause: float = 0.6
     #: Nur fuer stumme Szenen: feste Dauer.
@@ -162,6 +223,64 @@ SCENES = [
         chapter="Measured against a tuned Triton",
         source="run",
         pause=0.8,
+    ),
+    # Die Demo-Szenen: Fahrzeug, Lieferroboter, Humanoid. Sie ersetzen
+    # `measured` nicht: dort steht die Zahl gegen einen *getunten* Triton mit
+    # einem unteilbaren Block, hier ein anderer, ueberlasteter Aufbau (vier
+    # Kameras plus Sprachmodell) — zu sehen statt zu lesen. Die Felder in
+    # geschweiften Klammern fuellt `report.demo_facts` aus den Zeitachsen des
+    # jeweiligen Clips; `report.assert_demo_claims` bricht ab, wenn ein neuer
+    # Lauf "blind" oder "fresh" nicht mehr hergibt. Der letzte Satz der Folge
+    # bleibt: ohne Ueberlastung hilft der Governor nicht
+    # (docs/benchmark/demo-2026-09-15.md).
+    Scene(
+        key="demo",
+        narration=(
+            "Here is what that looks like. {Cameras} cameras and a language model "
+            "share one {gpu_kind}: more work than the chip can do. Triton alone "
+            "computes every frame in arrival order. Its detections arrive "
+            "{left_age_spoken} late, so the {subject} is effectively blind. With "
+            "Vigilant, the {stream} camera stays fresh in {right_fresh_spoken}. The "
+            "price is visible too: the language model answered {right_answers_spoken}. "
+            "Without the governor, {left_answers_spoken} in {clip_spoken}."
+        ),
+        visual="demo_clip",
+        chapter="On camera: {cameras_word} cameras, one GPU",
+        source="demo-krakow-cams4",
+        pause=0.6,
+        # align_end: der Ausschnitt endet mit dem Clip, damit die
+        # Zusammenfassungskarte der letzten zwei Sekunden unter dem Satz ueber
+        # den Preis steht. start_s ist dann der frueheste Anfang.
+        data={"demo": "krakow-cams4", "start_s": 6.0, "align_end": True,
+              "caption": "Recorded on one {gpu_kind} · same frames, back to back"},
+    ),
+    Scene(
+        key="demo-sidewalk",
+        narration=(
+            "On a {subject}, with {cameras_word} cameras as well: the {stream} camera "
+            "is fresh in {left_pct_spoken} of cycles with Triton alone, and "
+            "{right_pct_spoken} with Vigilant."
+        ),
+        visual="demo_clip",
+        source="demo-sidewalk-cams4",
+        chapter_break=False,
+        pause=0.5,
+        data={"demo": "sidewalk-cams4", "start_s": 14.0,
+              "caption": "Recorded on one {gpu_kind} · same frames, back to back"},
+    ),
+    Scene(
+        key="demo-humanoid",
+        narration=(
+            "And the {stream} camera of a {subject}: {left_pct_spoken} with Triton "
+            "alone, {right_pct_spoken} with Vigilant. With room to spare on the chip, "
+            "Triton alone keeps up, and the governor does not help."
+        ),
+        visual="demo_clip",
+        source="demo-humanoid-cams4",
+        chapter_break=False,
+        pause=0.8,
+        data={"demo": "humanoid-cams4", "start_s": 14.0,
+              "caption": "Recorded on one {gpu_kind} · same frames, back to back"},
     ),
     Scene(
         key="devices",
@@ -268,6 +387,19 @@ PROMO_SCENES = [
         visual="terminal_run",
         source="run",
         pause=0.6,
+    ),
+    Scene(
+        key="demo",
+        narration=(
+            "{Cameras} cameras. One GPU. Triton alone goes blind. Vigilant keeps the "
+            "{stream} camera fresh."
+        ),
+        visual="demo_clip",
+        source="demo-krakow-cams4",
+        pause=0.5,
+        # Ab 14 s: links steht laengst BLIND, rechts laeuft der Detektor mit.
+        data={"demo": "krakow-cams4", "start_s": 14.0,
+              "caption": "Recorded on one {gpu_kind} · same frames, back to back"},
     ),
     Scene(
         key="devices",
