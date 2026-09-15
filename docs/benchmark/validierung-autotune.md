@@ -663,6 +663,13 @@ auf Grund von Rauschen fest. **Was nicht belegt ist:** ein bestaetigter
 Tuning-Gewinn. Auf keiner der gemessenen Lasten hat eine andere Einstellung als
 die gemessene zweimal hintereinander gehalten.
 
+**Nachtraeglich: zu kurze Fenster.** Alle Zahlen dieses Abschnitts stammen aus
+10-s-Fenstern. Bei 370 ms Detektorperiode sind das 27 Takte je Punkt (am
+90-%-Punkt 24): 37 ‰ sind **ein** Takt, die 208 ‰ von `fit` fuenf. Die Suche
+hat also null gegen einen verfehlten Takt verglichen. Seitdem bemessen `tune`,
+`fit` und `vig-fit` das Fenster in Takten (ADR-0045, Nachtrag „Messfenster in
+Takten"); die Nachmessung steht unten.
+
 ### Laptop: die Verweigerung steht vorn
 
 Lauf `InferenceQoS-runtime/messungen/autotune-laptop-2026-09-15f/`, gleiche Bedingungen

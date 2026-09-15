@@ -56,9 +56,6 @@ use vig_gateway::{GatewayService, MonotonicClock, actor};
 use vig_protocol_oip::inference::ModelMetadataRequest;
 use vig_protocol_oip::inference::grpc_inference_service_server::GrpcInferenceServiceServer;
 
-/// Messdauer je Arm und Lastpunkt.
-const SECONDS: u64 = 10;
-
 /// Die Lastpunkte, an denen gemessen wird.
 ///
 /// Unterhalb, an und oberhalb der Saettigung. Der Knick liegt nach unseren
@@ -114,6 +111,12 @@ struct Row {
     governed: u64,
     direct_gap_ms: Option<u64>,
     governed_gap_ms: u64,
+    /// Abtastungen (Takte) hinter dem Promillewert; `None` ohne direkten Arm.
+    ///
+    /// Ohne sie ist 37 ‰ nicht von 37 ‰ zu unterscheiden: einer von 27
+    /// Takten oder 7 von 200. `vig autotune` bemisst daran seine Rauschschwelle.
+    direct_samples: Option<u64>,
+    governed_samples: u64,
 }
 
 fn main() {
@@ -132,11 +135,15 @@ async fn run() {
              Faehrt die Modelle dieser Konfiguration erst direkt gegen das\n\
              Backend und dann ueber den Governor, an mehreren Lastpunkten.\n\n\
              Umgebung:\n  \
-             VIG_FIT_SECONDS  Messdauer je Arm und Punkt (Vorgabe {SECONDS})\n  \
+             VIG_FIT_SECONDS  Messdauer je Arm und Punkt (Vorgabe: {} Takte des\n                   \
+             langsamsten geschuetzten Stroms, {} bis {} s)\n  \
              VIG_FIT_POINTS   Lastpunkte in Prozent (Vorgabe {POINTS:?})\n  \
              VIG_FIT_ARMS     both (Vorgabe) oder governed: nur der Governor-Arm,\n                   \
              eine Bewertung ohne Vergleich (vig autotune, Schritt tune)\n  \
-             VIG_FIT_JSON     Ergebnis zusaetzlich als JSON in diese Datei"
+             VIG_FIT_JSON     Ergebnis zusaetzlich als JSON in diese Datei",
+            vig_config::window::CYCLES,
+            vig_config::window::FLOOR_SECONDS,
+            vig_config::window::CAP_SECONDS
         );
         std::process::exit(2);
     };
@@ -157,7 +164,6 @@ async fn run() {
     }
     let base = Arc::new(config.resolve().expect("aufloesbar"));
 
-    let seconds = env_u64("VIG_FIT_SECONDS").unwrap_or(SECONDS);
     let points = std::env::var("VIG_FIT_POINTS").ok().map_or_else(
         || POINTS.to_vec(),
         |raw| {
@@ -166,6 +172,13 @@ async fn run() {
                 .collect()
         },
     );
+    // Das Fenster in Takten, nicht in Sekunden (`vig_config::window`): zehn
+    // Sekunden sind bei einer 370-ms-Periode 27 Takte, und ein verfehlter Takt
+    // ist dann schon 37 ‰.
+    let lowest = points.iter().copied().min().unwrap_or(100);
+    let seconds = env_u64("VIG_FIT_SECONDS")
+        .unwrap_or_else(|| vig_config::window::seconds(&config, lowest, false));
+    let slowest = vig_config::window::slowest_protected_period_ms(&config);
     let duration = Duration::from_secs(seconds);
 
     match arms {
@@ -181,8 +194,15 @@ async fn run() {
         base.model_names.len(),
         base.protected_utilization_permille() / 10
     );
+    let cycles = slowest.map_or_else(String::new, |period| {
+        format!(
+            " ({} Takte des langsamsten geschuetzten Stroms bei {lowest} %)",
+            vig_config::window::cycles_in(seconds, period * 100 / lowest.max(1))
+        )
+    });
     println!(
-        "Lastpunkte {points:?} % · {seconds} s je Arm und Punkt · Datenpfad Kopie im Request\n"
+        "Lastpunkte {points:?} % · {seconds} s je Arm und Punkt{cycles} · Datenpfad Kopie im \
+         Request\n"
     );
 
     // Fremde Rechenzeit statt `loadavg`: Ein Pixel 2 steht im Leerlauf bei
@@ -360,6 +380,8 @@ async fn run() {
                 governed: b.coverage.consumer_uncovered_permille(),
                 direct_gap_ms: a.map(|a| a.coverage.longest_gap_ns / 1_000_000),
                 governed_gap_ms: b.coverage.longest_gap_ns / 1_000_000,
+                direct_samples: a.map(|a| a.coverage.total),
+                governed_samples: b.coverage.total,
             });
         }
     }
@@ -511,6 +533,10 @@ fn as_json(
                 "governed_uncovered_permille": r.governed,
                 "direct_longest_gap_ms": r.direct_gap_ms,
                 "governed_longest_gap_ms": r.governed_gap_ms,
+                // Takte hinter dem Promillewert; `vig autotune` rechnet damit
+                // seine Rauschschwelle.
+                "direct_samples": r.direct_samples,
+                "governed_samples": r.governed_samples,
             })
         })
         .collect();
@@ -734,6 +760,8 @@ mod tests {
             governed,
             direct_gap_ms: Some(0),
             governed_gap_ms: 0,
+            direct_samples: Some(200),
+            governed_samples: 200,
         }
     }
 
@@ -753,6 +781,7 @@ mod tests {
         let governed_only = |load: u64, protected: bool, governed: u64| Row {
             direct: None,
             direct_gap_ms: None,
+            direct_samples: None,
             ..row(load, protected, 0, governed)
         };
         let rows = vec![
@@ -771,6 +800,8 @@ mod tests {
             assert!(cell["direct_uncovered_permille"].is_null(), "{cell}");
             assert!(cell["direct_longest_gap_ms"].is_null(), "{cell}");
             assert!(cell["governed_uncovered_permille"].is_u64(), "{cell}");
+            assert!(cell["direct_samples"].is_null(), "{cell}");
+            assert_eq!(cell["governed_samples"], 200, "{cell}");
         }
         let english = parsed["verdict_en"].as_str().unwrap();
         assert!(english.starts_with("Tuning evaluation"), "{english}");

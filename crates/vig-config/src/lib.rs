@@ -19,6 +19,7 @@
 pub mod error;
 pub mod manifest;
 pub mod schema;
+pub mod window;
 
 pub use error::{ConfigError, Located};
 pub use manifest::{

@@ -76,7 +76,7 @@ GATE=$TARGET/aarch64-unknown-linux-musl/release/gate-m3
 
 echo "== Schieben"
 adb shell mkdir -p $PHONE
-adb push "$SERVER" "$GATE" "$RUNTIME"/android-tflite/arm64/*.so $PHONE/ >/dev/null
+adb push "$SERVER" "$GATE" "$RUNTIME"/modelle/android-tflite/arm64/*.so $PHONE/ >/dev/null
 for m in "${MODELS[@]}"; do
   adb push "$RUNTIME/modelle/android-models/${m#*=}" $PHONE/ >/dev/null
 done

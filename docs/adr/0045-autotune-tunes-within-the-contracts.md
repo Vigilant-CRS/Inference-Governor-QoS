@@ -316,3 +316,45 @@ Schwelle abzuleiten.
   - Ob eine auf 100 bis 125 % Last eingestellte Fassung ueber Stunden traegt,
     sagt dieser Schritt so wenig wie der Rest von `autotune` — dafuer gibt es
     den Dauerlauf.
+
+## Nachtrag 15.09.2026 abends: Messfenster in Takten, Schwelle aus gezaehlten Takten
+
+### Befund
+
+Das feste Fenster von 10 s je Lastpunkt reichte auf dem Laptop und auf dem
+Telefon nicht. Der gesaettigte Pixel-2-Lauf (`vig-slots2-saturated.yaml`,
+Detektorperiode 370 ms) sah je Punkt 27 Detektortakte; ein verfehlter Takt
+sind dort 37 ‰. Die Suche behielt eine Marge von 100 mit 0 gegen 37 ‰ — null
+gegen **einen** Takt —, und die Bestaetigung verwarf sie (37 gegen 34 ‰, dann
+0 gegen 0 ‰). Auch das Urteil von `fit` („direkt 208 ‰, Governor 0 ‰") beruhte
+am 90-%-Punkt auf 24 Takten; 208 ‰ sind fuenf davon. Die feste Schwelle von
+5 ‰ war feiner als die Messung selbst.
+
+### Entscheidung
+
+- **Das Fenster wird in Takten bemessen** (`vig_config::window`): mindestens
+  200 Takte des langsamsten geschuetzten Stroms am niedrigsten Lastpunkt,
+  mindestens 10 s, hoechstens 180 s (`--quick`: 60 Takte, 5 bis 60 s). Bei 200
+  Takten ist ein Takt 5 ‰, so gross wie die kleinste zugelassene
+  Verbesserung. Dieselbe Regel gilt fuer `tune`, fuer `fit` und fuer `vig-fit`
+  ohne `VIG_FIT_SECONDS`. Laptop (33 ms): unveraendert 10 s. Pixel 2 (370 ms):
+  74 s je Bewertungspunkt, 83 s je Arm in `fit`.
+- **`vig-fit` schreibt die Takte je Zelle** (`governed_samples`,
+  `direct_samples`).
+- **Die Schwelle rechnet in Takten**, wo sie bekannt sind: Ein Vorsprung muss
+  mindestens `⌈2·√(k₁ + k₂)⌉` Takte ausmachen (`k` die verfehlten Takte beider
+  Laeufe), mindestens 2 Takte und nie weniger als 5 ‰ (geschuetzt) bzw. 10 ‰
+  (nachrangig). Gerechnet wird mit der Zelle mit den wenigsten Takten. Ohne
+  Takte — ein aelterer Zustand — gilt die bisherige Regel mit einem Zehntel.
+- **Die Bestaetigung bleibt.** Die Zaehlstatistik ist eine Untergrenze der
+  Streuung: Verfehlte Takte kommen in Schueben, wenn ein langer Auftrag mehrere
+  Perioden blockiert.
+
+### Konsequenzen
+
+- Ein Telefonlauf dauert laenger: `tune` auf dem Pixel 2 geschaetzt rund 39
+  statt 7 Minuten, `fit` rund 12 statt 2. Die Ansage vor dem Start rechnet mit
+  der Periode aus der Konfiguration und warnt, wenn die halbe Stunde nicht
+  haelt. Auf dem Laptop aendert sich nichts.
+- Telefonzahlen aus 10-s-Fenstern bleiben in der Validierung stehen, sind dort
+  aber als solche gekennzeichnet (docs/benchmark/validierung-autotune.md).

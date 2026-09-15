@@ -48,8 +48,17 @@
 //! * **Vor dem Schreiben** muss eine behaltene Einstellung sich bestaetigen:
 //!   unverstellt und eingestellt noch einmal, abwechselnd, in zwei Paaren,
 //!   und in **jedem** Paar muss die eingestellte nach derselben Regel
-//!   gewinnen. Ein einzelnes 10-s-Fenster auf einer gesaettigten Maschine
+//!   gewinnen. Ein einzelnes Fenster auf einer gesaettigten Maschine
 //!   streut weiter als der Vorsprung, den die Suche behalten hatte.
+//!
+//! ## Messfenster und Rauschschwelle
+//!
+//! Ein festes 10-s-Fenster sah auf dem Pixel 2 (15.09., gesaettigt) 27
+//! Detektortakte. Die Suche behielt 0 gegen 37 ‰ — null gegen einen Takt —,
+//! und die Bestaetigung verwarf es. Seitdem misst jede Bewertung mindestens
+//! 200 Takte des langsamsten geschuetzten Stroms ([`vig_config::window`]),
+//! und die Schwelle rechnet in gezaehlten Takten statt in festen Promille
+//! ([`min_gain`]).
 
 use super::{Outcome, Steps};
 use std::collections::BTreeSet;
@@ -79,8 +88,24 @@ const PROTECTED_MIN_GAIN_PERMILLE: u64 = 5;
 /// Umstellung nur dann den Ausschlag geben, wenn der Gewinn deutlich ist.
 const BACKGROUND_MIN_GAIN_PERMILLE: u64 = 10;
 
-/// Der relative Teil der Rauschschwelle: ein Zehntel des bisher besten Werts.
+/// Der relative Teil der Rauschschwelle, wo die Takte unbekannt sind: ein
+/// Zehntel des bisher besten Werts. Nur noch fuer Bewertungen ohne
+/// `governed_samples` — aus einem aelteren `vig-fit` oder einem gespeicherten
+/// Zustand.
 const RELATIVE_GAIN_DIVISOR: u64 = 10;
+
+/// Standardabweichungen, um die ein Vorsprung ueber dem Zufall liegen muss.
+///
+/// Gezaehlt wird wie bei seltenen Ereignissen: `k` verfehlte Takte streuen um
+/// etwa `√k`, die Differenz zweier Laeufe um `√(k₁ + k₂)`. Das ist eine
+/// **Untergrenze** der Streuung — verfehlte Takte kommen in Schueben, wenn ein
+/// langer Auftrag mehrere Perioden blockiert —, deshalb bleibt die
+/// Bestaetigung in Paaren dahinter bestehen.
+const NOISE_SIGMAS: u64 = 2;
+
+/// So viele Takte muss ein Vorsprung mindestens ausmachen: null gegen einen
+/// verfehlten Takt ist nie ein Ergebnis.
+const MIN_GAIN_CYCLES: u64 = 2;
 
 /// Um so viel wird die Sicherheitsmarge je Versuch verschoben, in Prozent.
 ///
@@ -126,26 +151,69 @@ const fn eval_point_count(quick: bool) -> u64 {
     if quick { 2 } else { 3 }
 }
 
-/// Messdauer je Lastpunkt einer Bewertung, in Sekunden.
-pub(crate) const fn eval_seconds(quick: bool) -> u64 {
-    if quick { 5 } else { 10 }
+/// Der niedrigste Lastpunkt einer Bewertung — dort ist die Periode am
+/// laengsten, und dort muss das Fenster reichen.
+const fn eval_lowest_percent(quick: bool) -> u64 {
+    if quick { 110 } else { 100 }
+}
+
+/// Lastpunkte des Schritts `fit`, mit beiden Armen.
+pub(crate) const FIT_POINTS: &str = "90,100,110,125";
+
+/// Der niedrigste Punkt aus [`FIT_POINTS`].
+const FIT_LOWEST_PERCENT: u64 = 90;
+
+/// Wie viele Punkte [`FIT_POINTS`] nennt.
+const FIT_POINT_COUNT: u64 = 4;
+
+/// Aufwand eines `fit`-Laufs jenseits der Messfenster, in Sekunden: je
+/// Lastpunkt ein Governor-Start, dazu die Fremdlastfenster.
+const FIT_OVERHEAD_SECONDS: u64 = 70;
+
+/// Die laengste geschuetzte Periode einer Konfigurationsdatei; `None`, wo sie
+/// nicht lesbar ist. Dann gilt die Untergrenze des Fensters, und `vig-fit`
+/// lehnt eine unlesbare Datei ohnehin ab.
+pub(crate) fn slowest_period_of(config: &Path) -> Option<u64> {
+    let text = std::fs::read_to_string(config).ok()?;
+    let parsed = Config::from_yaml(&text).ok()?;
+    vig_config::window::slowest_protected_period_ms(&parsed)
+}
+
+/// Messdauer je Lastpunkt einer Bewertung, in Sekunden
+/// ([`vig_config::window`]).
+pub(crate) fn eval_seconds(period_ms: Option<u64>, quick: bool) -> u64 {
+    vig_config::window::seconds_for(period_ms, eval_lowest_percent(quick), quick)
+}
+
+/// Messdauer je Arm und Lastpunkt des Schritts `fit`, in Sekunden.
+pub(crate) fn fit_seconds(period_ms: Option<u64>, quick: bool) -> u64 {
+    vig_config::window::seconds_for(period_ms, FIT_LOWEST_PERCENT, quick)
 }
 
 /// Grobe Dauer des Schritts in Sekunden, fuer die Schaetzung vor dem Start.
 ///
-/// Anders als der Messschritt haengt sie kaum an der Hardware: Die Messfenster
-/// von `vig-fit` sind feste Wanduhrzeit. Was sie nicht kennt, ist die Zahl der
+/// Die Messfenster von `vig-fit` sind Wanduhrzeit, bemessen an der
+/// langsamsten geschuetzten Periode — auf dem Laptop 10 s je Punkt, auf dem
+/// Pixel 2 74 s. Was die Schaetzung nicht kennt, ist die Zahl der
 /// Stellgroessen, die tatsaechlich versucht werden — sechs Bewertungen sind
 /// der uebliche Fall —, und ob etwas behalten wird. Gerechnet wird, als waere
 /// es so: dann kommen die vier Bewertungen der Bestaetigung dazu.
-pub(crate) const fn rough_seconds(quick: bool) -> u64 {
+pub(crate) fn rough_seconds(quick: bool, period_ms: Option<u64>) -> u64 {
     TYPICAL_EVALUATIONS
         .saturating_add(CONFIRMATION_EVALUATIONS)
         .saturating_mul(
             eval_point_count(quick)
-                .saturating_mul(eval_seconds(quick))
+                .saturating_mul(eval_seconds(period_ms, quick))
                 .saturating_add(OVERHEAD_SECONDS_PER_EVALUATION),
         )
+}
+
+/// Grobe Dauer des Schritts `fit`: zwei Arme an jedem Lastpunkt.
+pub(crate) fn fit_rough_seconds(quick: bool, period_ms: Option<u64>) -> u64 {
+    FIT_POINT_COUNT
+        .saturating_mul(2)
+        .saturating_mul(fit_seconds(period_ms, quick))
+        .saturating_add(if quick { 20 } else { FIT_OVERHEAD_SECONDS })
 }
 
 /// Ein Strom an einem Lastpunkt, unter dem Governor.
@@ -155,6 +223,8 @@ pub(crate) struct StreamMiss {
     pub(crate) protected: bool,
     /// Unabgedeckte Abtastungen aus Verbrauchersicht, je Promille.
     pub(crate) governed_permille: u64,
+    /// Abtastungen (Takte) hinter dem Promillewert; `0` heisst unbekannt.
+    pub(crate) samples: u64,
 }
 
 /// Ein Lastpunkt einer Bewertung.
@@ -183,13 +253,27 @@ impl Evaluation {
     /// 1000 ‰, weil er neben einer 33-ms-Periode nie passt (ADR-0012). Als
     /// Maximum verdeckte er jede Verbesserung der anderen nachrangigen Stroeme
     /// — das Tuning haette dort nie etwas gewinnen koennen.
+    ///
+    /// `protected_samples` und `background_samples` sind die wenigsten Takte
+    /// einer Zelle der jeweiligen Klasse — die Rauschschwelle rechnet mit der
+    /// unsichersten Zelle; `0`, wo sie unbekannt sind.
     pub(crate) fn objective(&self) -> Option<Objective> {
         if self.points.is_empty() {
             return None;
         }
         let mut protected_worst = 0_u64;
         let mut background_sum = 0_u64;
+        let mut protected_samples: Option<u64> = None;
+        let mut background_samples: Option<u64> = None;
         for point in &self.points {
+            for stream in &point.streams {
+                let fewest = if stream.protected {
+                    &mut protected_samples
+                } else {
+                    &mut background_samples
+                };
+                *fewest = Some(fewest.map_or(stream.samples, |n| n.min(stream.samples)));
+            }
             let protected = point
                 .streams
                 .iter()
@@ -212,7 +296,9 @@ impl Evaluation {
         let count = u64::try_from(self.points.len()).unwrap_or(u64::MAX);
         Some(Objective {
             protected_worst,
+            protected_samples: protected_samples.unwrap_or(0),
             background_mean: background_sum.checked_div(count).unwrap_or(0),
+            background_samples: background_samples.unwrap_or(0),
         })
     }
 
@@ -268,6 +354,12 @@ pub(crate) fn evaluation_from_fit_json(parsed: &serde_json::Value) -> Result<Eva
                 .get("governed_uncovered_permille")
                 .and_then(serde_json::Value::as_u64)
                 .ok_or_else(incomplete)?,
+            // Fehlt bei einem `vig-fit` vor den gezaehlten Takten; dann gilt
+            // die alte Schwelle, nicht „null Takte".
+            samples: cell
+                .get("governed_samples")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
         };
         match points.iter_mut().find(|p| p.load_percent == load_percent) {
             Some(point) => point.streams.push(miss),
@@ -312,10 +404,14 @@ impl Feasibility {
 }
 
 /// Die Zielgroesse einer Bewertung, in Promille.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Objective {
     pub(crate) protected_worst: u64,
+    /// Die wenigsten Takte einer geschuetzten Zelle; `0` heisst unbekannt.
+    pub(crate) protected_samples: u64,
     pub(crate) background_mean: u64,
+    /// Die wenigsten Takte einer nachrangigen Zelle; `0` heisst unbekannt.
+    pub(crate) background_samples: u64,
 }
 
 impl Objective {
@@ -370,14 +466,58 @@ impl Confirmation {
     }
 }
 
+/// Die Takte, auf denen der Vergleich zweier Werte beruht: die wenigeren;
+/// `0`, wenn eine Seite sie nicht kennt.
+fn common_samples(a: u64, b: u64) -> u64 {
+    if a == 0 || b == 0 { 0 } else { a.min(b) }
+}
+
+/// Der kleinste Vorsprung in Promille, der nicht Zufall sein kann.
+///
+/// Mit gezaehlten Takten: mindestens [`NOISE_SIGMAS`] Standardabweichungen der
+/// verfehlten Takte beider Laeufe, mindestens [`MIN_GAIN_CYCLES`] Takte, und
+/// nie weniger als `floor`. Ohne Takte die alte Regel: `floor` oder ein
+/// Zehntel des bisher besten Werts.
+fn min_gain(floor: u64, best: u64, candidate: u64, samples: u64) -> u64 {
+    if samples == 0 {
+        return floor.max(best.checked_div(RELATIVE_GAIN_DIVISOR).unwrap_or(0));
+    }
+    // Aufgerundet: lieber einen Takt zu viel angenommen als Streuung behalten.
+    let misses = |permille: u64| {
+        permille
+            .saturating_mul(samples)
+            .saturating_add(999)
+            .checked_div(1000)
+            .unwrap_or(0)
+    };
+    // ⌈σ·√k⌉ = ⌈√(σ²·k)⌉, ganzzahlig.
+    let squared = NOISE_SIGMAS
+        .saturating_mul(NOISE_SIGMAS)
+        .saturating_mul(misses(best).saturating_add(misses(candidate)));
+    let root = squared.isqrt();
+    let spread = if root.saturating_mul(root) < squared {
+        root.saturating_add(1)
+    } else {
+        root
+    };
+    let cycles = spread.max(MIN_GAIN_CYCLES);
+    floor.max(
+        cycles
+            .saturating_mul(1000)
+            .saturating_add(samples.saturating_sub(1))
+            .checked_div(samples)
+            .unwrap_or(u64::MAX),
+    )
+}
+
 /// Behalten oder nicht — mit Begruendung in beiden Faellen.
 ///
 /// Behalten wird eine Fassung, wenn sie
 ///
-/// * die geschuetzten Stroeme um mindestens `max(5 ‰, ein Zehntel)` des
-///   bisher besten Werts besser versorgt, **oder**
+/// * die geschuetzten Stroeme um mindestens [`min_gain`] mit 5 ‰ als
+///   Untergrenze besser versorgt, **oder**
 /// * sie nicht schlechter versorgt und die nachrangigen Stroeme um mindestens
-///   `max(10 ‰, ein Zehntel)` besser.
+///   [`min_gain`] mit 10 ‰ als Untergrenze besser.
 ///
 /// Nie behalten wird eine Fassung, die fuer die geschuetzten Stroeme
 /// schlechter ist als die unverstellte. Aus den beiden Regeln folgt das
@@ -399,10 +539,11 @@ pub(crate) fn decide(
             candidate.protected_worst, untuned.protected_worst
         ));
     }
-    let protected_gain = PROTECTED_MIN_GAIN_PERMILLE.max(
-        best.protected_worst
-            .checked_div(RELATIVE_GAIN_DIVISOR)
-            .unwrap_or(0),
+    let protected_gain = min_gain(
+        PROTECTED_MIN_GAIN_PERMILLE,
+        best.protected_worst,
+        candidate.protected_worst,
+        common_samples(best.protected_samples, candidate.protected_samples),
     );
     if let Some(limit) = best.protected_worst.checked_sub(protected_gain)
         && candidate.protected_worst <= limit
@@ -418,10 +559,11 @@ pub(crate) fn decide(
             candidate.protected_worst, best.protected_worst
         ));
     }
-    let background_gain = BACKGROUND_MIN_GAIN_PERMILLE.max(
-        best.background_mean
-            .checked_div(RELATIVE_GAIN_DIVISOR)
-            .unwrap_or(0),
+    let background_gain = min_gain(
+        BACKGROUND_MIN_GAIN_PERMILLE,
+        best.background_mean,
+        candidate.background_mean,
+        common_samples(best.background_samples, candidate.background_samples),
     );
     if let Some(limit) = best.background_mean.checked_sub(background_gain)
         && candidate.background_mean <= limit
@@ -501,6 +643,9 @@ pub(crate) struct Tuning {
     pub(crate) withheld: Option<String>,
     /// Die Bestaetigung; `None`, wenn nichts behalten wurde.
     pub(crate) confirmation: Option<Confirmation>,
+    /// Sekunden je Lastpunkt einer Bewertung; `0` in einem Zustand von vor
+    /// den bemessenen Fenstern.
+    pub(crate) window_seconds: u64,
 }
 
 impl Tuning {
@@ -1029,6 +1174,10 @@ async fn search<S: Steps + ?Sized>(
         ));
     };
     let expected_cells = baseline.cells();
+    let window_seconds = eval_seconds(
+        vig_config::window::slowest_protected_period_ms(&untuned),
+        quick,
+    );
 
     let mut best = untuned.clone();
     let mut best_objective = untuned_objective;
@@ -1159,6 +1308,7 @@ async fn search<S: Steps + ?Sized>(
         applied,
         withheld,
         confirmation,
+        window_seconds,
     })
 }
 
@@ -1169,11 +1319,23 @@ fn cell(text: &str) -> String {
 
 /// Wie gesucht, entschieden und bestaetigt wurde — mit den Schwellen, die der
 /// Code tatsaechlich benutzt, und nicht mit abgeschriebenen Zahlen.
-fn method_markdown(out: &mut String) {
+fn method_markdown(tuning: &Tuning, out: &mut String) {
+    let window = if tuning.window_seconds == 0 {
+        String::new()
+    } else {
+        format!(
+            ", {} s per load point — sized to at least {} cycles of the slowest protected \
+             stream (at most {} s), because misses are counted per cycle and a short window \
+             cannot tell one missed cycle from an effect",
+            tuning.window_seconds,
+            vig_config::window::CYCLES,
+            vig_config::window::CAP_SECONDS
+        )
+    };
     let _ = write!(
         out,
         "\nEvery setting ran through `vig-fit` with the governor arm only, at {} % load ({} % \
-         with `--quick`), and the numbers are uncovered samples from the consumer's view. \
+         with `--quick`){window}, and the numbers are uncovered samples from the consumer's view. \
          *Protected worst* is the worst protected stream at the worst load point; \
          *lower-priority mean* is the mean over the lower-priority streams per load point, \
          averaged over the load points. Only the governor's own settings were tried — \
@@ -1181,9 +1343,11 @@ fn method_markdown(out: &mut String) {
          over the settings in a fixed order (coordinate descent): a setting is not tried again \
          after a later one changed, so this is the best of the settings tried, not an optimum. \
          A setting is kept only if it beats the best one so far beyond the noise threshold — \
-         the protected worst by at least {} ‰ or a tenth, whichever is larger, or, with the \
-         protected streams no worse, the lower-priority mean by at least {} ‰ or a tenth. \
-         Nothing worse for the protected streams than the untuned configuration is ever kept. \
+         the protected worst by at least {} ‰, or, with the protected streams no worse, the \
+         lower-priority mean by at least {} ‰; in both cases also by at least {} standard \
+         deviations of the missed cycles counted in both runs (the square root of their sum), \
+         and never by fewer than {} cycles. Misses come in bursts, so this is a lower bound on \
+         the scatter, which is why the confirmation below still runs. Nothing worse for the protected streams than the untuned configuration is ever kept. \
          A kept setting is written only if it also holds up in back-to-back confirmation: the \
          untuned and the tuned configuration run again, interleaved, in {} pairs, and the tuned \
          one must beat that pair's untuned one by the same rule in every pair — one measuring \
@@ -1196,6 +1360,8 @@ fn method_markdown(out: &mut String) {
         eval_points(true),
         PROTECTED_MIN_GAIN_PERMILLE,
         BACKGROUND_MIN_GAIN_PERMILLE,
+        NOISE_SIGMAS,
+        MIN_GAIN_CYCLES,
         CONFIRMATION_PAIRS
     );
 }
@@ -1239,7 +1405,7 @@ pub(crate) fn markdown(tuning: &Tuning, out: &mut String) {
             );
         }
     }
-    method_markdown(out);
+    method_markdown(tuning, out);
     out.push_str(
         "| # | Setting tried | Differs from the measured configuration | Protected worst ‰ | \
          Lower-priority mean ‰ | Decision |\n|---:|---|---|---:|---:|---|\n",
@@ -1331,7 +1497,9 @@ fn objective_json(objective: Option<Objective>) -> serde_json::Value {
     objective.map_or(serde_json::Value::Null, |o| {
         serde_json::json!({
             "protected_worst_permille": o.protected_worst,
+            "protected_samples": o.protected_samples,
             "background_mean_permille": o.background_mean,
+            "background_samples": o.background_samples,
         })
     })
 }
@@ -1344,6 +1512,14 @@ fn objective_from_json(value: &serde_json::Value) -> Option<Objective> {
         background_mean: value
             .get("background_mean_permille")
             .and_then(serde_json::Value::as_u64)?,
+        protected_samples: value
+            .get("protected_samples")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        background_samples: value
+            .get("background_samples")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
     })
 }
 
@@ -1369,8 +1545,13 @@ pub(crate) fn to_json(tuning: &Tuning) -> serde_json::Value {
         "noise_threshold": {
             "protected_min_gain_permille": PROTECTED_MIN_GAIN_PERMILLE,
             "background_min_gain_permille": BACKGROUND_MIN_GAIN_PERMILLE,
+            "sigmas": NOISE_SIGMAS,
+            "min_gain_cycles": MIN_GAIN_CYCLES,
+            // Nur ohne gezaehlte Takte.
             "relative_divisor": RELATIVE_GAIN_DIVISOR,
         },
+        "window_seconds": tuning.window_seconds,
+        "window_min_cycles": vig_config::window::CYCLES,
         "untuned": objective_json(Some(tuning.untuned)),
         "tuned": objective_json(Some(tuning.tuned)),
         "improved": tuning.improved(),
@@ -1453,13 +1634,40 @@ pub(crate) fn from_json(value: &serde_json::Value) -> Option<Tuning> {
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned),
         confirmation: value.get("confirmation").and_then(confirmation_from_json),
+        window_seconds: value
+            .get("window_seconds")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
     })
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::{Evaluation, LoadPoint, StreamMiss};
+    use super::{Evaluation, LoadPoint, Objective, StreamMiss, decide};
+
+    /// Mit gezaehlten Takten: null gegen einen verfehlten Takt ist kein
+    /// Gewinn, null gegen sieben von 200 schon.
+    #[test]
+    fn the_noise_threshold_counts_cycles() {
+        let o = |protected_worst, samples| Objective {
+            protected_worst,
+            protected_samples: samples,
+            background_mean: 100,
+            background_samples: samples,
+        };
+        // Pixel 2 am 15.09.: 27 Takte je Fenster, 37 ‰ ist ein Takt.
+        assert!(decide(o(0, 27), o(37, 27), o(37, 27)).is_err());
+        // 200 Takte: 35 ‰ sind sieben; ⌈2·√7⌉ = 6 Takte = 30 ‰ reichen.
+        assert!(decide(o(0, 200), o(35, 200), o(35, 200)).is_ok());
+        // Drei gegen null: ⌈2·√3⌉ = 4 Takte waeren noetig.
+        assert!(decide(o(0, 200), o(15, 200), o(15, 200)).is_err());
+        // Die unsicherere Seite zaehlt: 27 Takte auf einer Seite genuegen nicht.
+        assert!(decide(o(0, 200), o(37, 27), o(37, 27)).is_err());
+        // Ohne Takte die alte Regel: max(5 ‰, ein Zehntel).
+        assert!(decide(o(35, 0), o(40, 0), o(40, 0)).is_ok());
+        assert!(decide(o(36, 0), o(40, 0), o(40, 0)).is_err());
+    }
 
     /// Ein unerfuellbarer nachrangiger Strom darf keine Verbesserung verdecken.
     ///
@@ -1476,16 +1684,19 @@ mod tests {
                     stream: "detector".to_owned(),
                     protected: true,
                     governed_permille: 0,
+                    samples: 0,
                 },
                 StreamMiss {
                     stream: "pose".to_owned(),
                     protected: false,
                     governed_permille: pose,
+                    samples: 0,
                 },
                 StreamMiss {
                     stream: "vlm".to_owned(),
                     protected: false,
                     governed_permille: 1000,
+                    samples: 0,
                 },
             ],
         };

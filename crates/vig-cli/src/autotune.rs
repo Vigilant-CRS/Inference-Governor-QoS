@@ -154,18 +154,12 @@ impl Step {
     ///
     /// Bewusst grob und eher zu hoch: Wer eine halbe Stunde einplant und nach
     /// zwanzig Minuten fertig ist, ist zufrieden; umgekehrt nicht.
-    const fn rough_seconds(self, quick: bool, shape: RunShape) -> u64 {
+    fn rough_seconds(self, quick: bool, shape: RunShape) -> u64 {
         match self {
             Self::Discover => 5,
             Self::Measure => shape.measure_seconds(quick),
-            Self::Tune => tune::rough_seconds(quick),
-            Self::Fit => {
-                if quick {
-                    60
-                } else {
-                    150
-                }
-            }
+            Self::Tune => tune::rough_seconds(quick, shape.slowest_protected_period_ms),
+            Self::Fit => tune::fit_rough_seconds(quick, shape.slowest_protected_period_ms),
             Self::Check => 10,
         }
     }
@@ -186,16 +180,21 @@ pub(crate) struct RunShape {
     pub(crate) slots: u64,
     /// Proben je Messreihe.
     pub(crate) samples: u64,
+    /// Die laengste geschuetzte Periode in Millisekunden; sie bemisst die
+    /// Fenster von `tune` und `fit` (`vig_config::window`).
+    pub(crate) slowest_protected_period_ms: Option<u64>,
 }
 
 impl RunShape {
     /// Die Groesse, mit der dieses Werkzeug validiert wurde
     /// (`docs/benchmark/validierung-autotune.md`): vier Modelle, zwei Slots,
-    /// 200 Proben. Sie gilt, solange die Konfiguration nicht lesbar ist.
+    /// 200 Proben, ein 33-ms-Detektor. Sie gilt, solange die Konfiguration
+    /// nicht lesbar ist.
     pub(crate) const REFERENCE: Self = Self {
         models: 4,
         slots: 2,
         samples: 200,
+        slowest_protected_period_ms: Some(33),
     };
 
     /// Messzellen: jedes Modell solo, dazu jedes geordnete Paar.
@@ -1142,7 +1141,10 @@ impl Steps for Live {
                 ));
             }
         }
-        let seconds = if quick { "5" } else { "10" };
+        // Das Fenster in Takten des langsamsten geschuetzten Stroms: Auf dem
+        // Pixel 2 waren zehn Sekunden am 90-%-Punkt 24 Detektortakte, und das
+        // Urteil „208 ‰" waren fuenf davon.
+        let seconds = tune::fit_seconds(tune::slowest_period_of(config), quick).to_string();
         // `tokio::process` und nicht `std::process`: `vig-fit` laeuft ein bis
         // zwei Minuten. Ein blockierendes `status()` haelt solange einen
         // Worker der Laufzeit fest — auf einem Telefon mit wenigen Kernen ist
@@ -1150,7 +1152,8 @@ impl Steps for Live {
         let status = tokio::process::Command::new(&binary)
             .arg(config)
             .env("VIG_FIT_JSON", &json_path)
-            .env("VIG_FIT_SECONDS", seconds)
+            .env("VIG_FIT_SECONDS", &seconds)
+            .env("VIG_FIT_POINTS", tune::FIT_POINTS)
             .status()
             .await
             .map_err(|e| format!("{} could not be started: {e}", binary.display()))?;
@@ -1218,7 +1221,10 @@ impl Steps for Live {
             .arg(config)
             .env("VIG_FIT_ARMS", "governed")
             .env("VIG_FIT_JSON", &json_path)
-            .env("VIG_FIT_SECONDS", tune::eval_seconds(quick).to_string())
+            .env(
+                "VIG_FIT_SECONDS",
+                tune::eval_seconds(tune::slowest_period_of(config), quick).to_string(),
+            )
             .env("VIG_FIT_POINTS", tune::eval_points(quick))
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::piped())
@@ -1411,6 +1417,7 @@ fn run_shape(config: &Path, samples: usize) -> RunShape {
         models: u64::try_from(parsed.models.len()).unwrap_or(RunShape::REFERENCE.models),
         slots: u64::try_from(parsed.backend.slots.max(1)).unwrap_or(RunShape::REFERENCE.slots),
         samples,
+        slowest_protected_period_ms: vig_config::window::slowest_protected_period_ms(&parsed),
     }
 }
 
@@ -1916,11 +1923,13 @@ models:
                     stream: "detector".to_owned(),
                     protected: true,
                     governed_permille: protected,
+                    samples: 0,
                 },
                 StreamMiss {
                     stream: "tracker".to_owned(),
                     protected: false,
                     governed_permille: background,
+                    samples: 0,
                 },
             ],
         };
@@ -2376,7 +2385,8 @@ models:
             tuning.untuned,
             Objective {
                 protected_worst: 40,
-                background_mean: 100
+                background_mean: 100,
+                ..Objective::default()
             }
         );
         assert_eq!(tuning.tuned.protected_worst, 10);
@@ -2694,6 +2704,7 @@ models:
         let o = |protected_worst, background_mean| Objective {
             protected_worst,
             background_mean,
+            ..Objective::default()
         };
         // Geschuetzt: max(5 ‰, ein Zehntel).
         assert!(decide(o(35, 100), o(40, 100), o(40, 100)).is_ok());
@@ -2831,6 +2842,8 @@ models:
                 protected_worst: 30,
                 // (40 + 91) / 2, abgerundet.
                 background_mean: 65,
+                // Ohne `governed_samples` im JSON: unbekannt, nicht null Takte.
+                ..Objective::default()
             })
         );
         let empty = serde_json::json!({ "cells": [], "conclusive": false });
@@ -2856,19 +2869,30 @@ models:
     /// Sekunden, die `Live::evaluate` an `vig-fit` gibt.
     #[test]
     fn the_tune_estimate_matches_what_is_run() {
-        for quick in [false, true] {
-            let points = u64::try_from(super::tune::eval_points(quick).split(',').count()).unwrap();
-            let per_evaluation = points
-                .checked_mul(super::tune::eval_seconds(quick))
-                .unwrap();
-            assert!(
-                super::tune::rough_seconds(quick) >= per_evaluation.checked_mul(10).unwrap(),
-                "sechs Bewertungen der Suche und vier der Bestaetigung passen nicht in die \
-                 Schaetzung"
-            );
+        for period in [Some(33), Some(370), None] {
+            for quick in [false, true] {
+                let points =
+                    u64::try_from(super::tune::eval_points(quick).split(',').count()).unwrap();
+                let per_evaluation = points
+                    .checked_mul(super::tune::eval_seconds(period, quick))
+                    .unwrap();
+                assert!(
+                    super::tune::rough_seconds(quick, period)
+                        >= per_evaluation.checked_mul(10).unwrap(),
+                    "sechs Bewertungen der Suche und vier der Bestaetigung passen nicht in die \
+                     Schaetzung"
+                );
+            }
         }
-        assert_eq!(super::tune::rough_seconds(false), 400);
-        assert_eq!(super::tune::rough_seconds(true), 200);
+        // Die Referenz mit 33-ms-Detektor bleibt, wo sie war.
+        assert_eq!(super::tune::rough_seconds(false, Some(33)), 400);
+        assert_eq!(super::tune::rough_seconds(true, Some(33)), 200);
+        assert_eq!(super::tune::fit_rough_seconds(false, Some(33)), 150);
+        assert_eq!(super::tune::fit_rough_seconds(true, Some(33)), 60);
+        // Das Pixel 2 mit 370 ms: 74 s je Punkt statt 10, zehn Bewertungen.
+        assert_eq!(super::tune::eval_seconds(Some(370), false), 74);
+        assert_eq!(super::tune::rough_seconds(false, Some(370)), 2320);
+        assert!(super::tune::fit_rough_seconds(false, Some(370)) > 640);
     }
 
     /// Und sie muss reissen koennen — sonst ist die Warnung toter Code.
@@ -2885,6 +2909,7 @@ models:
             models: 16,
             slots: 4,
             samples: 500,
+            slowest_protected_period_ms: Some(33),
         };
         assert!(
             estimate_seconds(&Step::ALL, false, large)
@@ -2906,6 +2931,7 @@ models:
             models: 8,
             slots: 1,
             samples: 200,
+            slowest_protected_period_ms: Some(33),
         };
         let two = RunShape { slots: 2, ..one };
         assert_eq!(one.cells(), 8, "acht Solomessungen, keine Paare");
