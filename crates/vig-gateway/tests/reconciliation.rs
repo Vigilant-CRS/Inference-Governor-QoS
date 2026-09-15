@@ -205,6 +205,23 @@ async fn await_baselines(handle: &vig_gateway::Handle) {
     );
 }
 
+/// Wartet, bis das Backend nach `before` Abfragen noch einmal gezaehlt wurde.
+///
+/// Erst eine Zaehlermeldung **nach** dem Dispatch belegt, dass die alte
+/// Epoche zur Zeit des Aufrufs noch lief (ADR-0042, R04). Faellt der Zaehler
+/// vorher, sieht der Actor genau den Ablauf eines Resets vor dem Dispatch
+/// und sperrt den Anspruch zu Recht. Der Poller meldet in Lesereihenfolge:
+/// ist die Abfrage gezaehlt, kommt ihr alter Stand vor jedem spaeteren an.
+async fn counter_read_since(fake: &FakeExecutor, before: u64) {
+    for _ in 0..80 {
+        if fake.evidence_calls() > before {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("der Poller hat den Zaehler nach dem Abbruch nie gelesen");
+}
+
 // ---------------------------------------------------------------------------
 // R01: ein Neustart belegt das Ende der Aufrufe, die mit ihm starben
 // ---------------------------------------------------------------------------
@@ -225,12 +242,14 @@ async fn a_restart_ends_only_the_calls_that_died_with_it() {
     fake.expect_slow("detector_main", Duration::from_millis(1_500));
     let handle = actor_with(ONE_MODEL, &[(ENDPOINT_A, &fake)]);
     await_baselines(&handle).await;
+    let polls = fake.evidence_calls();
 
     assert!(
         !submit(&handle, 1, 0, "detector").await,
         "der Aufruf bricht ab"
     );
     assert_eq!(quarantined(&handle).await, 1);
+    counter_read_since(&fake, polls).await;
 
     // Das Backend startet neu: der Zaehler faellt. Der abgebrochene Aufruf
     // lief im alten Prozess, und den gibt es nicht mehr.
@@ -279,8 +298,10 @@ async fn after_a_restart_new_work_is_proven_by_the_new_counter() {
     fake.expect_error("detector_main", aborted());
     let handle = actor_with(ONE_MODEL, &[(ENDPOINT_A, &fake)]);
     await_baselines(&handle).await;
+    let polls = fake.evidence_calls();
 
     assert!(!submit(&handle, 1, 0, "detector").await);
+    counter_read_since(&fake, polls).await;
     fake.set_evidence(0);
     assert!(settles_at(&handle, 0, Duration::from_secs(2)).await);
 
@@ -316,11 +337,13 @@ async fn an_open_call_across_a_restart_counts_in_the_new_epoch() {
     fake.expect_error("detector_main", aborted());
     let handle = actor_with(ONE_MODEL, &[(ENDPOINT_A, &fake)]);
     await_baselines(&handle).await;
+    let polls = fake.evidence_calls();
 
     // Auftrag 1: Timeout, Verbindung offen. Auftrag 2: abgebrochen.
     assert!(!submit(&handle, 1, 0, "detector").await);
     assert!(!submit(&handle, 2, 0, "detector").await);
     assert_eq!(quarantined(&handle).await, 2);
+    counter_read_since(&fake, polls).await;
 
     // Reset: Auftrag 2 starb mit dem alten Prozess, Auftrag 1 wartet.
     fake.set_evidence(0);

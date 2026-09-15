@@ -315,7 +315,7 @@ async fn run_stream(
         tokio::spawn(async move {
             let _permit = permit;
             let age = capture.elapsed();
-            let request = build_request(
+            let Some(request) = build_request(
                 model,
                 &id,
                 frame,
@@ -323,7 +323,12 @@ async fn run_stream(
                 age,
                 input.as_ref(),
                 text.as_ref(),
-            );
+            ) else {
+                // Kein gueltiger `BYTES`-Rahmen (Prompt ab 4 GiB): nicht
+                // gesendet, aber gezaehlt.
+                state.rejected.fetch_add(1, Ordering::Relaxed);
+                return;
+            };
             state.sent.fetch_add(1, Ordering::Relaxed);
 
             match client.model_infer(request).await {
@@ -414,7 +419,7 @@ async fn run_stream_pump(
 
         let id = format!("{}:{frame}", stream.name);
         let age = capture.elapsed();
-        let request = build_request(
+        let Some(request) = build_request(
             stream.model,
             &id,
             frame,
@@ -422,7 +427,12 @@ async fn run_stream_pump(
             age,
             stream.input.as_ref(),
             stream.text.as_ref(),
-        );
+        ) else {
+            // Kein gueltiger `BYTES`-Rahmen (Prompt ab 4 GiB): nicht gesendet,
+            // aber gezaehlt.
+            state.rejected.fetch_add(1, Ordering::Relaxed);
+            continue;
+        };
         state.sent.fetch_add(1, Ordering::Relaxed);
 
         match client.model_infer(request).await {
@@ -457,7 +467,7 @@ fn build_request(
     age: Duration,
     input: Option<&InputSpec>,
     text: Option<&TextSpec>,
-) -> ModelInferRequest {
+) -> Option<ModelInferRequest> {
     if let Some(spec) = text {
         return build_text_request(model, id, frame, spec);
     }
@@ -525,7 +535,7 @@ fn build_request(
         }]
     });
 
-    ModelInferRequest {
+    Some(ModelInferRequest {
         model_name: model.to_owned(),
         model_version: String::new(),
         id: id.to_owned(),
@@ -534,7 +544,7 @@ fn build_request(
         outputs: Vec::new(),
         // Leer, wenn die Nutzlast als Referenz reist; sonst die Rohbytes.
         raw_input_contents: raw_contents,
-    }
+    })
 }
 
 /// Ein generativer Auftrag an das vLLM-Backend.
@@ -548,7 +558,14 @@ fn build_request(
 /// Hintergrundarbeit, gegen die der getaktete Strom verteidigt wird, und
 /// nicht selbst ein Sensordatum. Ihn mit einem Alter zu versehen hiesse, ihn
 /// verwerfbar zu machen, und genau das soll er nicht sein.
-fn build_text_request(model: &str, id: &str, frame: u64, spec: &TextSpec) -> ModelInferRequest {
+///
+/// `None`, wenn der Prompt nicht in einen `BYTES`-Rahmen passt (ab 4 GiB).
+fn build_text_request(
+    model: &str,
+    id: &str,
+    frame: u64,
+    spec: &TextSpec,
+) -> Option<ModelInferRequest> {
     let prompt = if spec.prompts.is_empty() {
         ""
     } else {
@@ -569,7 +586,7 @@ fn build_text_request(model: &str, id: &str, frame: u64, spec: &TextSpec) -> Mod
         parameters: HashMap::new(),
         contents: None,
     };
-    ModelInferRequest {
+    Some(ModelInferRequest {
         model_name: model.to_owned(),
         model_version: String::new(),
         id: id.to_owned(),
@@ -580,10 +597,10 @@ fn build_text_request(model: &str, id: &str, frame: u64, spec: &TextSpec) -> Mod
         ],
         outputs: Vec::new(),
         raw_input_contents: vec![
-            vig_gateway::cooperative::write_length_prefixed(prompt),
-            vig_gateway::cooperative::write_length_prefixed(&sampling),
+            vig_gateway::cooperative::write_length_prefixed(prompt)?,
+            vig_gateway::cooperative::write_length_prefixed(&sampling)?,
         ],
-    }
+    })
 }
 
 fn to_core(d: Duration) -> vig_core::Duration {
@@ -650,17 +667,27 @@ mod tests {
     #[test]
     fn the_copy_path_cycles_real_inputs_by_frame() {
         let spec = copy_spec(Some(vec![vec![1, 1], vec![2, 2], vec![3, 3]]));
-        let sent: Vec<Vec<u8>> = (0..4)
+        let sent: Vec<Option<Vec<u8>>> = (0..4)
             .map(|frame| {
                 build_request("m", "s:0", frame, false, ms(0), Some(&spec), None)
-                    .raw_input_contents
-                    .concat()
+                    .map(|request| request.raw_input_contents.concat())
             })
             .collect();
-        assert_eq!(sent, vec![vec![1, 1], vec![2, 2], vec![3, 3], vec![1, 1]]);
+        assert_eq!(
+            sent,
+            vec![
+                Some(vec![1, 1]),
+                Some(vec![2, 2]),
+                Some(vec![3, 3]),
+                Some(vec![1, 1])
+            ]
+        );
 
         let zeros = build_request("m", "s:0", 7, false, ms(0), Some(&copy_spec(None)), None);
-        assert_eq!(zeros.raw_input_contents, vec![vec![0, 0]]);
+        assert_eq!(
+            zeros.map(|request| request.raw_input_contents),
+            Some(vec![vec![0, 0]])
+        );
     }
 
     /// 200 ms Spitze alle 2 s: innerhalb der Spitze die kurze Periode,

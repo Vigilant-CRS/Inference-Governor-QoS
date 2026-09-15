@@ -224,9 +224,15 @@ Before you change a single client, let the question be answered with your
 models, your contracts and your hardware:
 
 ```bash
-target/release/vig-fit vig.yaml          # about two minutes
-VIG_FIT_JSON=fit.json target/release/vig-fit vig.yaml
+vig-fit vig.yaml                         # about two minutes
+VIG_FIT_JSON=fit.json vig-fit vig.yaml
 ```
+
+`vig-fit` ships next to `vig` in the release archive and in the container
+image, because `vig autotune` looks for it there; without it the `fit` step
+stays open and no run is ever complete. Built from source, it is
+`cargo build --release -p vig-bench --bin vig-fit`, and it has to end up in the
+same directory as `vig` (or be named in `VIG_FIT_BIN`).
 
 It drives your streams twice per load point — first straight at the backend,
 then through the governor — at 90, 100, 110 and 125 % of the offered load, and

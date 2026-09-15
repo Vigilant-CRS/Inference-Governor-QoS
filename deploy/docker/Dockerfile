@@ -15,7 +15,8 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 COPY . .
-RUN cargo build --release -p vig-cli
+RUN cargo build --release -p vig-cli \
+ && cargo build --release -p vig-bench --bin vig-fit
 
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 # `curl` ist fuer den Healthcheck da und fuer nichts anderes. Ein Image ohne
@@ -33,6 +34,8 @@ RUN useradd --system --create-home --uid 10001 vig
 USER vig
 
 COPY --from=build /src/target/release/vig /usr/local/bin/vig
+# Neben `vig`, weil `vig autotune` es dort sucht (ADR-0044).
+COPY --from=build /src/target/release/vig-fit /usr/local/bin/vig-fit
 # 9001 nimmt Inferenzanfragen, 9090 traegt /metrics, /healthz und /readyz.
 EXPOSE 9001 9090
 ENTRYPOINT ["vig"]

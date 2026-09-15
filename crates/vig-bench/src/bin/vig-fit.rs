@@ -329,34 +329,36 @@ async fn run() {
         let json = as_json(&rows, &points, seconds, load_before, load_after);
         match std::fs::write(&path, json) {
             Ok(()) => println!("  JSON: {path}"),
-            Err(error) => eprintln!("  JSON nicht schreibbar ({error})"),
+            Err(error) => {
+                eprintln!("  JSON nicht schreibbar ({error})");
+                std::process::exit(1);
+            }
         }
+    }
+    // Ohne Lieferung gibt es kein Urteil, und ein Aufrufer darf das nicht an
+    // einem Exitcode 0 vorbeilesen.
+    if rows.is_empty() {
+        std::process::exit(1);
     }
 }
 
 /// Das Urteil in einem Satz — auch, wenn es negativ ausfaellt.
 fn verdict(rows: &[Row], points: &[u64]) -> String {
-    if rows.is_empty() {
+    // Der erste Punkt, an dem der direkte Weg den geschuetzten Strom verliert.
+    let Some(finding) = finding(rows, points) else {
         return "  Kein Ergebnis: kein Strom hat geliefert. Laeuft das Backend, und \
                 passen die Modellnamen?"
             .to_owned();
-    }
-    let worst = |load: u64, protected: bool, governed: bool| -> u64 {
-        rows.iter()
-            .filter(|r| r.load == load && r.protected == protected)
-            .map(|r| if governed { r.governed } else { r.direct })
-            .max()
-            .unwrap_or(0)
     };
-    let highest = points.iter().copied().max().unwrap_or(0);
-
-    // Der erste Punkt, an dem der direkte Weg den geschuetzten Strom verliert.
-    let breaking = points
-        .iter()
-        .copied()
-        .find(|load| worst(*load, true, false) > HURTS_PERMILLE);
-
-    let Some(load) = breaking else {
+    let Finding::Breaks {
+        load,
+        direct,
+        governed,
+        price_direct,
+        price_governed,
+    } = finding
+    else {
+        let highest = points.iter().copied().max().unwrap_or(0);
         return format!(
             "  URTEIL Bis {highest} % Angebotslast verliert auch der direkte Weg nichts.\n  \
              Auf dieser Maschine, mit diesen Modellen und Vertraegen lohnt sich der\n  \
@@ -365,11 +367,6 @@ fn verdict(rows: &[Row], points: &[u64]) -> String {
              nicht unterbrechbarer Auftrag dazwischenkommt."
         );
     };
-
-    let direct = worst(load, true, false);
-    let governed = worst(load, true, true);
-    let price_direct = worst(load, false, false);
-    let price_governed = worst(load, false, true);
 
     let mut out = if governed >= direct {
         format!(
@@ -433,8 +430,105 @@ fn as_json(rows: &[Row], points: &[u64], seconds: u64, before: f64, after: f64) 
         "view": "consumer",
         "cells": cells,
         "verdict": verdict(rows, points).trim().to_owned(),
+        // Dieselbe Aussage fuer den englischen Qualifikationsbericht von
+        // `vig autotune`. Vorher stand dort der deutsche Satz mitten in einem
+        // englischen Dokument — ein Urteil, das der Leser nicht lesen kann,
+        // ist keines (validierung-autotune.md, Befund 5).
+        "verdict_en": verdict_en(rows, points),
+        // Ohne Lieferung gibt es kein Urteil. Das Feld sagt es maschinenlesbar,
+        // damit niemand „kein Strom hat geliefert" als Ergebnis uebernimmt.
+        "conclusive": !rows.is_empty(),
     })
     .to_string()
+}
+
+/// Das Urteil auf Englisch, mit denselben Zahlen wie [`verdict`].
+fn verdict_en(rows: &[Row], points: &[u64]) -> String {
+    let Some(finding) = finding(rows, points) else {
+        return "No result: no stream delivered. Is the backend running, and do the model \
+                names match?"
+            .to_owned();
+    };
+    match finding {
+        Finding::NoGain { highest } => format!(
+            "Up to {highest} % offered load the direct path loses nothing either. On this \
+             machine, with these models and contracts, the governor is not worth it — it only \
+             costs its own overhead. It becomes interesting once load goes past saturation or \
+             a long, non-interruptible job gets in the way."
+        ),
+        Finding::Breaks {
+            load,
+            direct,
+            governed,
+            price_direct,
+            price_governed,
+        } => {
+            let mut out = if governed >= direct {
+                format!(
+                    "From {load} % load the direct path misses {direct} ‰ of the protected \
+                     stream's cycles — the governor {governed} ‰, so no fewer. That is a result \
+                     against us: on this load it brings nothing here."
+                )
+            } else {
+                format!(
+                    "From {load} % load the direct path misses {direct} ‰ of the protected \
+                     stream's cycles, the governor {governed} ‰."
+                )
+            };
+            if price_direct > 0 || price_governed > 0 {
+                let _ = write!(
+                    out,
+                    " The price is right beside it: the lower-priority streams miss \
+                     {price_direct} ‰ directly and {price_governed} ‰ under the governor. \
+                     Whoever needs them has to weigh one against the other."
+                );
+            }
+            out
+        }
+    }
+}
+
+/// Was das Urteil feststellt, ohne Sprache.
+enum Finding {
+    /// Auch der direkte Weg verliert bis zum hoechsten Lastpunkt nichts.
+    NoGain { highest: u64 },
+    /// Ab `load` verliert der direkte Weg den geschuetzten Strom.
+    Breaks {
+        load: u64,
+        direct: u64,
+        governed: u64,
+        price_direct: u64,
+        price_governed: u64,
+    },
+}
+
+/// Die Feststellung hinter beiden Fassungen des Urteils; `None` ohne Lieferung.
+fn finding(rows: &[Row], points: &[u64]) -> Option<Finding> {
+    if rows.is_empty() {
+        return None;
+    }
+    let worst = |load: u64, protected: bool, governed: bool| -> u64 {
+        rows.iter()
+            .filter(|r| r.load == load && r.protected == protected)
+            .map(|r| if governed { r.governed } else { r.direct })
+            .max()
+            .unwrap_or(0)
+    };
+    let highest = points.iter().copied().max().unwrap_or(0);
+    let Some(load) = points
+        .iter()
+        .copied()
+        .find(|load| worst(*load, true, false) > HURTS_PERMILLE)
+    else {
+        return Some(Finding::NoGain { highest });
+    };
+    Some(Finding::Breaks {
+        load,
+        direct: worst(load, true, false),
+        governed: worst(load, true, true),
+        price_direct: worst(load, false, false),
+        price_governed: worst(load, false, true),
+    })
 }
 
 fn element_size(datatype: &str) -> u64 {

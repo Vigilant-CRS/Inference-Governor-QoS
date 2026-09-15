@@ -5,7 +5,69 @@ bedeutet, steht in [docs/releases.md](docs/releases.md).
 
 ## [Unveroeffentlicht]
 
+### Sicherheit
+
+- **`rustls` 0.23.43 → 0.23.45 (RUSTSEC-2026-0285).** TLS-1.3-Handshake-
+  Nachrichten wurden ueber Grenzen der Verschluesselungsebene hinweg
+  angenommen. Der Governor bietet TLS und mTLS am OIP-Endpunkt an und ist
+  damit betroffen, sobald `backend.security.tls_cert` und `tls_key` gesetzt
+  sind. Gefunden hat
+  es `cargo deny` im Gate am 15.09.; die Meldung ist neuer als die
+  `Cargo.lock` vom 14.09., keine Aenderung dieses Standes hat sie verursacht.
+
 ### Behoben
+
+- **`vig autotune` konnte auf einer installierten Maschine nie vollstaendig
+  werden, und auf einem Telefon nie sauber** (Review vom 15.09.).
+  - **Fremdlast war die Laenge der Warteschlange, nicht fremde Arbeit.**
+    Die feste Grenze fuer `/proc/loadavg` zaehlte Kernel-Threads, die nichts
+    rechnen, und die eigene Messung. Ein Pixel 2 steht im Leerlauf bei 3,5
+    und verbraucht 0,04 Kerne: Jeder Lauf dort galt als verschmutzt.
+    Gemessen wird jetzt die fremde CPU-Zeit aus `/proc/stat` abzueglich der
+    eigenen, vor und nach dem Schritt, Grenze ein ganzer Kern. Eine nicht
+    beobachtbare Last gilt nicht mehr als ruhig.
+  - **`vig-fit` lag in keinem Auslieferungsweg.** Release-Archiv,
+    Container-Image und Telefonskript bauten nur `vig`; der Schritt `fit`
+    blieb deshalb ueberall offen. Jetzt liegt es daneben.
+  - **Ein einmal gescheiterter Schritt verweigerte jeden spaeteren Lauf.**
+    Eine Fortsetzung haengte Schritteintraege an, statt sie zu ersetzen, und
+    `failed()` sah den alten Fehlschlag weiter. Ausserdem liefen nach einer
+    neuen Messung `fit` und `check` nicht nach — ihr Urteil beschrieb eine
+    `measured.yaml`, die es nicht mehr gab. Ein Zustand ohne Fingerabdruck
+    wird nicht mehr angerechnet.
+  - **Ein verweigerter Lauf begann mit einem Urteil zu unseren Gunsten.**
+    Der Laptoplauf vom 15.09. stand mit „der Governor 0 ‰" ganz oben und mit
+    „Release: refused" ganz unten. Die Verweigerung steht jetzt vorn; ein
+    Urteil gegen uns bleibt direkt dahinter.
+  - **`fit` las ein altes Ergebnis.** Der Exitcode von `vig-fit` wurde
+    ignoriert, eine liegengebliebene `fit.json` galt als dieses Ergebnis, und
+    „kein Strom hat geliefert" ging als Urteil durch. `vig-fit` schreibt
+    jetzt `conclusive` und ein englisches Urteil, endet ohne Lieferung mit 1,
+    und `autotune` nimmt nur ein frisches, schluessiges Ergebnis.
+  - **Ungemessene Modelle zaehlten nicht.** Ein Warmlauf, der scheiterte,
+    und ein Modell ohne Metadaten oder Nulltensor verschwanden ohne Spur; der
+    Bericht sagte „N von N verwertbar". Beides zaehlt jetzt und verweigert die
+    Freigabe.
+  - **Die Belegungsstufe mass eine Warteschlange** — der Grund, warum
+    `autotune` auf dem Pixel 2 nicht dasselbe ergab wie die von Hand
+    getunte Konfiguration. Der TFLite-Server rechnet zwei Auftraege
+    desselben Modells nacheinander; die Stufe (Detektor 1,87x, Tiefe 2,05x)
+    wurde trotzdem als Laufzeit bei belegtem Nachbarn festgeschrieben, und der
+    Governor plante den Detektor neben jedem Modell mit 297 statt 158 ms.
+    Ab `(belegt + 1) × 90 %` gilt eine Stufe jetzt als Warteschlange und wird
+    nicht geschrieben. Eine verworfene Stufe laesst die folgenden nicht mehr
+    eine Stelle nachruecken, und keine Stufe ist schneller als allein.
+- **Ein Text-Tensor mit falscher Laengenangabe wurde stillschweigend
+  repariert** (`read_length_prefixed`): zu lang angegeben wurde gekuerzt,
+  zu kurz oder mit zwei Elementen gingen Elemente verloren. Jetzt wird nur
+  ein exaktes Einzelelement zerlegt, alles andere geht unveraendert an das
+  Backend, das den Fehler meldet. Die vier auseinandergelaufenen Schreiber
+  des Laengenpraefixes sind eine Funktion in `vig-protocol-oip`.
+- **`after_a_restart_new_work_is_proven_by_the_new_counter` scheiterte in
+  zwei bis drei von zehn Laeufen.** Kein Fehler im Abgleich, sondern ein
+  Test aelter als R04: Las der Poller den Zaehler erst nach dem Reset, sah
+  der Actor genau den Ablauf, bei dem ADR-0042 die Sperre verlangt. Die
+  Tests warten jetzt auf eine Zaehlermeldung nach dem Abbruch; 10 von 10.
 
 - **Vier Befunde aus dem Review von `vig autotune`**, alle in derselben
   Familie: Das Werkzeug verlor oder verwischte Angaben, die es laut ADR-0044

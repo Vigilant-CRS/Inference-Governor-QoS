@@ -54,12 +54,25 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-/// Ab dieser Systemlast gilt die Maschine als nicht ruhig.
+/// Ab so viel fremder Rechenzeit gilt die Maschine als nicht ruhig, in
+/// Hundertstel Kernen.
 ///
-/// Eine Eins-zu-eins-Schwelle waere zu streng — der Messprozess selbst zaehlt
-/// mit —, eine zu grosszuegige verschweigt fremde Arbeit. 1,5 ist dieselbe
-/// Grenze, die die Messskripte dieses Projekts verwenden.
-const QUIET_LOADAVG: f64 = 1.5;
+/// Vorher stand hier eine feste Grenze fuer `/proc/loadavg`. Die ist aus zwei
+/// Gruenden falsch: Die Last zaehlt auch Threads, die im Kernel warten und
+/// nichts rechnen — ein Pixel 2 steht im Leerlauf bei 3,5 und verbraucht dabei
+/// 0,04 Kerne (gemessen am 15.09.2026) —, und die Minute danach enthaelt die
+/// eigene Messung. Jeder Lauf auf einem Telefon galt deshalb als verschmutzt.
+///
+/// Gemessen wird jetzt die fremde CPU-Zeit aus `/proc/stat`, abzueglich der
+/// dieses Prozesses, in einem kurzen Fenster **vor** und **nach** dem Schritt,
+/// wenn das Backend ruht. Ein ganzer fremder Kern ist die Grenze: Der Laptop
+/// lag im Leerlauf mit Terminal und Editor bei 0,68, eine daneben laufende
+/// Auswertung — der Fall, der am 15.09. drei Laeufe verdorben hat — belegt
+/// einen ganzen.
+const FOREIGN_CORES_CENTI: u64 = 100;
+
+/// Wie lange je Beobachtung gemessen wird.
+const FOREIGN_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Was der Anwender vorab hoeren soll, in einem Satz.
 ///
@@ -270,6 +283,9 @@ pub(crate) struct StepResult {
 pub(crate) struct SeriesCount {
     pub(crate) qualified: u64,
     pub(crate) discarded: u64,
+    /// Modelle, die sich gar nicht vermessen liessen. Ihr Profil bleibt
+    /// ungemessen aus der Eingabe stehen.
+    pub(crate) skipped_models: u64,
 }
 
 impl SeriesCount {
@@ -365,6 +381,12 @@ impl Qualification {
                 self.series.total()
             ));
         }
+        if self.series.skipped_models > 0 {
+            reasons.push(format!(
+                "{} models could not be measured at all",
+                self.series.skipped_models
+            ));
+        }
         if self.doctor.as_deref() == Some("NOT_READY") {
             reasons.push("vig doctor says NOT_READY".to_owned());
         }
@@ -439,8 +461,11 @@ pub(crate) trait Steps {
     /// Wenn die Konfiguration nicht gelesen werden konnte.
     async fn check(&mut self, config: &Path) -> Result<String, String>;
 
-    /// Die Systemlast, fuer die Erkennung von Fremdlast.
-    fn loadavg(&self) -> f64;
+    /// Fremde Rechenzeit in Hundertstel Kernen, ueber ein kurzes Fenster.
+    ///
+    /// `None`, wenn sie auf dieser Plattform nicht beobachtbar ist. Das ist
+    /// **kein** Beleg fuer eine ruhige Maschine.
+    async fn foreign_load(&mut self) -> Option<u64>;
 
     /// Ob der Takt beobachtbar ist.
     fn clock(&self) -> Clock;
@@ -453,8 +478,81 @@ pub(crate) trait Steps {
 }
 
 /// Ist die Maschine ruhig genug, damit eine Messung etwas bedeutet?
-pub(crate) fn quiet_enough(loadavg: f64) -> bool {
-    loadavg < QUIET_LOADAVG
+///
+/// Eine nicht beobachtbare Fremdlast ist nicht ruhig: Fehlt die Beobachtung,
+/// fehlt der Beleg, und ADR-0044 laesst nichts an seine Stelle treten.
+pub(crate) fn quiet_enough(foreign_cores_centi: Option<u64>) -> bool {
+    foreign_cores_centi.is_some_and(|centi| centi < FOREIGN_CORES_CENTI)
+}
+
+/// Fremde CPU-Zeit ueber `window`, in Hundertstel Kernen.
+///
+/// Aus `/proc/stat` (alle Kerne, ohne Leerlauf und Warten auf I/O) abzueglich
+/// der CPU-Zeit dieses Prozesses samt beendeter Kinder aus `/proc/self/stat`.
+/// Beide gibt es auf jedem Linux, auch fuer den Shell-Nutzer auf Android.
+pub(crate) async fn sample_foreign_load(window: std::time::Duration) -> Option<u64> {
+    let before = cpu_ticks()?;
+    let own_before = own_ticks()?;
+    tokio::time::sleep(window).await;
+    let after = cpu_ticks()?;
+    let own_after = own_ticks()?;
+    foreign_centi(before, after, own_after.checked_sub(own_before)?)
+}
+
+/// `(belegt, gesamt)` in Ticks, summiert ueber alle Kerne.
+fn cpu_ticks() -> Option<(u64, u64)> {
+    let text = std::fs::read_to_string("/proc/stat").ok()?;
+    parse_cpu_line(text.lines().next()?)
+}
+
+/// Die Summenzeile `cpu  user nice system idle iowait irq softirq steal …`.
+pub(crate) fn parse_cpu_line(line: &str) -> Option<(u64, u64)> {
+    let mut fields = line.split_whitespace();
+    if fields.next()? != "cpu" {
+        return None;
+    }
+    let values: Vec<u64> = fields
+        .take(8)
+        .map(|v| v.parse().ok())
+        .collect::<Option<_>>()?;
+    let idle = values.get(3)?.checked_add(*values.get(4)?)?;
+    let total = values
+        .iter()
+        .try_fold(0_u64, |sum, v| sum.checked_add(*v))?;
+    Some((total.checked_sub(idle)?, total))
+}
+
+/// CPU-Ticks dieses Prozesses: `utime + stime + cutime + cstime`.
+fn own_ticks() -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/self/stat").ok()?;
+    parse_own_ticks(&text)
+}
+
+/// Felder 14 bis 17 von `/proc/<pid>/stat`, gezaehlt hinter dem Namen in
+/// Klammern — der Name selbst darf Leerzeichen enthalten.
+pub(crate) fn parse_own_ticks(stat: &str) -> Option<u64> {
+    let rest = stat.get(stat.rfind(')')?.checked_add(1)?..)?;
+    rest.split_whitespace()
+        .skip(11)
+        .take(4)
+        .map(|v| v.parse::<u64>().ok())
+        .try_fold(0_u64, |sum, v| sum.checked_add(v?))
+}
+
+/// Fremde Last in Hundertstel Kernen aus zwei Stichproben.
+pub(crate) fn foreign_centi(before: (u64, u64), after: (u64, u64), own: u64) -> Option<u64> {
+    let busy = after.0.checked_sub(before.0)?;
+    let total = after.1.checked_sub(before.1)?;
+    if total == 0 {
+        return None;
+    }
+    let cores =
+        u64::try_from(std::thread::available_parallelism().map_or(1, std::num::NonZero::get))
+            .unwrap_or(1);
+    busy.saturating_sub(own)
+        .saturating_mul(100)
+        .saturating_mul(cores)
+        .checked_div(total)
 }
 
 /// Die Schaetzung vor dem Start, in Sekunden.
@@ -468,12 +566,21 @@ pub(crate) fn estimate_seconds(steps: &[Step], quick: bool, shape: RunShape) -> 
 ///
 /// `only` waehlt einen einzelnen Schritt; `done` sind die Schritte, die ein
 /// frueherer Lauf schon erledigt hat und die beim Fortsetzen entfallen.
+///
+/// Ab dem ersten nicht erledigten Schritt laeuft alles Folgende mit: Wird neu
+/// gemessen, beschreiben ein frueheres `fit` und `check` eine
+/// `measured.yaml`, die es so nicht mehr gibt.
 pub(crate) fn plan(only: Option<Step>, done: &[Step]) -> Vec<Step> {
+    let first_open = Step::ALL
+        .iter()
+        .position(|s| !done.contains(s))
+        .unwrap_or(Step::ALL.len());
     Step::ALL
+        .get(first_open..)
+        .unwrap_or_default()
         .iter()
         .copied()
         .filter(|s| only.is_none_or(|wanted| wanted == *s))
-        .filter(|s| !done.contains(s))
         .collect()
 }
 
@@ -481,19 +588,46 @@ pub(crate) fn plan(only: Option<Step>, done: &[Step]) -> Vec<Step> {
 ///
 /// Er muss ohne die Tabellen darunter verstaendlich sein — und „ihr braucht
 /// uns hier nicht" muss darin genauso klar stehen wie das Gegenteil.
+///
+/// Ein verweigerter Lauf beginnt mit der Verweigerung. Vorher stand dort das
+/// Urteil von `vig-fit`, sobald es eines gab: Der Laptoplauf vom 15.09.
+/// begann mit „der Governor 0 ‰", und erst ganz unten stand „Release:
+/// refused". Das Urteil bleibt im eigenen Abschnitt; ist es gegen uns, steht
+/// es zusaetzlich direkt hinter der Verweigerung.
 pub(crate) fn headline(q: &Qualification) -> String {
-    if let Some(verdict) = &q.fit_verdict {
-        return verdict.trim().to_owned();
-    }
     match q.release() {
-        Release::Refused { reasons } => format!(
-            "This run did not qualify this machine: {}.",
-            reasons.join("; ")
+        Release::Refused { reasons } => {
+            let refusal = format!(
+                "This run did not qualify this machine: {}.",
+                reasons.join("; ")
+            );
+            match &q.fit_verdict {
+                Some(verdict) if verdict_is_against_us(verdict) => {
+                    format!("{refusal} {}", verdict.trim())
+                }
+                _ => refusal,
+            }
+        }
+        Release::NotIssued => q.fit_verdict.as_deref().map_or_else(
+            || {
+                "This machine carried the configured load, and nothing in the measurement \
+                 spoke against it."
+                    .to_owned()
+            },
+            |verdict| verdict.trim().to_owned(),
         ),
-        Release::NotIssued => "This machine carried the configured load, and nothing in the \
-             measurement spoke against it."
-            .to_owned(),
     }
+}
+
+/// Sagt das Urteil, dass der Governor hier nichts bringt?
+///
+/// An den festen Wendungen beider Fassungen von `vig-fit` erkannt. Ein
+/// unbekannter Wortlaut gilt als nicht dagegen — dann steht er nur in seinem
+/// eigenen Abschnitt, und nichts geht verloren.
+fn verdict_is_against_us(verdict: &str) -> bool {
+    ["against us", "not worth it", "gegen uns", "lohnt sich der"]
+        .iter()
+        .any(|phrase| verdict.contains(phrase))
 }
 
 /// Der Satz, der am Ende auf dem Terminal steht.
@@ -525,7 +659,12 @@ pub(crate) fn summary(q: &Qualification) -> String {
 pub(crate) fn markdown(q: &Qualification, endpoint: &str) -> String {
     let mut out = String::new();
     out.push_str("# Qualification report\n\n");
-    let _ = writeln!(out, "**{}**\n", headline(q));
+    // Als Zitat, nicht fett: das Urteil von `vig-fit` traegt selbst `**` und
+    // zerbrach die Hervorhebung.
+    for line in headline(q).lines() {
+        let _ = writeln!(out, "> {}", line.trim());
+    }
+    out.push('\n');
     let _ = writeln!(
         out,
         "Written by `vig autotune` against `{endpoint}`. This report states what was measured \
@@ -562,7 +701,9 @@ pub(crate) fn markdown(q: &Qualification, endpoint: &str) -> String {
             let _ = write!(
                 out,
                 "\n**{} series were discarded, and the values they would have produced are \
-                 simply not set.** The usual cause on a laptop or on a power-capped card is a \
+                 not set.** Where the input configuration already carried values, they stay in \
+                 the frozen configuration **unmeasured**; the file does not mark them, this \
+                 report does. The usual cause on a laptop or on a power-capped card is a \
                  clock that moves during the series: the measurement then describes no operating \
                  point at all. The way out is a pinned clock (`nvidia-smi -lgc`, needs \
                  permissions) or a machine that holds its clock, and a quiet machine. The \
@@ -650,6 +791,7 @@ pub(crate) fn json(q: &Qualification, endpoint: &str) -> String {
         "series": {
             "qualified": q.series.qualified,
             "discarded": q.series.discarded,
+            "skipped_models": q.series.skipped_models,
         },
         "clock": clock,
         "fit_verdict": q.fit_verdict,
@@ -677,6 +819,10 @@ pub(crate) fn json(q: &Qualification, endpoint: &str) -> String {
 /// Die Reihenfolge ist fest, und ein gescheiterter Schritt beendet den Lauf:
 /// Messen ohne Konfiguration, Pruefen ohne Messung — beides waere ein Bericht
 /// ueber nichts.
+#[expect(
+    clippy::too_many_lines,
+    reason = "ein Schritt, seine Fremdlastbeobachtung und sein Eintrag gehoeren zusammen"
+)]
 pub(crate) async fn execute<S: Steps + ?Sized>(
     steps: &mut S,
     plan: &[Step],
@@ -696,9 +842,26 @@ pub(crate) async fn execute<S: Steps + ?Sized>(
     };
     for step in plan {
         println!("\n[{}] {}", step.key(), step.title());
+        // Fremdlast entwertet das Ergebnis eines Messschritts, nicht das eines
+        // Lesevorgangs: `discover` und `check` rechnen nicht. Beobachtet wird
+        // davor und danach, wenn das Backend ruht — nie waehrend der eigenen
+        // Last, die sonst als fremde zaehlte.
+        let measuring = matches!(*step, Step::Measure | Step::Fit);
+        let before = if measuring {
+            steps.foreign_load().await
+        } else {
+            None
+        };
         let started = Instant::now();
-        let before = steps.loadavg();
         let mut notes = Vec::new();
+        // Eine neue Messung macht alles ungueltig, was auf der alten beruhte.
+        // Sonst stuende nach einer Fortsetzung das Urteil ueber eine
+        // `measured.yaml` im Bericht, die es so nicht mehr gibt.
+        if *step == Step::Measure {
+            q.series = SeriesCount::default();
+            q.fit_verdict = None;
+            q.doctor = None;
+        }
 
         let outcome = match *step {
             Step::Discover => match steps.discover(endpoint, config).await {
@@ -714,7 +877,7 @@ pub(crate) async fn execute<S: Steps + ?Sized>(
                     if series.discarded > 0 {
                         notes.push(format!(
                             "{} of {} series discarded; the values they would have produced are \
-                             not set",
+                             not set, earlier values stay unmeasured",
                             series.discarded,
                             series.total()
                         ));
@@ -745,17 +908,16 @@ pub(crate) async fn execute<S: Steps + ?Sized>(
             },
         };
 
-        // Fremdlast entwertet das Ergebnis eines Messschritts, nicht das eines
-        // Lesevorgangs: `discover` und `check` rechnen nicht.
-        let after = steps.loadavg();
-        let measuring = matches!(*step, Step::Measure | Step::Fit);
+        let seconds = started.elapsed().as_secs();
         let outcome = match outcome {
-            Outcome::Done if measuring && !(quiet_enough(before) && quiet_enough(after)) => {
-                Outcome::Contaminated {
-                    reason: format!(
-                        "system load {before:.2} before and {after:.2} after; something else was \
-                         running"
-                    ),
+            Outcome::Done if measuring => {
+                let after = steps.foreign_load().await;
+                if quiet_enough(before) && quiet_enough(after) {
+                    Outcome::Done
+                } else {
+                    Outcome::Contaminated {
+                        reason: foreign_load_reason(before, after),
+                    }
                 }
             }
             other => other,
@@ -771,10 +933,15 @@ pub(crate) async fn execute<S: Steps + ?Sized>(
         }
 
         let failed = matches!(outcome, Outcome::Failed { .. });
+        // Ein Schritt steht einmal im Bericht, mit seinem letzten Ausgang.
+        // Vorher wurde angehaengt: ein frueher gescheitertes `measure` blieb
+        // neben dem spaeter gelungenen stehen, `failed()` sah es weiter, und
+        // jede Fortsetzung verweigerte die Freigabe fuer immer.
+        q.steps.retain(|s| s.step != *step);
         q.steps.push(StepResult {
             step: *step,
             outcome,
-            seconds: started.elapsed().as_secs(),
+            seconds,
             notes,
         });
         // Nach jedem Schritt, nicht am Ende: ein Abbruch soll das bisher
@@ -787,16 +954,28 @@ pub(crate) async fn execute<S: Steps + ?Sized>(
     q
 }
 
-/// Liest die Systemlast der letzten Minute.
-///
-/// `/proc/loadavg` gibt es auf jedem Linux, auch auf Android. Fehlt sie,
-/// gilt die Maschine als ruhig — eine fehlende Beobachtung ist kein Beleg
-/// fuer Fremdlast.
-pub(crate) fn system_loadavg() -> f64 {
-    std::fs::read_to_string("/proc/loadavg")
-        .ok()
-        .and_then(|text| text.split_whitespace().next()?.parse().ok())
-        .unwrap_or(0.0)
+/// Der Grund fuer „verschmutzt", mit beiden Beobachtungen.
+fn foreign_load_reason(before: Option<u64>, after: Option<u64>) -> String {
+    let show = |value: Option<u64>| {
+        value.map_or_else(
+            || "not observable".to_owned(),
+            |centi| {
+                format!(
+                    "{}.{:02} cores",
+                    centi.checked_div(100).unwrap_or(0),
+                    centi.checked_rem(100).unwrap_or(0)
+                )
+            },
+        )
+    };
+    format!(
+        "foreign CPU load {} before and {} after (limit {}.{:02} cores); something else was \
+         running, or the load could not be observed",
+        show(before),
+        show(after),
+        FOREIGN_CORES_CENTI.checked_div(100).unwrap_or(0),
+        FOREIGN_CORES_CENTI.checked_rem(100).unwrap_or(0)
+    )
 }
 
 /// Was der Befehl ausfuehren soll.
@@ -897,6 +1076,7 @@ impl Steps for Live {
         .await
         .map_err(|e| e.to_string())?;
         let (qualified, discarded) = crate::calibrate::qualification();
+        let skipped_models = crate::calibrate::skipped_models();
         if qualified == 0 && discarded == 0 {
             return Err(
                 "no measurement series ran at all; the backend answered nothing measurable"
@@ -906,6 +1086,7 @@ impl Steps for Live {
         Ok(SeriesCount {
             qualified,
             discarded,
+            skipped_models,
         })
     }
 
@@ -914,6 +1095,20 @@ impl Steps for Live {
             return Ok(None);
         };
         let json_path = self.out_dir.join("fit.json");
+        // Ein Ergebnis von einem frueheren Lauf darf nicht als dieses gelesen
+        // werden. Vorher blieb `fit.json` liegen: scheiterte `vig-fit`, las
+        // dieser Schritt die alte Datei und meldete „done" mit einem Urteil
+        // aus einem anderen Lauf.
+        match std::fs::remove_file(&json_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(format!(
+                    "the old {} could not be removed: {e}",
+                    json_path.display()
+                ));
+            }
+        }
         let seconds = if quick { "5" } else { "10" };
         // `tokio::process` und nicht `std::process`: `vig-fit` laeuft ein bis
         // zwei Minuten. Ein blockierendes `status()` haelt solange einen
@@ -926,18 +1121,30 @@ impl Steps for Live {
             .status()
             .await
             .map_err(|e| format!("{} could not be started: {e}", binary.display()))?;
-        let text = std::fs::read_to_string(&json_path).map_err(|e| {
-            format!(
-                "{} exited with {status} and wrote no result: {e}",
+        if !status.success() {
+            return Err(format!(
+                "{} exited with {status}; no verdict is taken from it",
                 binary.display()
-            )
-        })?;
+            ));
+        }
+        let text = std::fs::read_to_string(&json_path)
+            .map_err(|e| format!("{} wrote no result: {e}", binary.display()))?;
         let parsed: serde_json::Value =
             serde_json::from_str(&text).map_err(|e| format!("fit result unreadable: {e}"))?;
-        Ok(parsed
-            .get("verdict")
+        if parsed
+            .get("conclusive")
+            .and_then(serde_json::Value::as_bool)
+            == Some(false)
+        {
+            return Err("vig-fit saw no stream deliver; that is no verdict".to_owned());
+        }
+        // Die englische Fassung, wo es sie gibt: der Bericht ist englisch.
+        parsed
+            .get("verdict_en")
+            .or_else(|| parsed.get("verdict"))
             .and_then(serde_json::Value::as_str)
-            .map(str::to_owned))
+            .map(|verdict| Some(verdict.to_owned()))
+            .ok_or_else(|| "the fit result carries no verdict".to_owned())
     }
 
     async fn check(&mut self, config: &Path) -> Result<String, String> {
@@ -947,8 +1154,8 @@ impl Steps for Live {
             .map_err(|e| e.to_string())
     }
 
-    fn loadavg(&self) -> f64 {
-        system_loadavg()
+    async fn foreign_load(&mut self) -> Option<u64> {
+        sample_foreign_load(FOREIGN_WINDOW).await
     }
 
     fn clock(&self) -> Clock {
@@ -1184,6 +1391,10 @@ fn prior_state(state_path: &Path) -> PriorRun {
                 .get("discarded")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0),
+            skipped_models: series
+                .get("skipped_models")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
         };
     }
     q.fit_verdict = parsed
@@ -1244,7 +1455,11 @@ fn state_json(q: &Qualification, fingerprint: &str) -> String {
         "done": q.done_keys(),
         "fingerprint": fingerprint,
         "steps": steps,
-        "series": { "qualified": q.series.qualified, "discarded": q.series.discarded },
+        "series": {
+            "qualified": q.series.qualified,
+            "discarded": q.series.discarded,
+            "skipped_models": q.series.skipped_models,
+        },
         "fit_verdict": q.fit_verdict,
         "doctor": q.doctor,
         "config": q.config.as_ref().map(|p| p.display().to_string()),
@@ -1309,10 +1524,15 @@ pub(crate) async fn run(
     // Ein Stand von einem anderen Endpunkt oder einer geaenderten
     // Konfiguration ist kein Stand dieses Laufs. Ihn anzurechnen hiesse,
     // `fit` und `check` gegen eine Messung von woanders laufen zu lassen.
-    let stale = prior
-        .fingerprint
-        .as_ref()
-        .is_some_and(|seen| *seen != fingerprint);
+    //
+    // Ein Zustand ganz ohne Fingerabdruck stammt aus einer aelteren Fassung
+    // und laesst sich diesem Lauf nicht zuordnen — also ebenfalls neu.
+    let had_state = !prior.done.is_empty() || !prior.qualification.steps.is_empty();
+    let stale = had_state
+        && prior
+            .fingerprint
+            .as_ref()
+            .is_none_or(|seen| *seen != fingerprint);
     let (done, prior_qualification) = if options.restart || stale {
         if stale {
             println!(
@@ -1387,7 +1607,8 @@ pub(crate) async fn run(
 mod tests {
     use super::{
         Clock, Outcome, Qualification, Release, RunShape, SeriesCount, Step, StepResult, Steps,
-        estimate_seconds, execute, headline, json, markdown, plan, quiet_enough, summary,
+        estimate_seconds, execute, foreign_centi, headline, json, markdown, parse_cpu_line,
+        parse_own_ticks, plan, quiet_enough, summary,
     };
     use std::path::{Path, PathBuf};
 
@@ -1398,7 +1619,7 @@ mod tests {
         series: SeriesCount,
         fit: Option<String>,
         doctor: String,
-        load: f64,
+        load: Option<u64>,
         measure_fails: Option<String>,
         fit_missing: bool,
         clock_blind: bool,
@@ -1436,7 +1657,7 @@ mod tests {
                 self.doctor.clone()
             })
         }
-        fn loadavg(&self) -> f64 {
+        async fn foreign_load(&mut self) -> Option<u64> {
             self.load
         }
         fn clock(&self) -> Clock {
@@ -1493,6 +1714,7 @@ mod tests {
             series: SeriesCount {
                 qualified: 1,
                 discarded: 3,
+                skipped_models: 0,
             },
             config: Some(PathBuf::from("measured.yaml")),
             ..Qualification::default()
@@ -1514,7 +1736,8 @@ mod tests {
             q.series,
             SeriesCount {
                 qualified: 1,
-                discarded: 3
+                discarded: 3,
+                skipped_models: 0,
             },
             "die verworfenen Reihen des ersten Laufs bleiben im Bericht"
         );
@@ -1541,8 +1764,9 @@ mod tests {
             series: SeriesCount {
                 qualified: 4,
                 discarded: 0,
+                skipped_models: 0,
             },
-            load: 0.3,
+            load: Some(30),
             ..Fake::default()
         }
     }
@@ -1569,8 +1793,9 @@ mod tests {
             series: SeriesCount {
                 qualified: 0,
                 discarded: 4,
+                skipped_models: 0,
             },
-            load: 0.3,
+            load: Some(30),
             ..Fake::default()
         };
         let q = run(&mut fake).await;
@@ -1593,7 +1818,7 @@ mod tests {
     #[tokio::test]
     async fn foreign_load_marks_the_measuring_steps_contaminated() {
         let mut fake = Fake {
-            load: 3.0,
+            load: Some(300),
             ..clean()
         };
         let q = run(&mut fake).await;
@@ -1675,7 +1900,7 @@ mod tests {
     #[tokio::test]
     async fn a_failed_step_ends_the_run() {
         let mut fake = Fake {
-            load: 0.3,
+            load: Some(30),
             measure_fails: Some("backend unreachable".to_owned()),
             ..Fake::default()
         };
@@ -1789,10 +2014,146 @@ mod tests {
         );
     }
 
+    /// Ein ganzer fremder Kern ist Fremdlast, und eine Luecke ist keine Ruhe.
     #[test]
-    fn the_quiet_threshold_is_the_one_the_scripts_use() {
-        assert!(quiet_enough(1.4));
-        assert!(!quiet_enough(1.5));
+    fn a_whole_foreign_core_is_foreign_load_and_a_blind_spot_is_not_quiet() {
+        assert!(quiet_enough(Some(99)));
+        assert!(!quiet_enough(Some(100)));
+        assert!(
+            !quiet_enough(None),
+            "nicht beobachtbar ist kein Beleg fuer eine ruhige Maschine"
+        );
+    }
+
+    /// Fremdlast ist fremde Rechenzeit, nicht die Laenge der Warteschlange.
+    ///
+    /// Der Fall vom Pixel 2: `loadavg` 3,5 im Leerlauf bei 0,04 belegten
+    /// Kernen. Die alte Schwelle von 1,5 hielt jeden Lauf dort fuer
+    /// verschmutzt.
+    #[test]
+    fn foreign_load_is_cpu_time_not_the_run_queue() {
+        assert_eq!(
+            parse_cpu_line("cpu  100 0 50 800 50 0 0 0 0 0"),
+            Some((150, 1000)),
+            "Leerlauf und Warten auf I/O zaehlen nicht als belegt"
+        );
+        assert_eq!(
+            parse_cpu_line("cpu0 1 2 3 4 5 6 7 8"),
+            None,
+            "nur die Summenzeile"
+        );
+        assert_eq!(
+            parse_own_ticks("42 (vig autotune) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15"),
+            Some(11 + 12 + 13 + 14),
+            "utime, stime, cutime, cstime hinter dem Namen, auch mit Leerzeichen darin"
+        );
+        assert_eq!(
+            foreign_centi((0, 0), (100, 1000), 100),
+            Some(0),
+            "die eigene Messung ist keine fremde Last"
+        );
+        assert_eq!(
+            foreign_centi((5, 5), (5, 5), 0),
+            None,
+            "kein Fenster, keine Aussage"
+        );
+    }
+
+    /// Ein einmal gescheiterter Schritt verweigert nicht jeden spaeteren Lauf.
+    #[tokio::test]
+    async fn a_step_that_failed_once_does_not_refuse_every_later_run() {
+        let prior = Qualification {
+            steps: vec![
+                StepResult {
+                    step: Step::Discover,
+                    outcome: Outcome::Done,
+                    seconds: 1,
+                    notes: Vec::new(),
+                },
+                StepResult {
+                    step: Step::Measure,
+                    outcome: Outcome::Failed {
+                        reason: "backend unreachable".to_owned(),
+                    },
+                    seconds: 1,
+                    notes: Vec::new(),
+                },
+            ],
+            ..Qualification::default()
+        };
+        let mut fake = clean();
+        let q = execute(
+            &mut fake,
+            &plan(None, &[Step::Discover]),
+            "127.0.0.1:8001",
+            Path::new("vig.yaml"),
+            Path::new("measured.yaml"),
+            false,
+            prior,
+        )
+        .await;
+        assert!(
+            !q.failed(),
+            "der alte Fehlschlag ist ersetzt: {:?}",
+            q.steps
+        );
+        assert_eq!(q.steps.len(), 4, "jeder Schritt steht einmal da");
+        assert_eq!(q.release(), Release::NotIssued);
+    }
+
+    /// Wird neu gemessen, laeuft alles nach, was auf der alten Messung beruhte.
+    #[test]
+    fn a_new_measurement_reruns_what_depended_on_the_old_one() {
+        assert_eq!(
+            plan(None, &[Step::Discover, Step::Check]),
+            vec![Step::Measure, Step::Fit, Step::Check]
+        );
+    }
+
+    /// Ein verweigerter Lauf beginnt mit der Verweigerung, nicht mit einem
+    /// Urteil zu unseren Gunsten — der Laptoplauf vom 15.09.
+    #[tokio::test]
+    async fn a_refused_run_is_not_headlined_by_a_verdict_in_our_favour() {
+        let mut fake = Fake {
+            series: SeriesCount {
+                qualified: 3,
+                discarded: 1,
+                skipped_models: 0,
+            },
+            fit: Some(
+                "From 90 % load the direct path misses 996 ‰ of the protected stream's cycles, \
+                 the governor 0 ‰."
+                    .to_owned(),
+            ),
+            ..clean()
+        };
+        let q = run(&mut fake).await;
+        assert!(
+            headline(&q).starts_with("This run did not qualify this machine"),
+            "{}",
+            headline(&q)
+        );
+        assert!(!headline(&q).contains("996"), "{}", headline(&q));
+        assert!(
+            markdown(&q, "x").contains("996 ‰"),
+            "das Urteil bleibt im eigenen Abschnitt"
+        );
+    }
+
+    /// Ein Urteil gegen uns steht auch bei einer Verweigerung ganz oben.
+    #[tokio::test]
+    async fn a_verdict_against_us_stays_on_top_of_a_refusal() {
+        let mut fake = Fake {
+            load: Some(300),
+            fit: Some(
+                "That is a result against us: on this load it brings nothing here.".to_owned(),
+            ),
+            ..clean()
+        };
+        let q = run(&mut fake).await;
+        let top = headline(&q);
+        assert!(top.starts_with("This run did not qualify"), "{top}");
+        assert!(top.contains("against us"), "{top}");
     }
 
     /// Das Manifest gehoert in beide Fassungen des Berichts.

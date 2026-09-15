@@ -80,7 +80,59 @@ struct Measured {
     samples: u32,
 }
 
+/// Wie die Laststufen eines Modells ausgegangen sind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Levels {
+    /// Jede Stufe gemessen; die Liste ersetzt die vorhandene.
+    Complete,
+    /// Eine Stufe wurde verworfen. Die vorhandenen Stufen bleiben stehen —
+    /// ungemessen, und der Lauf zaehlt die Reihe als verworfen.
+    Discarded,
+    /// Das Backend reiht denselben Auftrag ein, statt ihn nebenher zu rechnen.
+    /// Eine Laststufe beschreibt dort keine Belegung; die Liste wird geleert.
+    Serialised,
+}
+
+/// Ob eine Laststufe eine Warteschlange statt einer Belegung misst.
+///
+/// Rechnet ein Backend einen zweiten Auftrag desselben Modells nicht nebenher
+/// — der TFLite-Server hat einen Thread je Modell, Triton mit einer Instanz
+/// ebenso —, wartet der gemessene Auftrag, bis die Last vor ihm fertig ist.
+/// Seine Laufzeit waechst dann mit der Zahl der belegten Slots: bei einem auf
+/// das Doppelte. Genau das stand auf dem Pixel 2 (Detektor 1,87x, Tiefe 2,05x)
+/// und wurde in `examples/android_gpu/vig-slots2.yaml` von Hand entfernt;
+/// `vig autotune` schrieb es trotzdem als Belegungslaufzeit fest, und der
+/// Governor plante den Detektor neben **jedem** Nachbarn mit 297 statt 158 ms.
+///
+/// Die Grenze liegt bei 90 % der reinen Warteschlange, `(busy + 1) × 90 %`.
+/// Echte Nebenlaeufigkeit, die das Modell so stark bremst, gewinnt keinen
+/// Durchsatz und ist fuer den Plan nicht von einer Warteschlange zu
+/// unterscheiden; was verschiedene Modelle nebeneinander kosten, messen die
+/// Paare getrennt.
+fn serialises(busy: usize, slowdown_percent: u64) -> bool {
+    let queue = u64::try_from(busy)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1)
+        .saturating_mul(90);
+    slowdown_percent >= queue
+}
+
 impl Measured {
+    /// Nie schneller als allein.
+    ///
+    /// Auf einem Telefon taktet der SoC unter Last hoch, und eine Stufe kann
+    /// kuerzer ausfallen als die Solomessung (pose 80 850 gegen 89 173 us).
+    /// Fuer den Plan hiesse das: ein belegter Nachbar macht das Modell
+    /// schneller. Dieselbe Regel gilt fuer die Interferenz (ADR-0026).
+    fn at_least(self, solo: &Self) -> Self {
+        Self {
+            p50_us: self.p50_us.max(solo.p50_us),
+            p95_us: self.p95_us.max(solo.p95_us),
+            p99_us: self.p99_us.max(solo.p99_us),
+            samples: self.samples,
+        }
+    }
+
     fn to_config(
         &self,
         fingerprint: Option<String>,
@@ -143,8 +195,19 @@ async fn measure(
         request,
         crate::runloop::RunOptions::qualified(samples, period_us, CALIBRATE_WARMUP),
     ))
-    .await
-    .ok()?;
+    .await;
+    // Eine Reihe, die gar nicht erst anlief, ist eine verworfene Reihe und
+    // keine, die es nie gab. Vorher verschwand sie mit `.ok()?` spurlos: der
+    // Zaehler blieb stehen, `vig autotune` meldete „N von N verwertbar", und
+    // das alte Profil ging ungemessen in Betrieb.
+    let run = match run {
+        Ok(run) => run,
+        Err(e) => {
+            DISCARDED.fetch_add(1, Ordering::Relaxed);
+            eprintln!("    Messreihe verworfen: lief nicht an ({e})");
+            return None;
+        }
+    };
 
     if let Some(reason) = crate::runloop::rejection(&run) {
         DISCARDED.fetch_add(1, Ordering::Relaxed);
@@ -171,6 +234,9 @@ async fn measure(
 /// soll nicht zwischen zwanzig Einzelmeldungen untergehen.
 static DISCARDED: AtomicU64 = AtomicU64::new(0);
 static QUALIFIED: AtomicU64 = AtomicU64::new(0);
+/// Modelle, die gar nicht erst gemessen werden konnten — keine Metadaten,
+/// kein Nulltensor-Request. Ihr Profil bleibt ungemessen aus der Eingabe.
+static SKIPPED: AtomicU64 = AtomicU64::new(0);
 
 /// Wie viele Reihen qualifiziert und wie viele verworfen wurden.
 ///
@@ -184,10 +250,16 @@ pub(crate) fn qualification() -> (u64, u64) {
     )
 }
 
+/// Wie viele Modelle ungemessen blieben, weil sie sich nicht vermessen liessen.
+pub(crate) fn skipped_models() -> u64 {
+    SKIPPED.load(Ordering::Relaxed)
+}
+
 /// Setzt die Zaehler vor einem Lauf zurueck.
 pub(crate) fn reset_qualification() {
     QUALIFIED.store(0, Ordering::Relaxed);
     DISCARDED.store(0, Ordering::Relaxed);
+    SKIPPED.store(0, Ordering::Relaxed);
 }
 
 /// Sagt am Ende, was die Qualifikation ergeben hat.
@@ -398,6 +470,8 @@ struct VariantMeasurement {
     endpoint: String,
     solo: Measured,
     under_load: Vec<Measured>,
+    /// Ob `under_load` die vorhandenen Stufen ersetzen darf.
+    levels: Levels,
     fingerprint: String,
     /// Woher diese Zahlen stammen und wofuer sie gelten (NV-03).
     manifest: ProfileManifest,
@@ -477,6 +551,7 @@ pub(crate) async fn run(
             let metadata: ModelMetadataResponse = match client.model_metadata(backend_model).await {
                 Ok(m) => m,
                 Err(e) => {
+                    SKIPPED.fetch_add(1, Ordering::Relaxed);
                     eprintln!("    uebersprungen: Metadaten nicht abrufbar ({e})");
                     continue;
                 }
@@ -484,6 +559,11 @@ pub(crate) async fn run(
             let request = match vig_backend_triton::zero_request(backend_model, &metadata) {
                 Ok(r) => r,
                 Err(e) => {
+                    // Kein Fehlschlag des Laufs, aber ein ungemessenes Modell:
+                    // Es wird gezaehlt, damit `vig autotune` nicht „alle
+                    // Reihen verwertbar" sagt, waehrend ein Profil ungemessen
+                    // aus der Eingabe in Betrieb geht.
+                    SKIPPED.fetch_add(1, Ordering::Relaxed);
                     eprintln!(
                         "    uebersprungen: kein Nulltensor-Request baubar ({e}). \
                          Generative Modelle werden weiter unten textuell vermessen."
@@ -537,7 +617,7 @@ pub(crate) async fn run(
             else {
                 eprintln!(
                     "    {logical} -> {backend_model}: keine verwertbare Messreihe; \
-                     die vorhandenen Werte bleiben stehen."
+                     die vorhandenen Werte bleiben ungemessen aus der Eingabe stehen."
                 );
                 continue;
             };
@@ -547,6 +627,7 @@ pub(crate) async fn run(
             // Je zusaetzlich belegtem Slot eine Stufe. Bei einem Slot gibt es
             // keine Nebenlast und damit nichts zu messen.
             let mut under_load = Vec::new();
+            let mut levels = Levels::Complete;
             for busy in 1..slots {
                 let stop = Arc::new(AtomicBool::new(false));
                 let tasks = spawn_load(&client, &request, busy, &stop);
@@ -559,10 +640,20 @@ pub(crate) async fn run(
                 ))
                 .await;
                 stop_load(&stop, tasks).await;
+                // `under_load` ist stellengenau: Eintrag 0 heisst „ein Slot
+                // belegt". Eine verworfene Stufe darf die naechste deshalb
+                // nicht nachruecken lassen — sonst wird die Laufzeit bei zwei
+                // belegten Slots als die bei einem geplant. Abbrechen, und die
+                // vorhandenen Stufen stehen lassen.
                 let Some(level) = level.as_ref().map(quantiles) else {
-                    eprintln!("    {busy} belegt: keine verwertbare Messreihe; Stufe faellt aus");
-                    continue;
+                    eprintln!(
+                        "    {busy} belegt: keine verwertbare Messreihe; die vorhandenen \
+                         Laststufen bleiben stehen"
+                    );
+                    levels = Levels::Discarded;
+                    break;
                 };
+                let factor = slowdown_percent(level.p50_us, solo.p50_us);
                 eprintln!(
                     "    {busy} weitere{}  p50 {:>7} us  ({})",
                     if busy == 1 {
@@ -571,9 +662,20 @@ pub(crate) async fn run(
                         " Slots belegt"
                     },
                     level.p50_us,
-                    as_factor(slowdown_percent(level.p50_us, solo.p50_us))
+                    as_factor(factor)
                 );
-                under_load.push(level);
+                if serialises(busy, factor) {
+                    eprintln!(
+                        "    {busy} belegt: das Backend reiht denselben Auftrag ein, statt ihn \
+                         nebenher zu rechnen ({}). Das ist eine Warteschlange, keine \
+                         Belegung; es wird keine Laststufe geschrieben. Was verschiedene \
+                         Modelle nebeneinander kosten, messen die Paare.",
+                        as_factor(factor)
+                    );
+                    levels = Levels::Serialised;
+                    break;
+                }
+                under_load.push(level.at_least(&solo));
             }
 
             measurements.push(VariantMeasurement {
@@ -582,6 +684,7 @@ pub(crate) async fn run(
                 endpoint: model_endpoint,
                 solo,
                 under_load,
+                levels,
                 fingerprint,
                 manifest,
                 request,
@@ -1216,11 +1319,21 @@ fn apply(
             // Die Laststufen entstehen in derselben Umgebung wie das
             // Sologprofil. Das Manifest ein zweites Mal danebenzuschreiben
             // wuerde die Datei aufblaehen, ohne eine Frage zu beantworten.
-            variant.under_load = m
-                .under_load
-                .iter()
-                .map(|l| l.to_config(None, None))
-                .collect();
+            //
+            // Ersetzt wird nur eine vollstaendige Liste. Eine verworfene Stufe
+            // laesst die vorhandenen stehen, statt die gemessenen um eine
+            // Stelle nachruecken zu lassen; eine Warteschlange leert sie.
+            match m.levels {
+                Levels::Complete => {
+                    variant.under_load = m
+                        .under_load
+                        .iter()
+                        .map(|l| l.to_config(None, None))
+                        .collect();
+                }
+                Levels::Serialised => variant.under_load.clear(),
+                Levels::Discarded => {}
+            }
         }
     }
     for pair in pairs {
@@ -1314,6 +1427,43 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 
     use super::*;
+
+    /// Die Zahlen vom Pixel 2 (14.09.2026): Detektor und Tiefe warten im
+    /// Modellthread, `pose` rechnet nebenher. Nur die ersten beiden sind eine
+    /// Warteschlange — und genau die hat `vig-slots2.yaml` von Hand entfernt.
+    #[test]
+    fn a_doubled_runtime_beside_the_same_model_is_a_queue() {
+        assert!(serialises(1, 187), "Detektor 1,87x");
+        assert!(serialises(1, 205), "Tiefe 2,05x");
+        assert!(!serialises(1, 90), "pose 0,90x rechnet nebenher");
+        assert!(!serialises(1, 150), "echte Nebenlaeufigkeit mit Aufschlag");
+        assert!(
+            serialises(2, 280),
+            "zwei belegte Slots: dreifach ist Warteschlange"
+        );
+        assert!(!serialises(2, 200), "und doppelt dort noch nicht");
+    }
+
+    /// Eine Laststufe ist nie schneller als die Solomessung.
+    #[test]
+    fn a_level_never_plans_faster_than_solo() {
+        let solo = Measured {
+            p50_us: 89_173,
+            p95_us: 109_642,
+            p99_us: 117_496,
+            samples: 200,
+        };
+        let level = Measured {
+            p50_us: 80_850,
+            p95_us: 95_255,
+            p99_us: 120_000,
+            samples: 200,
+        };
+        let clamped = level.at_least(&solo);
+        assert_eq!(clamped.p50_us, 89_173);
+        assert_eq!(clamped.p95_us, 109_642);
+        assert_eq!(clamped.p99_us, 120_000, "was darueber liegt, bleibt");
+    }
 
     /// p99 mit Hintergrundlast minus p99 allein.
     #[test]

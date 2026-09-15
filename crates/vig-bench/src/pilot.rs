@@ -1145,16 +1145,12 @@ fn detector_request(
 }
 
 /// Der Textauftrag fuer einen Lagebericht, im Format des vLLM-Backends.
+///
+/// `None`, wenn der Prompt nicht in einen `BYTES`-Rahmen passt (ab 4 GiB).
 #[must_use]
-pub fn report_request(model: &str, prompt: &str, max_tokens: u32) -> ModelInferRequest {
+pub fn report_request(model: &str, prompt: &str, max_tokens: u32) -> Option<ModelInferRequest> {
     let params = format!("{{\"max_tokens\": {max_tokens}, \"temperature\": 0.0}}");
-    let prefixed = |value: &str| {
-        let bytes = value.as_bytes();
-        let mut out = Vec::with_capacity(bytes.len().saturating_add(4));
-        out.extend_from_slice(&u32::try_from(bytes.len()).unwrap_or(0).to_le_bytes());
-        out.extend_from_slice(bytes);
-        out
-    };
+    let prefixed = |value: &str| vig_protocol_oip::bytes::encode_bytes_element(value.as_bytes());
     let tensor = |name: &str| InferInputTensor {
         name: name.to_owned(),
         datatype: "BYTES".to_owned(),
@@ -1162,15 +1158,15 @@ pub fn report_request(model: &str, prompt: &str, max_tokens: u32) -> ModelInferR
         parameters: std::collections::HashMap::new(),
         contents: None,
     };
-    ModelInferRequest {
+    Some(ModelInferRequest {
         model_name: model.to_owned(),
         model_version: String::new(),
         id: "lagebericht".to_owned(),
         parameters: std::collections::HashMap::new(),
         inputs: vec![tensor(TEXT_INPUT), tensor(SAMPLING_PARAMETERS)],
         outputs: Vec::new(),
-        raw_input_contents: vec![prefixed(prompt), prefixed(&params)],
-    }
+        raw_input_contents: vec![prefixed(prompt)?, prefixed(&params)?],
+    })
 }
 
 /// Der Prompt aus dem, was die Kameras zuletzt geliefert haben.
@@ -1447,14 +1443,16 @@ pub async fn run_arm(config: ArmConfig) -> Result<ArmReport, String> {
                         (a, b) => a.or(b),
                     };
                 }
+                // Ohne gueltigen Rahmen gibt es nichts zu senden; das zaehlt als
+                // fehlgeschlagener Bericht und nicht als stiller Ausfall.
                 let request = report_request(&llm.model, &report_prompt(&counts), llm.max_tokens);
-                let ok = if via_governor {
-                    match governed.clone() {
+                let ok = match request {
+                    None => false,
+                    Some(request) if via_governor => match governed.clone() {
                         Some(mut client) => client.model_infer(request).await.is_ok(),
                         None => false,
-                    }
-                } else {
-                    direct.infer_decoupled(request).await.is_ok()
+                    },
+                    Some(request) => direct.infer_decoupled(request).await.is_ok(),
                 };
                 if ok {
                     report.reports = report.reports.saturating_add(1);

@@ -130,10 +130,11 @@ fn text_tensor(name: &str) -> InferInputTensor {
 }
 
 /// Kodiert einen String so, wie OIP Rohdaten fuer `BYTES` erwartet.
+///
+/// Passt die Laenge nicht in `u32`, gibt es keinen richtigen Rahmen. Dann
+/// bleiben die Rohdaten **leer** statt mit erfundener Laenge: das Backend
+/// lehnt einen `BYTES`-Tensor ohne Element ausdruecklich ab, ein
+/// gesaettigter Praefix dagegen saehe gueltig aus und truege falsche Daten.
 fn length_prefixed(value: &str) -> Vec<u8> {
-    let bytes = value.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len().saturating_add(4));
-    out.extend_from_slice(&u32::try_from(bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
-    out.extend_from_slice(bytes);
-    out
+    vig_protocol_oip::bytes::encode_bytes_element(value.as_bytes()).unwrap_or_default()
 }

@@ -1203,7 +1203,15 @@ impl Actor {
                 // Deshalb wird hier **ein** Quantum ueber das volle zulaessige
                 // Budget gebaut und genau das weitergereicht. Ein Lauf am
                 // Stueck, aber innerhalb des Vertrags.
-                *request = job.build_quantum(&request, job.max_total_tokens);
+                let Some(quantum) = job.build_quantum(&request, job.max_total_tokens) else {
+                    // Kein `BYTES`-Rahmen fuer den Prompt. Ungeteilt ohne
+                    // Grenze weiterzureichen ist ausgeschlossen (siehe oben).
+                    let _ = reply.send(Err(Status::invalid_argument(
+                        "der Texteingang passt nicht in einen BYTES-Rahmen",
+                    )));
+                    return false;
+                };
+                *request = quantum;
                 self.generative.refused = self.generative.refused.saturating_add(1);
             }
         }
@@ -1578,7 +1586,15 @@ impl Actor {
         // weitergereicht, sondern das naechste Quantum: Prompt plus bisher
         // Erzeugtes, begrenzt auf die vom Scheduler bestimmte Tokenzahl.
         if let (Some(tokens), Some(job)) = (quantum, self.jobs.get_mut(&request)) {
-            let quantum_request = job.build_quantum(&oip, tokens);
+            let Some(quantum_request) = job.build_quantum(&oip, tokens) else {
+                // Prompt plus Erzeugtes passt nicht mehr in einen
+                // `BYTES`-Rahmen. Hier abzubrechen und das Bisherige als
+                // Antwort zu liefern hiesse, eine gekuerzte Antwort als
+                // vollstaendig auszugeben.
+                tracing::error!(%request, "Fortsetzung passt nicht in einen BYTES-Rahmen");
+                self.finish(request, RequestState::Failed);
+                return;
+            };
             *oip = quantum_request;
             backend_model.clone_into(&mut oip.model_name);
         }
@@ -2480,7 +2496,7 @@ impl Actor {
 
     /// Beantwortet einen wartenden Client — oder setzt einen zerlegten
     /// Auftrag fort.
-    fn finish(&mut self, request: RequestId, state: RequestState) {
+    fn finish(&mut self, request: RequestId, mut state: RequestState) {
         // Ein Quantum, das erfolgreich war und den Auftrag noch nicht beendet
         // hat, ist keine Antwort an den Client, sondern der Anlass fuer das
         // naechste Quantum.
@@ -2499,7 +2515,7 @@ impl Actor {
                 .waiting
                 .get(&request)
                 .is_some_and(|reply| !reply.is_closed());
-            let finished = job.absorb(response);
+            let absorbed = job.absorb(response);
             // Gebucht wird hier und nicht in `continue_job`: dort laeuft das
             // **letzte** Quantum nie durch, und seine Dekodierarbeit fiele aus
             // der Statistik. Bei n Quanten waeren n-1 gezaehlt, und das
@@ -2514,13 +2530,26 @@ impl Actor {
             {
                 self.generative.record(&cooperative, &job);
             }
-            if !finished && listening {
+            if matches!(absorbed, Ok(false)) && listening {
                 self.continue_job(request, job);
                 return;
             }
             // Fertig: die gesammelte Antwort an den Client.
+            //
+            // Oder ein Fehler — wenn das letzte Quantum eine Textausgabe trug,
+            // die sich nicht lesen liess, oder der gesammelte Text keinen
+            // `BYTES`-Rahmen mehr hat. Das bisher Erzeugte als vollstaendige
+            // Antwort auszuliefern saehe aus wie ein Erfolg und waere
+            // stiller Datenverlust.
             if let Some(Ok(response)) = self.responses.get_mut(&request) {
-                *response = job.build_response(response);
+                match absorbed.and_then(|_| job.build_response(response)) {
+                    Ok(collected) => *response = collected,
+                    Err(error) => {
+                        tracing::warn!(%request, %error, "zerlegter Auftrag: Ergebnis nicht lesbar");
+                        self.responses.insert(request, Err(error));
+                        state = RequestState::Failed;
+                    }
+                }
             }
         }
 

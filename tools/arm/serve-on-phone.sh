@@ -66,11 +66,14 @@ e2e_binary() { # Protokoll eines `cargo test --no-run`
 if [ "${SKIP_BUILD:-0}" != 1 ]; then
   echo "== Bauen"
   "$QUIET" cargo build --release -p vig-cli --target aarch64-unknown-linux-musl
+  # `vig autotune` sucht `vig-fit` neben `vig`; ohne es bleibt `fit` offen.
+  "$QUIET" cargo build --release -p vig-bench --bin vig-fit --target aarch64-unknown-linux-musl
   "$QUIET" cargo test --release -p vig-gateway --test end_to_end \
     --target aarch64-unknown-linux-musl --no-run 2>&1 | tee "$OUT/build-arm.log"
   "$QUIET" cargo build --release -p vig-bench --bin serve-latency
   "$QUIET" cargo test --release -p vig-gateway --test end_to_end --no-run 2>&1 | tee "$OUT/build-x86.log"
   adb push "$TARGET/aarch64-unknown-linux-musl/release/vig" $PHONE/vig >/dev/null
+  adb push "$TARGET/aarch64-unknown-linux-musl/release/vig-fit" $PHONE/vig-fit >/dev/null
   adb push "$(e2e_binary "$OUT/build-arm.log")" $PHONE/vig-e2e >/dev/null
 fi
 adb push tools/arm/serve-phone.yaml $PHONE/serve-phone.yaml >/dev/null

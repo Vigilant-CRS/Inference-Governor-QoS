@@ -8,6 +8,7 @@
 //!    [`vig_core::RequestDescriptor`] uebersetzen — beziehungsweise, wenn
 //!    keine gesetzt sind, den Compatibility Mode aus Spec 16.3 anwenden.
 
+pub mod bytes;
 pub mod inference;
 pub mod params;
 

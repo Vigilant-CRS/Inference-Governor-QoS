@@ -98,12 +98,11 @@ struct Outcome {
 
 fn text_request(model: &str, prompt: &str, max_tokens: u32) -> ModelInferRequest {
     let params = format!("{{\"max_tokens\": {max_tokens}, \"temperature\": 0.0}}");
+    // Prompt und Parameter sind hier Konstanten weit unter 4 GiB; passt einer
+    // nicht in einen `BYTES`-Rahmen, ist das ein Programmierfehler.
     let prefixed = |value: &str| {
-        let bytes = value.as_bytes();
-        let mut out = Vec::with_capacity(bytes.len() + 4);
-        out.extend_from_slice(&u32::try_from(bytes.len()).unwrap_or(0).to_le_bytes());
-        out.extend_from_slice(bytes);
-        out
+        vig_protocol_oip::bytes::encode_bytes_element(value.as_bytes())
+            .expect("Text passt in einen BYTES-Rahmen")
     };
     let tensor = |name: &str| InferInputTensor {
         name: name.to_owned(),

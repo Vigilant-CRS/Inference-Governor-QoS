@@ -80,6 +80,10 @@ jobs:
       # Versioniert: ein ungepinntes `cargo install` baut, was gerade neu ist.
       - run: cargo install cargo-auditable --locked --version 0.7.5
       - run: cargo auditable build --release --locked -p vig-cli --target ${{ matrix.target }}
+      # `vig autotune` sucht `vig-fit` neben `vig`. Ohne es bleibt der Schritt
+      # `fit` auf jeder installierten Maschine offen, und kein Lauf wird je
+      # vollstaendig (ADR-0044).
+      - run: cargo auditable build --release --locked -p vig-bench --bin vig-fit --target ${{ matrix.target }}
 
       # Der Kern ohne I/O laeuft im Emulator vollstaendig. Das ist keine
       # Leistungsmessung und ersetzt keine Hardwarequalifikation — es belegt,
@@ -93,6 +97,7 @@ jobs:
           D="vig-${V}-${{ matrix.target }}"
           mkdir -p "dist/$D"
           cp "target/${{ matrix.target }}/release/vig" "dist/$D/"
+          cp "target/${{ matrix.target }}/release/vig-fit" "dist/$D/"
           cp LICENSE NOTICE THIRD_PARTY_NOTICES.md README.md "dist/$D/"
           tar -C dist -czf "dist/$D.tar.gz" "$D"
           ( cd dist && sha256sum "$D.tar.gz" > "$D.tar.gz.sha256" )

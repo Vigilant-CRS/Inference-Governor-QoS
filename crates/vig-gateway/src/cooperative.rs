@@ -31,6 +31,8 @@
 //! das mitten in der Erzeugung ein leeres Quantum liefert, gilt als fertig.
 //! Sobald das Backend einen Abbruchgrund ausgibt, gehoert er hierher.
 
+use vig_backend_triton::BackendError;
+use vig_protocol_oip::bytes::{decode_single_bytes_element, encode_bytes_element};
 use vig_protocol_oip::inference::model_infer_request::InferInputTensor;
 use vig_protocol_oip::inference::{ModelInferRequest, ModelInferResponse};
 
@@ -101,9 +103,20 @@ impl GenerativeJob {
     /// daraus zu bauen hiesse, sie zu reparieren oder zu verwerfen, und
     /// beides waere eine Entscheidung ueber das Ergebnis, die dem Client
     /// gehoert. Ungeteilt entscheidet das Backend, was es damit tut.
+    ///
+    /// Dasselbe gilt fuer einen Text- oder Parametertensor, der nicht aus
+    /// genau einem sauber gerahmten String besteht: unveraendert
+    /// weitergereicht meldet Triton den kaputten Tensor selbst. Ein
+    /// unlesbarer Parametertensor ist dabei **nicht** dasselbe wie keiner —
+    /// sonst ersetzte das erste Quantum ihn stillschweigend.
     #[must_use]
     pub fn from_request(request: &ModelInferRequest, max_total_tokens: u32) -> Option<Self> {
         let prompt = read_text_input(request)?;
+        if request.inputs.iter().any(|i| i.name == SAMPLING_PARAMETERS)
+            && read_sampling_parameters(request).is_none()
+        {
+            return None;
+        }
         let declared_sampling =
             read_sampling_parameters(request).filter(|text| !text.trim().is_empty());
         if declared_sampling
@@ -161,34 +174,38 @@ impl GenerativeJob {
     ///
     /// Der Texteingang wird auf Prompt plus bisher Erzeugtes gesetzt, die
     /// Tokenzahl auf die Quantengroesse begrenzt.
+    ///
+    /// `None`, wenn Prompt plus Erzeugtes nicht mehr in einen `BYTES`-Rahmen
+    /// passt (ab 4 GiB). Einen gekuerzten Kontext zu schicken hiesse, das
+    /// Modell an einer anderen Stelle weiterschreiben zu lassen.
     #[must_use]
     pub fn build_quantum(
         &mut self,
         template: &ModelInferRequest,
         quantum_tokens: u32,
-    ) -> ModelInferRequest {
+    ) -> Option<ModelInferRequest> {
         let mut request = template.clone();
         let tokens = quantum_tokens.min(self.remaining_tokens()).max(1);
-        // Gemerkt, weil es die einzige **harte** Obergrenze ist, die dieses
-        // Modul hat: das Backend setzt `max_tokens` in echten Token durch.
-        self.last_requested_tokens = Some(tokens);
         let continuation = format!("{}{}", self.prompt, self.generated);
         let sampling = self.sampling_for(tokens);
 
         // Text und Samplingparameter werden ersetzt, **alles andere bleibt**.
         // Bei einem VLM steht der eigentliche Inhalt in den uebrigen Eingaben.
         let mut inputs = vec![text_tensor(TEXT_INPUT, &continuation)];
-        let mut raw = vec![length_prefixed(&continuation)];
+        let mut raw = vec![length_prefixed(&continuation)?];
         inputs.push(text_tensor(SAMPLING_PARAMETERS, &sampling));
-        raw.push(length_prefixed(&sampling));
+        raw.push(length_prefixed(&sampling)?);
         for (tensor, bytes) in &self.extra_inputs {
             inputs.push(tensor.clone());
             raw.push(bytes.clone());
         }
 
+        // Gemerkt, weil es die einzige **harte** Obergrenze ist, die dieses
+        // Modul hat: das Backend setzt `max_tokens` in echten Token durch.
+        self.last_requested_tokens = Some(tokens);
         request.inputs = inputs;
         request.raw_input_contents = raw;
-        request
+        Some(request)
     }
 
     /// Die Samplingparameter dieses Quantums.
@@ -219,12 +236,30 @@ impl GenerativeJob {
     /// Nimmt das Ergebnis eines Quantums auf.
     ///
     /// Gibt zurueck, ob der Auftrag damit abgeschlossen ist.
-    pub fn absorb(&mut self, response: &ModelInferResponse) -> bool {
+    ///
+    /// # Errors
+    ///
+    /// [`BackendError::Malformed`], wenn die Antwort eine Textausgabe traegt,
+    /// die nicht aus genau einem sauber gerahmten UTF-8-String besteht. Das
+    /// ist kein Ende der Erzeugung, sondern eine kaputte Antwort: sie als
+    /// „nichts Neues" zu lesen gaebe dem Client das bisher Erzeugte als
+    /// vollstaendig zurueck, und eine abgeschnittene Laenge haette ihm sogar
+    /// einen Teil davon als Ergebnis untergeschoben.
+    pub fn absorb(&mut self, response: &ModelInferResponse) -> Result<bool, BackendError> {
         self.quanta = self.quanta.saturating_add(1);
         self.last_quantum_tokens = 0;
-        let Some(text) = read_text_output(response) else {
-            // Ohne verwertbare Ausgabe ist nichts fortzusetzen.
-            return true;
+        let Some(raw) = text_output_raw(response) else {
+            // Ohne Ausgabe ist nichts fortzusetzen.
+            return Ok(true);
+        };
+        let Some(text) = read_length_prefixed(raw) else {
+            return Err(BackendError::Malformed {
+                detail: format!(
+                    "`{TEXT_OUTPUT}` ist nicht genau ein gerahmter UTF-8-String \
+                     ({} Rohbytes)",
+                    raw.len()
+                ),
+            });
         };
 
         // Das Backend liefert Prompt plus Fortsetzung oder nur die
@@ -234,7 +269,7 @@ impl GenerativeJob {
         let delta = text.strip_prefix(&known).unwrap_or(&text);
 
         if delta.is_empty() {
-            return true;
+            return Ok(true);
         }
         self.generated.push_str(delta);
         // Grobe Schaetzung: rund vier Zeichen je Token. Sie muss nur gut genug
@@ -260,15 +295,28 @@ impl GenerativeJob {
         let consumed = by_bytes.min(by_order);
         self.last_quantum_tokens = consumed;
         self.tokens = self.tokens.saturating_add(consumed);
-        self.tokens >= self.max_total_tokens
+        Ok(self.tokens >= self.max_total_tokens)
     }
 
     /// Baut die Antwort an den Client aus dem gesammelten Text.
-    #[must_use]
-    pub fn build_response(&self, template: &ModelInferResponse) -> ModelInferResponse {
+    ///
+    /// # Errors
+    ///
+    /// [`BackendError::Malformed`], wenn der gesammelte Text nicht in einen
+    /// `BYTES`-Rahmen passt (ab 4 GiB).
+    pub fn build_response(
+        &self,
+        template: &ModelInferResponse,
+    ) -> Result<ModelInferResponse, BackendError> {
+        let raw = length_prefixed(&self.generated).ok_or_else(|| BackendError::Malformed {
+            detail: format!(
+                "der gesammelte Text ({} Bytes) passt nicht in einen BYTES-Rahmen",
+                self.generated.len()
+            ),
+        })?;
         let mut response = template.clone();
-        response.raw_output_contents = vec![length_prefixed(&self.generated)];
-        response
+        response.raw_output_contents = vec![raw];
+        Ok(response)
     }
 }
 
@@ -283,41 +331,33 @@ fn text_tensor(name: &str, _value: &str) -> InferInputTensor {
     }
 }
 
-/// Ein String im laengenpraefigierten BYTES-Format des Protokolls.
 /// Schreibt einen laengenpraefigierten String, wie das vLLM-Backend ihn
 /// erwartet: vier Bytes Laenge, little endian, dann die Nutzbytes.
 ///
-/// Oeffentlich, weil dasselbe Format im Baum bereits mehrfach getrennt
-/// geschrieben wird (`vig-backend-triton/src/request.rs`,
-/// `vig-bench/src/pilot.rs`, `vig-bench/src/bin/wp26.rs`) — und die Kopien
-/// laufen schon auseinander: Zwei saettigen bei `u32::MAX`, zwei fallen auf
-/// `0` zurueck. Ein Drahtformat, das viermal beschrieben wird, hat keinen
-/// Besitzer. Der Lasttreiber nimmt deshalb diese Fassung, statt eine fuenfte
-/// anzulegen; die drei uebrigen zusammenzufuehren ist eine eigene Aufgabe.
+/// Eine duenne Huelle um [`vig_protocol_oip::bytes::encode_bytes_element`]:
+/// das Format hat dort seinen einzigen Besitzer, nachdem vier getrennte
+/// Kopien auseinandergelaufen waren. `None`, wenn der String nicht in einen
+/// Rahmen passt (ab 4 GiB).
 #[must_use]
-pub fn write_length_prefixed(value: &str) -> Vec<u8> {
+pub fn write_length_prefixed(value: &str) -> Option<Vec<u8>> {
     length_prefixed(value)
 }
 
-fn length_prefixed(value: &str) -> Vec<u8> {
-    let bytes = value.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len().saturating_add(4));
-    out.extend_from_slice(&u32::try_from(bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
-    out.extend_from_slice(bytes);
-    out
+fn length_prefixed(value: &str) -> Option<Vec<u8>> {
+    encode_bytes_element(value.as_bytes())
 }
 
 /// Liest einen laengenpraefigierten String.
+///
+/// Nur genau ein Element mit exakt passender Laenge. Die fruehere Fassung
+/// kuerzte eine zu grosse Laengenangabe auf die vorhandenen Bytes und
+/// verwarf, was hinter einer zu kleinen stand — ein Batch mit Form `[2]`
+/// verlor so still sein zweites Element. `None` heisst fuer einen Request:
+/// nicht zerlegen, unveraendert weiterreichen. Fuer eine Antwort macht
+/// [`GenerativeJob::absorb`] daraus einen Fehler.
 fn read_length_prefixed(bytes: &[u8]) -> Option<String> {
-    let (header, rest) = bytes.split_at_checked(4)?;
-    let length = u32::from_le_bytes([
-        *header.first()?,
-        *header.get(1)?,
-        *header.get(2)?,
-        *header.get(3)?,
-    ]);
-    let end = usize::try_from(length).ok()?.min(rest.len());
-    String::from_utf8(rest.get(..end)?.to_vec()).ok()
+    let element = decode_single_bytes_element(bytes)?;
+    String::from_utf8(element.to_vec()).ok()
 }
 
 /// Liest den Texteingang eines Requests.
@@ -381,15 +421,22 @@ fn extra_inputs(request: &ModelInferRequest) -> Vec<(InferInputTensor, Vec<u8>)>
 }
 
 /// Liest die Textausgabe einer Antwort.
+///
+/// `None` sowohl ohne Ausgabe als auch bei einer kaputten; wer beides
+/// unterscheiden muss, nimmt [`GenerativeJob::absorb`].
 #[must_use]
 pub fn read_text_output(response: &ModelInferResponse) -> Option<String> {
+    read_length_prefixed(text_output_raw(response)?)
+}
+
+/// Die Rohdaten der Textausgabe, falls die Antwort welche traegt.
+fn text_output_raw(response: &ModelInferResponse) -> Option<&[u8]> {
     let index = response
         .outputs
         .iter()
         .position(|o| o.name == TEXT_OUTPUT)
         .unwrap_or(0);
-    let raw = response.raw_output_contents.get(index)?;
-    read_length_prefixed(raw)
+    response.raw_output_contents.get(index).map(Vec::as_slice)
 }
 
 #[cfg(test)]
@@ -407,7 +454,7 @@ mod tests {
             parameters: std::collections::HashMap::new(),
             inputs: vec![text_tensor(TEXT_INPUT, prompt)],
             outputs: Vec::new(),
-            raw_input_contents: vec![length_prefixed(prompt)],
+            raw_input_contents: vec![length_prefixed(prompt).unwrap()],
         }
     }
 
@@ -424,8 +471,90 @@ mod tests {
                 parameters: std::collections::HashMap::new(),
                 contents: None,
             }],
-            raw_output_contents: vec![length_prefixed(text)],
+            raw_output_contents: vec![length_prefixed(text).unwrap()],
         }
+    }
+
+    /// Drei Rahmen, die keiner sind: Laengenangabe zu gross, zu klein, und
+    /// zwei Elemente in einem Tensor.
+    fn malformed_frames(text: &str) -> [Vec<u8>; 3] {
+        let length = u32::try_from(text.len()).unwrap();
+        let frame = |declared: u32| {
+            let mut out = declared.to_le_bytes().to_vec();
+            out.extend_from_slice(text.as_bytes());
+            out
+        };
+        let mut two = length_prefixed(text).unwrap();
+        two.extend(length_prefixed(text).unwrap());
+        [
+            frame(length.checked_add(8).unwrap()),
+            frame(length.checked_sub(2).unwrap()),
+            two,
+        ]
+    }
+
+    /// Ein kaputt gerahmter Texteingang wird nicht zerlegt (Review C3).
+    ///
+    /// Vorher kuerzte der Leser eine zu grosse Laengenangabe auf die
+    /// vorhandenen Bytes, verwarf, was hinter einer zu kleinen stand, und
+    /// las von zwei Elementen nur das erste — der Auftrag lief dann mit einem
+    /// anderen Prompt als dem gesendeten, und `text_tensor` schrieb die Form
+    /// auf `[1]` um. Jetzt bleibt der Request, wie er ist, und Triton meldet
+    /// den kaputten Tensor.
+    #[test]
+    fn a_malformed_text_input_is_passed_through_unsplit() {
+        for raw in malformed_frames("Beschreibe: ") {
+            let mut request = request_with("Beschreibe: ");
+            request.raw_input_contents = vec![raw.clone()];
+            assert_eq!(read_text_input(&request), None, "{raw:?}");
+            assert!(
+                GenerativeJob::from_request(&request, 64).is_none(),
+                "{raw:?}"
+            );
+        }
+    }
+
+    /// Ein unlesbarer Parametertensor ist nicht dasselbe wie keiner.
+    ///
+    /// Sonst ersetzte das erste Quantum ihn durch ein erfundenes
+    /// `{"max_tokens": n}`, und die Vorgabe des Clients waere still weg.
+    #[test]
+    fn malformed_sampling_parameters_are_passed_through_unsplit() {
+        for raw in malformed_frames(r#"{"max_tokens": 4, "temperature": 0.7}"#) {
+            let mut request = with_sampling("{}");
+            *request.raw_input_contents.get_mut(1).unwrap() = raw.clone();
+            assert!(
+                GenerativeJob::from_request(&request, 64).is_none(),
+                "{raw:?}"
+            );
+        }
+    }
+
+    /// Eine kaputt gerahmte Textausgabe ist ein Fehler, kein Ende (Review C3).
+    ///
+    /// Als „nichts Neues" gelesen, bekaeme der Client das bisher Erzeugte als
+    /// vollstaendige Antwort — und eine abgeschnittene Laenge haette ihm
+    /// einen Teil der Ausgabe als Ergebnis untergeschoben.
+    #[test]
+    fn a_malformed_text_output_is_an_error() {
+        for raw in malformed_frames("Prompt und weiter") {
+            let template = request_with("Prompt");
+            let mut job = GenerativeJob::from_request(&template, 64).unwrap();
+            let mut response = response_with("");
+            response.raw_output_contents = vec![raw.clone()];
+            assert_eq!(read_text_output(&response), None, "{raw:?}");
+            assert!(
+                matches!(job.absorb(&response), Err(BackendError::Malformed { .. })),
+                "{raw:?}"
+            );
+            assert_eq!(job.generated, "", "nichts davon wird uebernommen");
+        }
+
+        // Ohne Ausgabe bleibt es beim bisherigen Ende.
+        let mut job = GenerativeJob::from_request(&request_with("Prompt"), 64).unwrap();
+        let mut empty = response_with("");
+        empty.raw_output_contents.clear();
+        assert!(job.absorb(&empty).unwrap());
     }
 
     /// Die Zerlegung darf nicht mehr Tokens bestellen als der Client.
@@ -440,13 +569,13 @@ mod tests {
         request.inputs.push(text_tensor(SAMPLING_PARAMETERS, ""));
         request
             .raw_input_contents
-            .push(length_prefixed("{\"max_tokens\": 4, \"temperature\": 0.7}"));
+            .push(length_prefixed("{\"max_tokens\": 4, \"temperature\": 0.7}").unwrap());
 
         // Die Konfiguration erlaubt 64 — die Bestellung des Clients gilt.
         let mut job = GenerativeJob::from_request(&request, 64).unwrap();
         assert_eq!(job.max_total_tokens, 4);
 
-        let quantum = job.build_quantum(&request, 32);
+        let quantum = job.build_quantum(&request, 32).unwrap();
         assert_eq!(read_max_tokens(&quantum), Some(4));
         assert_eq!(
             sampling_of(&quantum).get("temperature"),
@@ -458,7 +587,9 @@ mod tests {
     fn with_sampling(sampling: &str) -> ModelInferRequest {
         let mut request = request_with("Beschreibe: ");
         request.inputs.push(text_tensor(SAMPLING_PARAMETERS, ""));
-        request.raw_input_contents.push(length_prefixed(sampling));
+        request
+            .raw_input_contents
+            .push(length_prefixed(sampling).unwrap());
         request
     }
 
@@ -493,7 +624,7 @@ mod tests {
             let request = with_sampling(declared);
             let mut job = GenerativeJob::from_request(&request, 64)
                 .unwrap_or_else(|| panic!("zerlegbar: {declared}"));
-            let quantum = job.build_quantum(&request, 8);
+            let quantum = job.build_quantum(&request, 8).unwrap();
             let mut sent = sampling_of(&quantum);
             assert_eq!(
                 sent.remove("max_tokens"),
@@ -567,7 +698,7 @@ mod tests {
         request.raw_input_contents.push(vec![7_u8; 32]);
 
         let mut job = GenerativeJob::from_request(&request, 16).unwrap();
-        let quantum = job.build_quantum(&request, 8);
+        let quantum = job.build_quantum(&request, 8).unwrap();
 
         let image = quantum
             .inputs
@@ -616,14 +747,16 @@ mod tests {
         let template = request_with("Beschreibe die Szene:");
         let mut job = GenerativeJob::from_request(&template, 64).unwrap();
 
-        let first = job.build_quantum(&template, 8);
+        let first = job.build_quantum(&template, 8).unwrap();
         assert_eq!(read_text_input(&first).unwrap(), "Beschreibe die Szene:");
 
-        let done = job.absorb(&response_with("Beschreibe die Szene: Ein Roboter"));
+        let done = job
+            .absorb(&response_with("Beschreibe die Szene: Ein Roboter"))
+            .unwrap();
         assert!(!done, "der Auftrag ist noch nicht fertig");
         assert_eq!(job.generated, " Ein Roboter");
 
-        let second = job.build_quantum(&template, 8);
+        let second = job.build_quantum(&template, 8).unwrap();
         assert_eq!(
             read_text_input(&second).unwrap(),
             "Beschreibe die Szene: Ein Roboter"
@@ -634,7 +767,7 @@ mod tests {
     fn a_backend_that_returns_only_the_continuation_also_works() {
         let template = request_with("Prompt");
         let mut job = GenerativeJob::from_request(&template, 64).unwrap();
-        job.absorb(&response_with(" und weiter"));
+        job.absorb(&response_with(" und weiter")).unwrap();
         assert_eq!(job.generated, " und weiter");
     }
 
@@ -644,7 +777,7 @@ mod tests {
         let template = request_with("Prompt");
         let mut job = GenerativeJob::from_request(&template, 64).unwrap();
         assert!(
-            job.absorb(&response_with("Prompt")),
+            job.absorb(&response_with("Prompt")).unwrap(),
             "kein Zuwachs, also fertig"
         );
     }
@@ -654,7 +787,9 @@ mod tests {
     fn the_total_token_budget_is_enforced() {
         let template = request_with("P");
         let mut job = GenerativeJob::from_request(&template, 8).unwrap();
-        let done = job.absorb(&response_with(&format!("P{}", "x".repeat(64))));
+        let done = job
+            .absorb(&response_with(&format!("P{}", "x".repeat(64))))
+            .unwrap();
         assert!(done, "die Gesamtobergrenze beendet den Auftrag");
         assert!(job.tokens >= 8);
         assert_eq!(job.remaining_tokens(), 0);
@@ -669,9 +804,10 @@ mod tests {
         // setzt `max_tokens` in echten Token durch, und mehr kann nicht
         // entstanden sein. Ohne sie waeren 32 Zeichen bis zu 32 Token, und
         // das Budget waere aufgebraucht (Review R06).
-        let _ = job.build_quantum(&template, 8);
-        job.absorb(&response_with(&format!("P{}", "x".repeat(32))));
-        let request = job.build_quantum(&template, 100);
+        let _ = job.build_quantum(&template, 8).unwrap();
+        job.absorb(&response_with(&format!("P{}", "x".repeat(32))))
+            .unwrap();
+        let request = job.build_quantum(&template, 100).unwrap();
         // Acht bestellte Token sind verbraucht, es bleiben 2 von 10. Auch bei
         // grosszuegig angefragtem Quantum wird nur das Restbudget angefordert.
         assert_eq!(job.remaining_tokens(), 2);
@@ -701,7 +837,7 @@ mod tests {
     fn the_token_budget_holds_against_single_byte_tokens() {
         let mut job = GenerativeJob::from_request(&request_with("Prompt:"), 4).unwrap();
         // Vier tatsaechliche Token in vier Bytes.
-        let done = job.absorb(&response_with("1234"));
+        let done = job.absorb(&response_with("1234")).unwrap();
         assert!(done, "vier Token verbraucht, gezaehlt {} von 4", job.tokens);
         assert_eq!(job.remaining_tokens(), 0);
     }
@@ -716,8 +852,8 @@ mod tests {
     fn the_ordered_amount_binds_where_it_is_smaller() {
         let template = request_with("Prompt:");
         let mut job = GenerativeJob::from_request(&template, 64).unwrap();
-        let _ = job.build_quantum(&template, 8);
-        job.absorb(&response_with(&"x".repeat(40)));
+        let _ = job.build_quantum(&template, 8).unwrap();
+        job.absorb(&response_with(&"x".repeat(40))).unwrap();
         assert_eq!(
             job.tokens, 8,
             "40 Bytes, aber nur 8 Token bestellt — mehr kann nicht entstanden sein"

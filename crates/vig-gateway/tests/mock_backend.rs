@@ -164,11 +164,7 @@ impl MockBackend {
 
 /// Kodiert einen String so, wie OIP Rohdaten fuer `BYTES` erwartet.
 fn length_prefixed(value: &str) -> Vec<u8> {
-    let bytes = value.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len().saturating_add(4));
-    out.extend_from_slice(&u32::try_from(bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
-    out.extend_from_slice(bytes);
-    out
+    vig_protocol_oip::bytes::encode_bytes_element(value.as_bytes()).unwrap()
 }
 
 /// Liest `max_tokens` aus den Samplingparametern.
@@ -188,15 +184,8 @@ fn read_max_tokens(sampling: &str) -> Option<u32> {
 
 /// Liest einen laengenpraefigierten String.
 fn read_length_prefixed(bytes: &[u8]) -> Option<String> {
-    let (header, rest) = bytes.split_at_checked(4)?;
-    let length = u32::from_le_bytes([
-        *header.first()?,
-        *header.get(1)?,
-        *header.get(2)?,
-        *header.get(3)?,
-    ]);
-    let end = usize::try_from(length).ok()?.min(rest.len());
-    String::from_utf8(rest.get(..end)?.to_vec()).ok()
+    let element = vig_protocol_oip::bytes::decode_single_bytes_element(bytes)?;
+    String::from_utf8(element.to_vec()).ok()
 }
 
 /// Die Parameter einer Antwort, die als letzte markiert ist — oder nicht.
