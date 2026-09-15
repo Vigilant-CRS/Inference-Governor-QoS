@@ -487,72 +487,12 @@ pub(crate) fn quiet_enough(foreign_cores_centi: Option<u64>) -> bool {
 
 /// Fremde CPU-Zeit ueber `window`, in Hundertstel Kernen.
 ///
-/// Aus `/proc/stat` (alle Kerne, ohne Leerlauf und Warten auf I/O) abzueglich
-/// der CPU-Zeit dieses Prozesses samt beendeter Kinder aus `/proc/self/stat`.
-/// Beide gibt es auf jedem Linux, auch fuer den Shell-Nutzer auf Android.
+/// Die Rechnung liegt in [`vig_platform::cpu`], damit `vig-fit` dieselbe
+/// Groesse misst und keine zweite Kopie davon pflegt.
 pub(crate) async fn sample_foreign_load(window: std::time::Duration) -> Option<u64> {
-    let before = cpu_ticks()?;
-    let own_before = own_ticks()?;
+    let before = vig_platform::cpu::CpuSample::now()?;
     tokio::time::sleep(window).await;
-    let after = cpu_ticks()?;
-    let own_after = own_ticks()?;
-    foreign_centi(before, after, own_after.checked_sub(own_before)?)
-}
-
-/// `(belegt, gesamt)` in Ticks, summiert ueber alle Kerne.
-fn cpu_ticks() -> Option<(u64, u64)> {
-    let text = std::fs::read_to_string("/proc/stat").ok()?;
-    parse_cpu_line(text.lines().next()?)
-}
-
-/// Die Summenzeile `cpu  user nice system idle iowait irq softirq steal …`.
-pub(crate) fn parse_cpu_line(line: &str) -> Option<(u64, u64)> {
-    let mut fields = line.split_whitespace();
-    if fields.next()? != "cpu" {
-        return None;
-    }
-    let values: Vec<u64> = fields
-        .take(8)
-        .map(|v| v.parse().ok())
-        .collect::<Option<_>>()?;
-    let idle = values.get(3)?.checked_add(*values.get(4)?)?;
-    let total = values
-        .iter()
-        .try_fold(0_u64, |sum, v| sum.checked_add(*v))?;
-    Some((total.checked_sub(idle)?, total))
-}
-
-/// CPU-Ticks dieses Prozesses: `utime + stime + cutime + cstime`.
-fn own_ticks() -> Option<u64> {
-    let text = std::fs::read_to_string("/proc/self/stat").ok()?;
-    parse_own_ticks(&text)
-}
-
-/// Felder 14 bis 17 von `/proc/<pid>/stat`, gezaehlt hinter dem Namen in
-/// Klammern — der Name selbst darf Leerzeichen enthalten.
-pub(crate) fn parse_own_ticks(stat: &str) -> Option<u64> {
-    let rest = stat.get(stat.rfind(')')?.checked_add(1)?..)?;
-    rest.split_whitespace()
-        .skip(11)
-        .take(4)
-        .map(|v| v.parse::<u64>().ok())
-        .try_fold(0_u64, |sum, v| sum.checked_add(v?))
-}
-
-/// Fremde Last in Hundertstel Kernen aus zwei Stichproben.
-pub(crate) fn foreign_centi(before: (u64, u64), after: (u64, u64), own: u64) -> Option<u64> {
-    let busy = after.0.checked_sub(before.0)?;
-    let total = after.1.checked_sub(before.1)?;
-    if total == 0 {
-        return None;
-    }
-    let cores =
-        u64::try_from(std::thread::available_parallelism().map_or(1, std::num::NonZero::get))
-            .unwrap_or(1);
-    busy.saturating_sub(own)
-        .saturating_mul(100)
-        .saturating_mul(cores)
-        .checked_div(total)
+    before.foreign_cores_centi(vig_platform::cpu::CpuSample::now()?)
 }
 
 /// Die Schaetzung vor dem Start, in Sekunden.
@@ -1607,8 +1547,7 @@ pub(crate) async fn run(
 mod tests {
     use super::{
         Clock, Outcome, Qualification, Release, RunShape, SeriesCount, Step, StepResult, Steps,
-        estimate_seconds, execute, foreign_centi, headline, json, markdown, parse_cpu_line,
-        parse_own_ticks, plan, quiet_enough, summary,
+        estimate_seconds, execute, headline, json, markdown, plan, quiet_enough, summary,
     };
     use std::path::{Path, PathBuf};
 
@@ -2022,40 +1961,6 @@ mod tests {
         assert!(
             !quiet_enough(None),
             "nicht beobachtbar ist kein Beleg fuer eine ruhige Maschine"
-        );
-    }
-
-    /// Fremdlast ist fremde Rechenzeit, nicht die Laenge der Warteschlange.
-    ///
-    /// Der Fall vom Pixel 2: `loadavg` 3,5 im Leerlauf bei 0,04 belegten
-    /// Kernen. Die alte Schwelle von 1,5 hielt jeden Lauf dort fuer
-    /// verschmutzt.
-    #[test]
-    fn foreign_load_is_cpu_time_not_the_run_queue() {
-        assert_eq!(
-            parse_cpu_line("cpu  100 0 50 800 50 0 0 0 0 0"),
-            Some((150, 1000)),
-            "Leerlauf und Warten auf I/O zaehlen nicht als belegt"
-        );
-        assert_eq!(
-            parse_cpu_line("cpu0 1 2 3 4 5 6 7 8"),
-            None,
-            "nur die Summenzeile"
-        );
-        assert_eq!(
-            parse_own_ticks("42 (vig autotune) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15"),
-            Some(11 + 12 + 13 + 14),
-            "utime, stime, cutime, cstime hinter dem Namen, auch mit Leerzeichen darin"
-        );
-        assert_eq!(
-            foreign_centi((0, 0), (100, 1000), 100),
-            Some(0),
-            "die eigene Messung ist keine fremde Last"
-        );
-        assert_eq!(
-            foreign_centi((5, 5), (5, 5), 0),
-            None,
-            "kein Fenster, keine Aussage"
         );
     }
 

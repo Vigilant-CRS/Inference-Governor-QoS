@@ -158,3 +158,39 @@ abgesichert werden konnten.
   Kalibrators fuer Backends mit einem Thread je Modell die richtige Groesse
   misst, ist ein offener Befund aus
   [android-gpu.md](../benchmark/android-gpu.md) und bleibt es.
+
+## Nachtrag 15.09.2026: zwei der drei Luecken sind geschlossen
+
+Ein Review des Werkzeugs hat gezeigt, dass es ausserhalb des Laptops **nie**
+eine vollstaendige, unverschmutzte Qualifikation liefern konnte. Was sich an
+dieser Entscheidung dadurch aendert und was nicht:
+
+- **Fremdlast ist fremde CPU-Zeit, nicht `loadavg`.** Die Vermutung oben
+  („die gemeldete Last ist die Arbeit der Messung selbst") war nur die halbe
+  Ursache. `loadavg` zaehlt auch Threads, die im Kernel warten und nichts
+  rechnen: Ein Pixel 2 stand im Leerlauf bei 3,49 und verbrauchte dabei
+  0,04 Kerne. `autotune` misst jetzt die CPU-Zeit aus `/proc/stat` abzueglich
+  der eigenen, vor und nach dem Schritt — nicht waehrend der eigenen Last —,
+  und eine nicht beobachtbare Last gilt nicht als ruhig. Die Regel 3 oben gilt
+  unveraendert; nur ihre Messgroesse war falsch.
+- **Die Belegungsstufe erkennt eine Warteschlange.** Liegt die Laufzeit neben
+  demselben Modell bei `(belegt + 1) × 90 %` der Solozeit oder darueber, wird
+  keine Stufe geschrieben; was verschiedene Modelle nebeneinander kosten,
+  messen die Paare. Keine Stufe liegt mehr unter der Solozeit, und eine
+  verworfene Stufe laesst die naechste nicht nachruecken. Die Schwelle ist
+  eine Heuristik mit einer Kante: Auf dem Pixel 5 lag die Tiefe bei 1,83x,
+  knapp darueber.
+- **Offen bleibt die Kennzeichnung uebernommener Soloprofile** in der Datei.
+  Der Bericht sagt jetzt ausdruecklich, dass sie ungemessen stehen bleiben,
+  und ungemessene Modelle verweigern die Freigabe; die Datei selbst braucht
+  dafuer ein Feld im Manifest.
+- **`vig-fit` wird mit ausgeliefert** — im Release-Archiv, im Container-Image
+  und im Telefonskript, jeweils neben `vig`. Die Grenze oben bleibt: `vig-cli`
+  haengt weiter nicht von `vig-bench` ab und sucht das Werkzeug. Ohne es
+  blieb der Schritt `fit` aber auf **jeder** installierten Maschine offen, und
+  eine Grenze, die dazu fuehrt, dass kein Lauf je vollstaendig wird, schuetzt
+  nichts. Das Urteil steht zusaetzlich englisch im JSON (`verdict_en`),
+  weil der Bericht englisch ist.
+- **Eine Verweigerung steht vor dem Urteil.** Die Regel 4 oben („ein Ergebnis
+  gegen uns ist die Schlagzeile") bleibt; neu ist, dass ein Urteil **fuer**
+  uns nie ueber einem verweigerten Lauf steht.

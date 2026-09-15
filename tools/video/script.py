@@ -27,7 +27,10 @@ SOURCES = {
     # Gelesen wird die JSON, nicht der Bericht daneben: dessen Urteil steht
     # heute auf Deutsch, die strukturierten Felder sind englisch. Das Bild
     # haengt damit nicht daran, wann der deutsche Satz repariert wird.
-    "autotune": "InferenceQoS-runtime/autotune-laptop-2026-09-14/qualification.json",
+    # Der Lauf mit dem ausgelieferten Stand vom 15.09. (`contaminated: false`,
+    # englisches Urteil, Verweigerung vorn). Die Laeufe 15, 15c und 15d sind
+    # verschmutzt; 15e ist sauber, aber aelter als die Reparaturen.
+    "autotune": "InferenceQoS-runtime/autotune-laptop-2026-09-15f/qualification.json",
 }
 
 #: Messdaten fuer Protokolle, deren Pfad kein Datum traegt. Sie stehen im
@@ -73,7 +76,10 @@ BACKGROUND_MS = 95
 SCENES = [
     Scene(
         key="title",
-        narration="One GPU. Several models. And only the newest frame is worth anything.",
+        narration=(
+            "Your GPU is working flat out, and part of that work is on frames "
+            "your robot has already thrown away."
+        ),
         visual="title",
         chapter="One GPU, several models",
         pause=0.8,
@@ -202,13 +208,20 @@ SCENES = [
     # ------------------------------------------------------------------
     Scene(
         key="autotune",
+        # Die Zahlen im Text stehen im Bild als FIT-Zeile, gelesen aus
+        # `fit_verdict` derselben Datei: 996 und 0, 537 und 1000 Promille.
         narration=(
-            "Start it, and in half an hour it has measured your machine and "
-            "tells you what it can carry. And if it turns out you don't need "
-            "us, it says that too."
+            "You should not have to trust our laptop. One command, vig autotune, "
+            "measures your own machine: runtimes, concurrency, interference. "
+            "Then it answers the only question that matters: is the governor "
+            "worth it here? On ours, above ninety percent load, the protected "
+            "stream goes from missing almost every cycle to missing none, and "
+            "the background pays for all of it. Two of four series were thrown "
+            "away because the card changed its power state, so it refused to "
+            "sign off. And if you don't need us, it says that too."
         ),
         visual="autotune",
-        chapter="Measuring your machine",
+        chapter="vig autotune: measure your own machine",
         source="autotune",
         pause=0.8,
     ),
@@ -227,8 +240,9 @@ SCENES = [
     Scene(
         key="close",
         narration=(
-            "Vigilant Inference Governor. One GPU, several models, and the "
-            "newest frame gets through. Point it at the server you already run."
+            "Faster GPUs compute the past faster. Vigilant stops computing it. "
+            "Run vig autotune on the machine you already have, and let the "
+            "numbers decide."
         ),
         visual="close",
         chapter="Where the numbers live",
@@ -258,7 +272,7 @@ SHORT_TAIL = Scene(
 
 #: Kapitelmarken und Beschreibung entstehen aus denselben Szenen; siehe
 #: make_video.py. Hier stehen nur die Texte, die kein Szenentext sind.
-YOUTUBE_TITLE = "Vigilant Inference Governor — keeping the newest camera frame alive on a shared GPU"
+YOUTUBE_TITLE = "Stop computing the past: an inference governor for shared edge GPUs, with vig autotune"
 
 YOUTUBE_TAGS = [
     "edge ai", "inference", "gpu scheduling", "robotics", "triton inference server",

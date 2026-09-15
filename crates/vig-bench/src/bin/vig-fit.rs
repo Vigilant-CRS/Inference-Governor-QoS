@@ -134,12 +134,17 @@ async fn run() {
         "Lastpunkte {points:?} % · {seconds} s je Arm und Punkt · Datenpfad Kopie im Request\n"
     );
 
-    let load_before = loadavg();
-    if load_before > 1.5 {
+    // Fremde Rechenzeit statt `loadavg`: Ein Pixel 2 steht im Leerlauf bei
+    // 3,5 und verbraucht dabei 0,04 Kerne, und der alte Hinweis nannte jede
+    // Messung auf einem Telefon unruhig (15.09.2026). Gemessen wird vor dem
+    // Lauf, solange das Backend ruht.
+    let load_before = foreign_load().await;
+    if load_before.is_none_or(|centi| centi >= FOREIGN_CORES_CENTI) {
         println!(
-            "  HINWEIS Die Systemlast liegt bei {load_before:.1}. Auf einer unruhigen \
+            "  HINWEIS Fremde Rechenzeit vor dem Lauf: {}. Auf einer unruhigen \
              Maschine\n          misst dieses Werkzeug teilweise die andere Arbeit. \
-             Fuer eine belastbare\n          Zahl erst die Maschine frei machen.\n"
+             Fuer eine belastbare\n          Zahl erst die Maschine frei machen.\n",
+            cores(load_before)
         );
     }
 
@@ -317,12 +322,14 @@ async fn run() {
         );
     }
 
-    let load_after = loadavg();
+    let load_after = foreign_load().await;
     println!("\n{}", verdict(&rows, &points));
     println!(
-        "\n  Systemlast {load_before:.1} vor, {load_after:.1} nach dem Lauf. Gemessen wurde die\n  \
+        "\n  Fremde Rechenzeit {} vor, {} nach dem Lauf. Gemessen wurde die\n  \
          Versorgung, nicht die Erkennungsqualitaet; die Zahlen gelten fuer diese\n  \
-         Maschine und diese Vertraege."
+         Maschine und diese Vertraege.",
+        cores(load_before),
+        cores(load_after)
     );
 
     if let Ok(path) = std::env::var("VIG_FIT_JSON") {
@@ -406,7 +413,13 @@ fn scale(config: &Config, load_percent: u64) -> Config {
     scaled
 }
 
-fn as_json(rows: &[Row], points: &[u64], seconds: u64, before: f64, after: f64) -> String {
+fn as_json(
+    rows: &[Row],
+    points: &[u64],
+    seconds: u64,
+    before: Option<u64>,
+    after: Option<u64>,
+) -> String {
     let cells: Vec<serde_json::Value> = rows
         .iter()
         .map(|r| {
@@ -425,8 +438,9 @@ fn as_json(rows: &[Row], points: &[u64], seconds: u64, before: f64, after: f64) 
         "tool": "vig-fit",
         "seconds_per_arm": seconds,
         "load_points_percent": points,
-        "loadavg_before": before,
-        "loadavg_after": after,
+        // Hundertstel Kerne fremder Rechenzeit; `null`, wo nicht beobachtbar.
+        "foreign_cores_centi_before": before,
+        "foreign_cores_centi_after": after,
         "view": "consumer",
         "cells": cells,
         "verdict": verdict(rows, points).trim().to_owned(),
@@ -548,12 +562,30 @@ fn env_u64(name: &str) -> Option<u64> {
     std::env::var(name).ok()?.parse().ok()
 }
 
-/// Die Systemlast der letzten Minute, oder 0, wo es sie nicht gibt.
-fn loadavg() -> f64 {
-    std::fs::read_to_string("/proc/loadavg")
-        .ok()
-        .and_then(|s| s.split_whitespace().next()?.parse().ok())
-        .unwrap_or(0.0)
+/// Ab so viel fremder Rechenzeit gilt die Maschine als unruhig, in Hundertstel
+/// Kernen — dieselbe Grenze wie in `vig autotune`.
+const FOREIGN_CORES_CENTI: u64 = 100;
+
+/// Fremde Rechenzeit ueber drei Sekunden, in Hundertstel Kernen; `None`, wo
+/// sie nicht beobachtbar ist.
+async fn foreign_load() -> Option<u64> {
+    let before = vig_platform::cpu::CpuSample::now()?;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    before.foreign_cores_centi(vig_platform::cpu::CpuSample::now()?)
+}
+
+/// `1.23 Kerne` oder `nicht beobachtbar`.
+fn cores(centi: Option<u64>) -> String {
+    centi.map_or_else(
+        || "nicht beobachtbar".to_owned(),
+        |c| {
+            format!(
+                "{}.{:02} Kerne",
+                c.checked_div(100).unwrap_or(0),
+                c.checked_rem(100).unwrap_or(0)
+            )
+        },
+    )
 }
 
 #[cfg(test)]

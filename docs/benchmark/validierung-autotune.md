@@ -196,7 +196,16 @@ nicht um.
 Getrennt von den Messtabellen: Wer entscheiden will, ob er dem Werkzeug
 traut, muss an einer Stelle sehen, was es falsch macht.
 
-### 1. Die Fremdlasterkennung ist auf ARM falsch geeicht (offen)
+### 1. Die Fremdlasterkennung ist auf ARM falsch geeicht (behoben am 15.09.)
+
+**Nachtrag 15.09.:** Die Ursache war tiefer als die Eichung. `loadavg` ist die
+Laenge der Warteschlange, nicht fremde Arbeit: Das Pixel 2 stand im Leerlauf
+bei **3,49** und verbrauchte dabei **0,04 Kerne** (fuenf Sekunden
+`/proc/stat`, nichts lief). Keine Schwelle haette das richtig getrennt.
+`autotune` misst jetzt die fremde CPU-Zeit aus `/proc/stat` abzueglich der
+eigenen, vor und nach dem Schritt, Grenze ein ganzer Kern; der Laptop lag zur
+selben Zeit mit Terminal und Editor bei 0,68. Eine nicht beobachtbare Last gilt
+nicht mehr als ruhig. Der urspruengliche Befund steht unveraendert darunter.
 
 `autotune` vergleicht `/proc/loadavg` gegen eine feste Schwelle von 1,5. Auf
 dem Telefon laufen Backend und Messklient auf demselben Geraet; die gemeldete
@@ -272,7 +281,13 @@ Die Kennzeichnung der Soloprofile bleibt damit der offene Rest — sie braucht
 ein Feld im Schema, das zwischen „in diesem Lauf gemessen" und „aus der
 Eingabe uebernommen" unterscheidet.
 
-### 5. Der Bericht wechselt mitten im Dokument die Sprache (offen)
+### 5. Der Bericht wechselt mitten im Dokument die Sprache (behoben am 15.09.)
+
+**Nachtrag 15.09.:** `vig-fit` schreibt dieselbe Feststellung jetzt zusaetzlich
+als `verdict_en` in sein JSON, aus einer gemeinsamen, sprachfreien Feststellung
+und damit mit denselben Zahlen; `autotune` uebernimmt die englische Fassung. Die
+Terminalausgabe von `vig-fit` bleibt deutsch wie alle Werkzeuge dieses
+Projekts. Aeltere Laeufe tragen weiter den deutschen Satz.
 
 `qualification.md` ist durchgehend englisch — Ueberschriften, Prosa,
 Schritttabelle — und dann steht der Urteilsblock auf Deutsch da, zweimal:
@@ -283,7 +298,17 @@ zitieren statt uebersetzen) und die falsche: Dies ist das Dokument, das ein
 Interessent liest, um eine Anschaffung zu begruenden. Ein Urteil, das er
 nicht lesen kann, ist kein Urteil.
 
-### 6. Die Belegungsstufe misst auf diesem Backend die falsche Groesse (offen)
+### 6. Die Belegungsstufe misst auf diesem Backend die falsche Groesse (behoben am 15.09.)
+
+**Nachtrag 15.09.:** Das war der eigentliche Grund, warum `autotune` nicht
+dasselbe ergab wie die von Hand getunte Konfiguration. `under_load` gilt im
+Plan fuer **jeden** belegten Nachbarn, nicht nur fuer dasselbe Modell: Der
+Governor haette den Detektor neben `pose` mit 297 ms geplant, gemessen sind
+dort 0,96x von 158 ms. Eine Stufe ab `(belegt + 1) × 90 %` der Solozeit gilt
+jetzt als Warteschlange und wird nicht geschrieben (Detektor 1,87x und Tiefe
+2,05x fallen darunter, `pose` mit 0,90x nicht); keine Stufe liegt mehr unter
+der Solozeit; eine verworfene Stufe laesst die naechste nicht nachruecken. Der
+Nachweis auf dem Telefon steht unten unter „Vergleichslauf".
 
 `autotune` uebernimmt von `vig calibrate` die Stufe „1 weiterer Slot belegt",
 die den zweiten Slot mit **demselben** Modell belegt. Auf dem TFLite-Server
@@ -370,3 +395,110 @@ gegeneinander.
 **Was der Lauf ueber die Reparatur von Befund 3 zeigt:** Die Ansage nennt jetzt
 die Matrix, auf der sie beruht, und sagt dazu, dass sie die Hardware nicht
 kennt — „The estimate scales with that matrix, not with your hardware."
+
+## Vergleichslauf am 15.09.2026, mit dem reparierten Stand
+
+Stand `99f66c7` (dazu `rustls` 0.23.45, ohne Einfluss auf eine Messung ueber
+Loopback). Gleiche Eingabe, gleiche Kernbindung, gleiche Probenzahl wie am
+14.09. Die Tabellen hat `InferenceQoS-runtime/compare-measured.py` aus den
+beiden eingefrorenen Dateien erzeugt, nicht aus diesem Text.
+
+### Pixel 2: `autotune` ergibt jetzt die Struktur der Handkonfiguration
+
+Lauf `InferenceQoS-runtime/autotune-pixel2-2026-09-15/`, `taskset f0`, 200
+Proben, `vig-slots2-base.yaml`. Kalt gestartet bei 32 °C, Ende 39 °C. Die
+`loadavg` stand vor dem Lauf bei **3,46** — und der Lauf ist trotzdem
+**nicht** verschmutzt, weil jetzt fremde CPU-Zeit gemessen wird (Befund 1).
+
+| | |
+|---|---|
+| Schritte | alle vier `done` |
+| Messreihen | **12 von 12** verwertbar |
+| `contaminated` | false |
+| Freigabe | **not issued** — der beste Ausgang, den das Werkzeug kennt |
+| `vig-fit` | „Up to 125 % offered load the direct path loses nothing either. On this machine, with these models and contracts, the governor is not worth it" |
+| `doctor` | `READY_WITH_WARNINGS` |
+
+**Gegen die von Hand getunte Konfiguration** (`examples/android_gpu/vig-slots2.yaml`, 11.09.):
+
+| Modell | von Hand p50 us | autotune p50 us | Abweichung | von Hand Laststufe | autotune Laststufe |
+|---|---:|---:|---:|---|---|
+| depth | 199 642 | 193 969 | −2,8 % | keine | keine |
+| detector | 222 435 | 220 582 | −0,8 % | keine | 273 106 |
+| pose | 89 815 | 92 918 | +3,5 % | keine | 92 918 |
+
+| `no_corun` | von Hand | autotune |
+|---|---|---|
+| [depth, pose] | ja | ja |
+
+| Interferenz (Opfer ← Nachbar) | von Hand added_us | autotune added_us |
+|---|---:|---:|
+| depth ← detector | 51 155 | 47 865 (−6,4 %) |
+| detector ← depth | 116 347 | 121 562 (+4,5 %) |
+
+**Gegen den `autotune`-Lauf vom 14.09.:**
+
+| Modell | 14.09. p50 us | 15.09. p50 us | Abweichung | 14.09. Laststufe | 15.09. Laststufe |
+|---|---:|---:|---:|---|---|
+| depth | 206 206 | 193 969 | −5,9 % | 423 622 | keine |
+| detector | 158 474 | 220 582 | +39,2 % | 297 155 | 273 106 |
+| pose | 89 173 | 92 918 | +4,2 % | 80 850 | 92 918 |
+
+| `no_corun` | 14.09. | 15.09. |
+|---|---|---|
+| [depth, detector] | ja | **nein** |
+| [depth, pose] | ja | ja |
+
+Was das heisst:
+
+- **Dieselbe Struktur.** Dasselbe serialisierte Paar, dieselben zwei
+  Interferenzeintraege, Aufschlaege innerhalb von 6,4 %, Soloprofile innerhalb
+  von 3,5 %. Am 14.09. waren es zwei serialisierte Paare und eine leere
+  Tabelle.
+- **Die Detektor-Grundlinie trifft** (−0,8 % statt −28,8 %). Damit liegt
+  `detector neben depth` bei 1,55x statt 2,18x, unter der Schwelle, und das
+  Paar wird wieder ein Interferenzeintrag statt `no_corun`. **Warum** die
+  Grundlinie am 14.09. so niedrig lag (Befund 3), belegt dieser Lauf nicht; er
+  zeigt nur, dass sie es heute nicht ist.
+- **Die Warteschlangen-Erkennung greift** (Befund 6): Tiefe neben sich selbst
+  2,10x, keine Laststufe geschrieben.
+- **Eine Abweichung bleibt.** Der Detektor neben sich selbst lag diesmal bei
+  **1,23x** (dokumentiert 1,82x, am 14.09. 1,87x). Das liegt unter der
+  Warteschlangen-Grenze, die Stufe ist geschrieben, die Handkonfiguration hat
+  keine. Der Detektor ist das einzige Modell mit einem Operator auf der CPU
+  (NMS); welcher der beiden Werte typisch ist, sagt ein einzelner Lauf nicht.
+  Die Richtung ist die vorsichtige: Mit belegtem Nachbarn plant der Governor
+  den Detektor mit 273 statt 221 ms, nicht kuerzer. `pose` steht auf der
+  Solozeit, weil die gemessenen 0,86x geklemmt werden.
+- **Das Urteil passt zur Messung auf dem Telefon.** `android-gpu.md` fand bis
+  zu geplanten 138 % keinen Einbruch des Backends; `vig-fit` sagt fuer 90 bis
+  125 % dasselbe in einem Satz: hier lohnt sich der Governor nicht.
+
+### Laptop: die Verweigerung steht vorn
+
+Lauf `InferenceQoS-runtime/autotune-laptop-2026-09-15f/`, gleiche Bedingungen
+wie `15e`. **2 von 4** Reihen verworfen (`SwPowerCap` wechselte waehrend der
+Reihe), `contaminated: false`, Freigabe verweigert. Der Bericht beginnt jetzt
+mit „This run did not qualify this machine: 2 of 4 measurement series were
+discarded" statt mit dem Urteil; das Urteil steht englisch in seinem
+Abschnitt: geschuetzter Strom ab 90 % direkt 996 ‰, Governor 0 ‰, nachrangige
+Stroeme 559 ‰ → 1000 ‰.
+
+### Pixel 5: kein Ergebnis
+
+Zweites Geraet ohne Handkonfiguration (Snapdragon 765G, Adreno 620),
+dieselben Modelle und dieselbe Eingabe, `taskset c0`. `discover` lief, die
+Soloprofile und drei von sechs Paaren auch — dann verschwand das Geraet vom
+USB (`adb: device not found`), das Skript endete mit 255, und kein Bericht
+wurde abgeholt. **Daraus folgt nichts**, auch nicht fuer die schon gedruckten
+Zahlen. Festgehalten sei nur, was fuer eine Wiederholung zaehlt: Die Tiefe
+lag neben sich selbst bei 1,83x, knapp ueber der Warteschlangen-Grenze von
+1,80x — die Schwelle hat hier eine Kante.
+
+### Nebenbefund: `vig-fit` hatte denselben Fehler
+
+Waehrend des Telefonlaufs meldete `vig-fit` „Die Systemlast liegt bei 4,6 …
+auf einer unruhigen Maschine". Es las ebenfalls `loadavg`. Beide Werkzeuge
+messen jetzt dieselbe Groesse aus `vig_platform::cpu`; das JSON von `vig-fit`
+traegt `foreign_cores_centi_before` und `_after` statt `loadavg_before` und
+`_after`.

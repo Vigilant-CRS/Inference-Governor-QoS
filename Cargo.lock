@@ -1459,6 +1459,7 @@ dependencies = [
  "vig-config",
  "vig-core",
  "vig-gateway",
+ "vig-platform",
  "vig-protocol-oip",
  "vig-sim",
 ]

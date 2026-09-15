@@ -1,12 +1,17 @@
 # Vigilant Inference Governor
 
-**Inference QoS for edge robotics.** Keep your models. Keep Triton. Tell the
-governor what has to be *fresh* and what merely has to be *fast* — it decides
-what runs now, what waits, what is thrown away because newer data arrived, and
-which model variant still fits the time budget.
+**Inference QoS for edge robotics — and `vig autotune`, one command that
+measures your own hardware and tells you whether you need it at all.** Keep
+your models. Keep Triton. Tell the governor what has to be *fresh* and what
+merely has to be *fast* — it decides what runs now, what waits, what is thrown
+away because newer data arrived, and which model variant still fits the time
+budget.
+
+> **Stop computing the past.** A faster GPU computes stale frames faster. The
+> governor stops computing them.
 
 [![Status](https://img.shields.io/badge/status-pre--production-orange)](#status-what-works-and-what-does-not)
-[![Tests](https://img.shields.io/badge/tests-822%20passing-brightgreen)](#build-and-verify)
+[![Tests](https://img.shields.io/badge/tests-863%20passing-brightgreen)](#build-and-verify)
 [![License](https://img.shields.io/badge/license-BUSL--1.1-blue)](LICENSE)
 
 ---
@@ -215,6 +220,17 @@ vig autotune --endpoint 127.0.0.1:8001 -c vig.yaml -o qualification
 vig serve -c qualification/measured.yaml --listen 127.0.0.1:9001
 ```
 
+`vig-fit`, which answers "is it worth it here?", ships next to `vig` in the
+release archive and the container image; `vig autotune` finds it there.
+
+**Does it find what a human finds?** On a Pixel 2 we compared it against the
+configuration we had tuned by hand. It now arrives at the same structure: the
+same serialised model pair, the same two interference entries (within 6.4 %),
+solo profiles within 3.5 % — twelve of twelve series, not contaminated, and a
+clear answer: *on that load the governor is not worth it*. One occupancy level
+of the detector differs, in the cautious direction
+([comparison](docs/benchmark/validierung-autotune.md)).
+
 It leaves behind `qualification/measured.yaml` and a report in Markdown and
 JSON: what was measured, under what conditions, what was discarded and why,
 and what explicitly does not hold. **It never issues a qualification** — a
@@ -320,7 +336,7 @@ crates/vig-gateway/         OIP gateway, actor loop, shared-memory passthrough
 crates/vig-backend-triton/  Triton adapter
 crates/vig-protocol-oip/    protocol types and parameter mapping
 crates/vig-config/          configuration schema and validation
-crates/vig-cli/             vig doctor / profile / calibrate / serve
+crates/vig-cli/             vig autotune / init / doctor / profile / calibrate / serve
 crates/vig-sim/             discrete-event simulator and baselines
 crates/vig-bench/           benchmark harness against real hardware
 
@@ -370,12 +386,26 @@ Two further external reviews followed. The one of **11 September** found eight
 defects (execution proof after a backend restart, shared-memory lifetime in the
 pilot and the ROS 2 bridge, invalid JSON in generative decomposition, an XSched
 level that silently did nothing, a start script that reported "ready" when it
-was not); all eight are fixed. The one of **14 September** found five more: two
-are fixed (the look-ahead forecast ignored the approved variant; variant
-hysteresis could veto the one switch that saves supply), three are open and
-listed in [that review](docs/reviews/2026-09-14/REVIEW.md) — buffer lifetime
-across measurement arms, a late-detected backend restart, and the fact that a
-green pilot verdict judges scheduling, not the application.
+was not); all eight are fixed. The one of **14 September** found eight more;
+every code defect among them is fixed — the look-ahead forecast ignored the
+approved variant, variant hysteresis could veto the one switch that saves
+supply, buffer lifetime across measurement arms, a late-detected backend
+restart, and a situation report that named its freshest camera instead of its
+oldest. The remaining three are classification, not code: a green pilot
+verdict judges scheduling, not the application
+([that review](docs/reviews/2026-09-14/REVIEW.md)).
+
+A review of `vig autotune` on **15 September** found that it could never
+complete on an installed machine (`vig-fit` was not shipped), always refused on
+a phone (it read the run queue, not foreign CPU time), and — the reason it did
+not reproduce our hand-tuned Pixel 2 configuration — recorded a queue as an
+occupancy runtime. All fixed; see the [changelog](CHANGELOG.md).
+
+**One cost you should know before deploying:** after a real backend crash, a
+call that was already running when the backend died can stay quarantined until
+the governor restarts, because nothing proves it ended
+([ADR-0042](docs/adr/0042-an-end-is-proven-not-assumed.md)). The governor loses
+that slot rather than risk reusing a buffer a dead reader might still touch.
 
 We would rather you read that list before the benchmark table.
 
@@ -384,7 +414,7 @@ We would rather you read that list before the benchmark table.
 ```bash
 cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace          # 822 tests, six long-running checks ignored by design
+cargo test --workspace          # 863 tests, six long-running checks ignored by design
 cargo deny check licenses bans advisories sources
 ```
 

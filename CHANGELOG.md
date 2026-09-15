@@ -5,6 +5,15 @@ bedeutet, steht in [docs/releases.md](docs/releases.md).
 
 ## [Unveroeffentlicht]
 
+### Geaendert
+
+- **Das JSON von `vig-fit` traegt `foreign_cores_centi_before` und
+  `foreign_cores_centi_after` statt `loadavg_before` und `loadavg_after`**,
+  dazu `verdict_en` und `conclusive`. Wer die alten Felder ausliest, muss
+  umstellen: `loadavg` war auf einem Telefon keine Aussage ueber fremde
+  Arbeit. `vig-fit` und `vig autotune` messen jetzt dieselbe Groesse aus
+  `vig_platform::cpu`, `null` heisst nicht beobachtbar.
+
 ### Sicherheit
 
 - **`rustls` 0.23.43 → 0.23.45 (RUSTSEC-2026-0285).** TLS-1.3-Handshake-

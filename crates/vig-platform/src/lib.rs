@@ -40,6 +40,7 @@
 
 pub mod actuation;
 pub mod collector;
+pub mod cpu;
 pub mod gpu;
 pub mod measure;
 pub mod snapshot;

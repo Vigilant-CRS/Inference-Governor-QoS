@@ -101,9 +101,23 @@ Seit `vig autotune` existiert, hängt sie zwischen `limits` und `try`.
 Ihr Bild liest `qualification.json` eines echten Laufs — nicht den Bericht
 daneben. Gezeigt wird dabei ausdrücklich auch, was der Lauf **nicht**
 behauptet: wie viele Messreihen verworfen wurden und ob er eine Freigabe
-verweigert. Auf dem Laptop steht dort heute „1 of 4 usable" und „release
-refused", weil die Karte unter `SwPowerCap` den Takt während der Messung
-wechselt.
+verweigert. Seit dem 15.09. zeigt die Szene `autotune-laptop-2026-09-15f`,
+den Lauf mit dem ausgelieferten Stand (allein auf der Maschine,
+`contaminated: false`): „2 of 4 usable" und „release refused", weil die Karte
+unter `SwPowerCap` in zwei Reihen den Zustand wechselte. Die Läufe `15`, `15c`
+und `15d` sind verschmutzt; `15e` ist sauber, aber älter als die Reparaturen.
+
+Dazu kommen zwei `FIT`-Zeilen: die vier Promillezahlen aus `fit_verdict`
+(geschützter Strom direkt 996 → Governor 0, nachrangige 559 → 1000). Gelesen
+werden nur die Zahlen, nie der Satz — ältere Läufe tragen ihn deutsch, neuere
+englisch. Stehen nicht genau vier Zahlen da, bricht der Bau ab. Die
+Quellenzeile sagt deshalb „shown unchanged, FIT from fit_verdict".
+
+**Einstieg und Schluss.** Der erste Satz benennt den Schaden („part of that
+work is on frames your robot has already thrown away"), der letzte die
+Handlung („Faster GPUs compute the past faster. Vigilant stops computing it.
+Run vig autotune on the machine you already have"). Beide trägt der Film
+selbst: die Animation zeigt verworfene Frames, die Autotune-Szene den Lauf.
 
 Das ist kein Schönheitsfehler, den man wegschneidet. Ein Werkzeug, das auf
 verworfenen Daten nichts freigibt, ist genau deshalb zu glauben — und ein

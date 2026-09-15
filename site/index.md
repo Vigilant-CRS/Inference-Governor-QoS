@@ -1,13 +1,16 @@
 <div class="held">
 
-<h1>One GPU. Several models. Only one of them can run now.</h1>
+<h1>Stop computing the past.</h1>
 
 <p class="zeile">Vigilant is a scheduler that sits in front of your inference
 server and decides, before every dispatch, whether a result will still be
-useful when it is finished. Stale work is dropped before it costs GPU time.
-Your models stay where they are. Your client changes one line: the address.</p>
+useful when it is finished — and <code>vig autotune</code> measures your own
+hardware in one command and tells you whether you need it at all. Stale work
+is dropped before it costs GPU time. Your models stay where they are. Your
+client changes one line: the address.</p>
 
 <div class="marken">
+<span>Qualifies itself on your hardware</span>
 <span>Speaks the Open Inference Protocol</span>
 <span>Runs in front of Triton</span>
 <span>Written in Rust, no <code>unsafe</code></span>
@@ -15,7 +18,8 @@ Your models stay where they are. Your client changes one line: the address.</p>
 </div>
 
 <div class="knoepfe">
-<a class="knopf" href="docs/getting-started.md">Try it in 30 minutes</a>
+<a class="knopf" href="#qualify-your-own-hardware">Measure your machine: vig autotune</a>
+<a class="knopf leer" href="docs/getting-started.md">Getting started</a>
 <a class="knopf leer" href="docs/benchmark/README.md">Read the measurements</a>
 <a class="knopf leer" href="https://github.com/Vigilant-CRS/Inference-Governor-QoS">GitHub</a>
 </div>
@@ -123,6 +127,15 @@ happens on your machine — so we give you the tool that finds out, there.
 
 > **Start it, and in half an hour it has measured your machine and tells you
 > what it can carry. And if it turns out you don't need us, it says that too.**
+
+On our laptop, the run of 15 September answered in under two minutes: above
+90 % load the direct path misses **996 ‰** of the protected stream's cycles,
+the governor **0 ‰** — and the lower-priority streams pay for all of it
+(559 ‰ → 1000 ‰). It kept two of four measurement series, threw two away
+because the power-capped GPU changed state mid-series, and therefore **refused
+to sign off**. On a Pixel 2 it ran clean, twelve of twelve series, and said
+the opposite: on that load the governor is **not worth it**
+([report](docs/benchmark/validierung-autotune.md)).
 
 ```bash
 vig autotune --endpoint 127.0.0.1:8001 -c vig.yaml -o qualification

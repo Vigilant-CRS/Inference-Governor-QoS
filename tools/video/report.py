@@ -222,7 +222,31 @@ def autotune_lines(path: Path) -> list[str]:
     lines.append(f"RESULT   release {data['release']}"
                  + (f" — {reasons}" if reasons else ""))
 
+    fit = fit_numbers(data.get("fit_verdict") or "", path)
+    if fit:
+        lines.append(f"FIT      protected missed: direct {fit[0]} ‰ → governor {fit[1]} ‰")
+        lines.append(f"         background missed: direct {fit[2]} ‰ → governor {fit[3]} ‰")
+
     if data.get("doctor"):
         lines.append(f"DOCTOR   {data['doctor']}")
 
     return [assert_english(line, path) for line in lines]
+
+
+#: Die vier Promillezahlen im Urteil von `vig-fit`, in dieser Reihenfolge:
+#: geschuetzter Strom direkt / Governor, nachrangige Stroeme direkt / Governor.
+#: Aeltere Laeufe schreiben das Urteil deutsch, neuere englisch; gelesen werden
+#: nur die Zahlen, nie der Satz. Stehen nicht genau vier da, bricht der Bau ab:
+#: eine halb gelesene Zeile waere eine Zahl ohne Beleg.
+_PERMILLE = re.compile(r"(\d+)\s*‰")
+
+
+def fit_numbers(verdict: str, path: Path) -> tuple[str, str, str, str] | None:
+    """Die Kennzahlen des Urteils, oder None, wenn `fit` kein Urteil hat."""
+    if not verdict.strip():
+        return None
+    found = _PERMILLE.findall(verdict)
+    if len(found) != 4:
+        raise SystemExit(f"{path}: fit_verdict traegt {len(found)} Promillezahlen "
+                         "statt vier — Format von vig-fit geaendert?")
+    return found[0], found[1], found[2], found[3]

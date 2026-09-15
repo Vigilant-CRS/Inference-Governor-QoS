@@ -94,7 +94,7 @@ def title(_scene, progress: float) -> Image.Image:
     shade = tuple(int(c * fade) for c in (0xE6, 0xED, 0xF3))
     draw.text((160, 420), "Vigilant Inference Governor", font=font(SANS_BOLD, 84),
               fill=shade)
-    draw.text((160, 540), "One GPU. Several models. Only the newest frame counts.",
+    draw.text((160, 540), "Stop computing frames your robot already threw away.",
               font=font(SANS, 40), fill=DIM)
     draw.line([(160, 640), (160 + int(520 * min(1.0, progress * 1.6)), 640)],
               fill=ACCENT, width=5)
@@ -543,12 +543,15 @@ def usecases(_scene, progress: float) -> Image.Image:
 def close(_scene, progress: float) -> Image.Image:
     image = base()
     draw = ImageDraw.Draw(image)
-    draw.text((160, 400), "Vigilant Inference Governor", font=font(SANS_BOLD, 72),
+    draw.text((160, 300), "Stop computing the past.", font=font(SANS_BOLD, 84),
               fill=TEXT)
+    draw.text((160, 410), "Vigilant Inference Governor", font=font(SANS_BOLD, 52),
+              fill=ACCENT)
     draw.line([(160, 510), (160 + int(520 * min(1.0, progress * 2)), 510)],
               fill=ACCENT, width=5)
     lines = [
         ("github.com/Vigilant-CRS/Inference-Governor-QoS", TEXT),
+        ("vig autotune — one command tells you whether you need it.", DIM),
         ("Same protocol, same models — in your client, only the address changes.", DIM),
         ("Vigilant e.K., Stuttgart · vigilant-crs.de · info@vigilant-crs.de", DIM),
     ]
@@ -628,11 +631,12 @@ def autotune(scene, progress: float) -> Image.Image:
               "It refuses to certify on data it threw away — and tells you how "
               "much it threw away.",
               font=font(SANS, 25), fill=DIM)
-    # Hier wurde nichts uebersetzt: die Felder, die dieses Bild zeigt, stehen
-    # englisch in der Datei. Die Standardangabe der anderen Szenen waere an
-    # dieser Stelle schlicht unwahr.
+    # Die Schritt-, Serien- und Freigabefelder stehen englisch in der Datei und
+    # werden unveraendert gezeigt. Die FIT-Zeilen dagegen tragen nur die vier
+    # Promillezahlen aus dem (deutschen) Urteil von vig-fit; das sagt die
+    # Quellenzeile, statt "unchanged" fuer das ganze Bild zu behaupten.
     _source(draw, path, below + 38, scene.data.get("date", ""),
-            treatment="shown unchanged")
+            treatment="shown unchanged, FIT from fit_verdict")
     return image
 
 
