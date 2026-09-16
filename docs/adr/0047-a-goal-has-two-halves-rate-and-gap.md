@@ -1,6 +1,7 @@
 # ADR-0047: Ein Ziel hat zwei Haelften — Anteil und Luecke
 
-**Status:** Akzeptiert, opt-in, mit offener Daempfung · 2026-09-16
+**Status:** Akzeptiert, opt-in · 2026-09-16 (Daempfung geprueft und bewusst
+nicht gebaut, siehe unten)
 **Betrifft:** `core/objective` (neu), `core/scheduler` (Kandidatenwahl),
 `config` (`contract.objective`), `cli/doctor` (Zulassung), Exporter;
 Spec 10.6, NV-24, ADR-0027, ADR-0035, ADR-0043, ADR-0046
@@ -232,11 +233,43 @@ ergaben 1 ‰ Unterdeckung. Uebernommen ist nur, was die Messung deckt.
 
 ## Was bewusst nicht gebaut ist
 
-**Die Daempfung (Randfall 4).** Der Slack aendert sich nur in
-Fensterabschnitten, und die Saettigung begrenzt jeden Ausschlag — aber dass
-zwei Stroeme mit gleichem Ziel nicht in ein Zickzack geraten, ist damit
-**nicht bewiesen**. Hysterese und eine Anpassung nur alle k Zyklen stehen aus;
-bis dahin gilt die Steuerung als erprobt, nicht als abgesichert.
+**Die Daempfung.** Sie hat bewusst **keine** Nummer in der Randfallliste
+oben — dort steht nur, was das Modell traegt, und sie traegt es nicht. Frueher
+stand hier „Randfall 4"; das war ein Verweis ins Leere, denn Nummer 4 ist der
+Widerspruch in den Haelften, und der Gleichstand ist Nummer 6. Beide sind
+gebaut. (Berichtigt am 16.09.2026, nachdem der falsche Verweis aus diesem
+Absatz in README und Gedaechtnisnotizen weitergereicht worden war.)
+
+Der Slack aendert sich nur in
+Fensterabschnitten, und die Saettigung begrenzt jeden Ausschlag. Ein Zickzack
+**bei Gleichstand** ist ohnehin ausgeschlossen: der Kandidatenschluessel ist
+bis zu Modellindex und Request-Id vollstaendig geordnet (Randfall 6), bei
+gleichem Slack gewinnt immer derselbe. Offen war allein, ob der Slack durch
+die eigene Bedienung schwingt.
+
+**Gesucht und nicht gefunden (16.09.2026).** Zwei gleichrangige Kameras,
+identische Zusage (700 ‰, Luecke 75 ms), ein Slot, Periode 25 ms — die
+Zulassung weist 89 % Zielbedarf aus, die Slots laufen zu 100 % voll. Drei
+Laeufe je Arm, mit und ohne Zusagen, Schwelle **vor** der Messung
+festgelegt: ein Effekt gilt erst als nachgewiesen, wenn die laengste Luecke
+mit Zusagen in **allen** Laeufen ueber dem **Maximum** der Laeufe ohne liegt.
+
+| | laengste Luecke cam_a | cam_b | geliefert |
+|---|---|---|---|
+| ohne Zusagen | 21 / 22 / 35 ms | 35 / 38 / 50 ms | 2151 / 2151 / 2187 |
+| mit Zusagen | 20 / 21 / 24 ms | 34 / 35 / 39 ms | 2137 / 2150 / 2151 |
+
+Die Bereiche ueberlappen in beiden Stroemen; die Werte *mit* Zusage liegen
+eher niedriger. Beide Zusagen werden zu 1000 ‰ erfuellt. Die Streuung
+innerhalb eines Arms (21 bis 35 ms **ohne** Zusagen) ist groesser als der
+vermutete Effekt — genau deshalb entscheidet hier eine Wiederholung und kein
+Einzellauf.
+
+Hysterese und eine Anpassung nur alle k Zyklen bleiben deshalb **ungebaut,
+und zwar mit Grund**: Komplexitaet im Kandidatenschluessel gegen ein Schwingen,
+das unter voller Last nicht auftritt, waere ein schlechtes Geschaeft. Sollte
+es je auftreten, ist dieser Aufbau der Ausgangspunkt — die Schwelle steht
+oben.
 
 **Schritt 6 ist erbracht.** Auf gemessener Hardware haelt eine Zusage von
 800 ‰ vollstaendig (1000 ‰ ohne nachrangiges Sprachmodell, 930 ‰ mit einem
@@ -244,10 +277,29 @@ kurzen), waehrend die geschuetzte Kamera unberuehrt bleibt. Gebrochen wird sie
 allein durch einen Aufruf, der laenger rechnet als die Zusage selbst — und
 genau diesen Fall lehnt die Blockierpruefung ab.
 
-Die ADR gilt damit als angenommen, **mit einer benannten Luecke**: Die
-Daempfung (Randfall 4) ist nicht gebaut, und die Zulassungsrechnung kennt die
-nachrangigen Stroeme ohne Zusage nicht, die trotzdem senden. Beides gehoert
-gesagt, solange es offen ist.
+Die ADR gilt damit als angenommen. Die beiden Punkte, die hier bis zum
+16.09.2026 als offene Luecke standen, sind **beantwortet, nicht gebaut** — und
+das ist der Unterschied, auf den es ankommt: gesucht, gemessen, mit Begruendung
+gelassen. Die Daempfung traegt ihren Negativbefund oben (drei Laeufe je Arm,
+Schwelle vorher festgelegt, kein Effekt). Bleibt die Zulassungsrechnung, die
+nur Stroeme mit Zusage zaehlt. Dieser Punkt ist allerdings **Absicht und kein
+Versehen**: ein nachrangiger Strom ohne Zusage faehrt `latest` und verwirft
+ueberholte Bilder, seine Periode ist eine Wunschrate und kein Anspruch. Wuerde
+man sie voll mitzaehlen, lehnte die Zulassung drei laufende Demos ab (je drei
+Kameras zu 725 ‰ ueber zwei Slots).
+
+**Nachgemessen am 16.09.2026, und die Asymmetrie haelt stand.** Ein Slot, zwei
+nachrangige Kameras: `rear` mit einer Zusage von 800 ‰, `left` ohne Zusage bei
+33 ms Takt. Die Zulassung weist **25 %** aus, tatsaechlich gefordert sind
+**78 %** — die Luecke ist also real und gross. Gemessen ueber 30 s erfuellt
+`rear` seine Zusage trotzdem zu **1000 ‰** (Rueckstand 0 ms, Luft 44 ms), und
+`left` liefert 909 von 910 Bildern; ein einziges wurde ueberholt. Die
+ungezaehlte Nachfrage schadet der Zusage nicht, weil sie sich bei Bedarf
+selbst verwirft, statt Arbeit aufzustauen.
+
+Was fehlt, ist damit nicht die Summe, sondern die Sichtbarkeit: die Zahl ist
+nicht die Gesamtnachfrage, und das sollte dabeistehen. Beides gehoert gesagt,
+solange es offen ist.
 
 ## Ergaenzende Reparaturen aus dem Review vom 16.09.
 
