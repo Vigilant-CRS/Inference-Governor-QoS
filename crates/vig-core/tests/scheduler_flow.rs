@@ -2222,3 +2222,47 @@ fn an_unmeasured_pairing_gets_no_invented_surcharge() {
         "die Gegenrichtung ist nicht gemessen und wird nicht geraten"
     );
 }
+
+/// Belegt **ein** nicht bewachtes Modell zwei verschiedene Slots?
+///
+/// Die Blockierpruefung in `vig-config` zaehlt blockierende **Modelle** gegen
+/// die Slotzahl. Das setzt voraus, dass ein Modell hoechstens einen Slot
+/// belegt — `SlotSet::ready_slot` kennt aber keine solche Grenze: es nimmt den
+/// ersten Slot, der das Modell zulaesst und noch Kredit hat. Die erneute
+/// Pruefung vom 16.09.2026 hat das als Annahme benannt; hier wird sie
+/// nachgemessen statt geglaubt.
+///
+/// `pipelining_depth` ist null, ein Slot haelt also genau einen Auftrag.
+/// Laufen zwei Auftraege desselben Modells gleichzeitig, liegen sie
+/// zwangslaeufig in verschiedenen Slots.
+#[test]
+fn one_model_can_occupy_two_slots() {
+    let background = contract(
+        Criticality::BestEffort,
+        QueuePolicy::Fifo,
+        None,
+        1_000,
+        2_000,
+        &[100],
+    );
+    let mut scheduler = build(vec![background.clone()], 2);
+    let mut backend = Backend::default();
+
+    // Zwei Auftraege, gleichzeitig da. Die Dispatchschleife kehrt nach jedem
+    // Dispatch zurueck, deshalb braucht es zwei Ereignisse.
+    run(&mut scheduler, &mut backend, 5, |t| {
+        if t == 0 {
+            vec![frame(1, 0, 0, &background), frame(2, 0, 0, &background)]
+        } else {
+            Vec::new()
+        }
+    });
+
+    let slots: Vec<_> = backend.pending.iter().map(|(_, _, slot)| *slot).collect();
+    assert_eq!(slots.len(), 2, "beide Auftraege muessen laufen: {slots:?}");
+    assert_ne!(
+        slots[0], slots[1],
+        "ein Modell belegt zwei verschiedene Slots — die Blockierpruefung darf \
+         Modelle also nicht mit gleichzeitigen Auftraegen gleichsetzen"
+    );
+}
