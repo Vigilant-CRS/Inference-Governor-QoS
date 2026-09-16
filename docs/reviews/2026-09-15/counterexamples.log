@@ -1,0 +1,228 @@
+   Compiling vig-cli v0.2.0 (/tmp/inferenceqos-review-20260915/source/crates/vig-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.34s
+     Running unittests src/lib.rs (/home/dd/.cache/vig-target/InferenceQoS/debug/deps/vig_bench-bb9abaad02dbc166)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.00s
+
+     Running unittests src/bin/diy-baseline.rs (/home/dd/.cache/vig-target/InferenceQoS/debug/deps/diy_baseline-89099b27acd906f2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/edge-pilot.rs (/home/dd/.cache/vig-target/InferenceQoS/debug/deps/edge_pilot-4658d8898e695d7c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/frontier.rs (/home/dd/.cache/vig-target/InferenceQoS/debug/deps/frontier-902b7608b0bcc9db)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/gate-m3.rs (/home/dd/.cache/vig-target/InferenceQoS/debug/deps/gate_m3-d9f92f72b267f7ee)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running unittests src/bin/load-ramp.rs (/home/dd/.cache/vig-target/InferenceQoS/debug/deps/load_ramp-fcbb6ebbe72cac71)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/oip-check.rs (/home/dd/.cache/vig-target/InferenceQoS/debug/deps/oip_check-7c3320e8f6b2f06e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/serve-latency.rs (/home/dd/.cache/vig-target/InferenceQoS/debug/deps/serve_latency-4ec8b823e623b0af)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/shm-latency.rs (/home/dd/.cache/vig-target/InferenceQoS/debug/deps/shm_latency-4f7cbae224b27d4d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/soak.rs (/home/dd/.cache/vig-target/InferenceQoS/debug/deps/soak-a2cb1a58cee8f3d8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/vig-fit.rs (/home/dd/.cache/vig-target/InferenceQoS/debug/deps/vig_fit-4848757d28ce0816)
+
+running 1 test
+
+thread 'review_20260915::no_deliveries_must_not_be_conclusive' (1260015) panicked at crates/vig-bench/src/bin/vig-fit.rs:885:9:
+assertion `left == right` failed: reports exist even when no request was delivered: {"arms":"both","cells":[{"direct_longest_gap_ms":0,"direct_samples":10,"direct_uncovered_permille":1000,"governed_longest_gap_ms":0,"governed_samples":10,"governed_uncovered_permille":1000,"load_percent":100,"protected":true,"stream":"det"}],"conclusive":true,"foreign_cores_centi_after":0,"foreign_cores_centi_before":0,"load_points_percent":[100],"seconds_per_arm":1,"tool":"vig-fit","verdict":"URTEIL Ab 100 % Last verliert der direkte Weg 1000 ‰ der Takte des\n  geschuetzten Stroms — der Governor 1000 ‰, also **nicht weniger**.\n  Das ist ein Ergebnis gegen uns: auf dieser Last bringt er hier nichts.","verdict_en":"From 100 % load the direct path misses 1000 ‰ of the protected stream's cycles — the governor 1000 ‰, so no fewer. That is a result against us: on this load it brings nothing here.","view":"consumer"}
+  left: Some(true)
+ right: Some(false)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test review_20260915::no_deliveries_must_not_be_conclusive ... FAILED
+
+failures:
+
+failures:
+    review_20260915::no_deliveries_must_not_be_conclusive
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p vig-bench --bin vig-fit`
+     Running unittests src/bin/wire-bench.rs (/home/dd/.cache/vig-target/InferenceQoS/debug/deps/wire_bench-567b0b16e0414146)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/wp26.rs (/home/dd/.cache/vig-target/InferenceQoS/debug/deps/wp26-b88e9b990b30d8a8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/arm_drain.rs (/home/dd/.cache/vig-target/InferenceQoS/debug/deps/arm_drain-61e20307f0f66f50)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/edge_pilot.rs (/home/dd/.cache/vig-target/InferenceQoS/debug/deps/edge_pilot-d98f88c2364b12fb)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (/home/dd/.cache/vig-target/InferenceQoS/debug/deps/vig-74f5ed524acb97b3)
+
+running 3 tests
+
+thread 'autotune::tune::review_20260915::protected_stream_regression_must_not_be_hidden_by_maximum' (1260023) panicked at crates/vig-cli/src/autotune/tune.rs:1738:9:
+B regresses from 0 to 100 permille but is accepted: Ok("protected streams 100 ‰ instead of 200 ‰ (at most 189 ‰ needed)")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test autotune::tune::review_20260915::protected_stream_regression_must_not_be_hidden_by_maximum ... FAILED
+Resuming; already done: discover, measure, tune, fit, check
+Nothing left to do. Use --restart to measure again.
+
+thread 'autotune::review_20260915::absent_frozen_artifact_must_invalidate_completed_state' (1260021) panicked at crates/vig-cli/src/autotune.rs:3098:9:
+assertion `left != right` failed: complete state is accepted although measured.yaml is absent
+  left: ExitCode(unix_exit_status(0))
+ right: ExitCode(unix_exit_status(0))
+test autotune::review_20260915::absent_frozen_artifact_must_invalidate_completed_state ... FAILED
+
+thread 'autotune::review_20260915::explicit_endpoint_must_not_silently_disagree_with_config' (1260022) panicked at crates/vig-cli/src/autotune.rs:3112:9:
+discovery accepts endpoint different-machine.invalid:8001, but measurement uses 127.0.0.1:8001
+test autotune::review_20260915::explicit_endpoint_must_not_silently_disagree_with_config ... FAILED
+
+failures:
+
+failures:
+    autotune::review_20260915::absent_frozen_artifact_must_invalidate_completed_state
+    autotune::review_20260915::explicit_endpoint_must_not_silently_disagree_with_config
+    autotune::tune::review_20260915::protected_stream_regression_must_not_be_hidden_by_maximum
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 76 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p vig-cli --bin vig`
+     Running tests/autotune_mock.rs (/home/dd/.cache/vig-target/InferenceQoS/debug/deps/autotune_mock-4c503738ef8b0325)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/dd/.cache/vig-target/InferenceQoS/debug/deps/vig_gateway-2148740bba08f188)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 61 filtered out; finished in 0.00s
+
+     Running tests/domains.rs (/home/dd/.cache/vig-target/InferenceQoS/debug/deps/domains-c4c7989a3729656c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/end_to_end.rs (/home/dd/.cache/vig-target/InferenceQoS/debug/deps/end_to_end-bb50afdbd08ecb07)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running tests/fake_executor.rs (/home/dd/.cache/vig-target/InferenceQoS/debug/deps/fake_executor-e49d0d7f5dec12a0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/fault_injection.rs (/home/dd/.cache/vig-target/InferenceQoS/debug/deps/fault_injection-438d7ca6e22f6ca8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+
+     Running tests/metrics_listener.rs (/home/dd/.cache/vig-target/InferenceQoS/debug/deps/metrics_listener-8534c70a8bbb098b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/mock_backend.rs (/home/dd/.cache/vig-target/InferenceQoS/debug/deps/mock_backend-15f7f859a623404c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/reconciliation.rs (/home/dd/.cache/vig-target/InferenceQoS/debug/deps/reconciliation-05876175ef480584)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+     Running tests/repro_scenario_mock.rs (/home/dd/.cache/vig-target/InferenceQoS/debug/deps/repro_scenario_mock-668aebf40d544ff4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/review_invariants.rs (/home/dd/.cache/vig-target/InferenceQoS/debug/deps/review_invariants-28632a8ede70299f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 26 filtered out; finished in 0.00s
+
+     Running tests/security.rs (/home/dd/.cache/vig-target/InferenceQoS/debug/deps/security-3771bf63819e63b0)
+
+running 2 tests
+
+thread 'review_20260915_parallel_registrations_obey_limit' (1260036) panicked at crates/vig-gateway/tests/security.rs:737:5:
+limit=1, registered=2, a=Ok(Response { metadata: MetadataMap { headers: {"content-type": "application/grpc", "date": "Tue, 15 Sep 2026 15:21:04 GMT", "grpc-status": "0"} }, message: SystemSharedMemoryRegisterResponse, extensions: {} }), b=Ok(Response { metadata: MetadataMap { headers: {"content-type": "application/grpc", "date": "Tue, 15 Sep 2026 15:21:04 GMT", "grpc-status": "0"} }, message: SystemSharedMemoryRegisterResponse, extensions: {} })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'review_20260915_strict_rejects_foreign_segment_alias' (1260037) panicked at crates/vig-gateway/tests/security.rs:726:5:
+BETA can register ALPHA's physical key under another region name
+test review_20260915_parallel_registrations_obey_limit ... FAILED
+test review_20260915_strict_rejects_foreign_segment_alias ... FAILED
+
+failures:
+
+failures:
+    review_20260915_parallel_registrations_obey_limit
+    review_20260915_strict_rejects_foreign_segment_alias
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.06s
+
+error: test failed, to rerun pass `-p vig-gateway --test security`
+error: 3 targets failed:
+    `-p vig-bench --bin vig-fit`
+    `-p vig-cli --bin vig`
+    `-p vig-gateway --test security`

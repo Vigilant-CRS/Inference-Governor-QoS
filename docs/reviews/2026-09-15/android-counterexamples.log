@@ -1,0 +1,60 @@
+   Compiling indexmap v2.14.2
+   Compiling bitflags v2.13.2
+   Compiling syn v3.0.5
+   Compiling mio v1.2.3
+   Compiling tracing v0.1.44
+   Compiling smallvec v1.16.1
+   Compiling serde_core v1.0.229
+   Compiling axum-core v0.5.6
+   Compiling vig-core v0.2.0 (/tmp/inferenceqos-review-20260915/source/crates/vig-core)
+   Compiling libloading v0.8.9
+   Compiling rustix v1.1.4
+   Compiling pulldown-cmark v0.13.4
+   Compiling petgraph v0.8.3
+   Compiling pulldown-cmark-to-cmark v22.0.1
+   Compiling tempfile v3.27.0
+   Compiling prost-build v0.14.4
+   Compiling tonic-prost-build v0.14.6
+   Compiling tokio-macros v2.7.2
+   Compiling async-trait v0.1.92
+   Compiling vig-protocol-oip v0.2.0 (/tmp/inferenceqos-review-20260915/source/crates/vig-protocol-oip)
+   Compiling tokio v1.53.1
+   Compiling tokio-util v0.7.19
+   Compiling tokio-stream v0.1.19
+   Compiling h2 v0.4.19
+   Compiling tower v0.5.3
+   Compiling axum v0.8.9
+   Compiling hyper v1.11.1
+   Compiling hyper-util v0.1.20
+   Compiling hyper-timeout v0.5.2
+   Compiling tonic v0.14.6
+   Compiling tonic-prost v0.14.6
+   Compiling vig-backend-triton v0.2.0 (/tmp/inferenceqos-review-20260915/source/crates/vig-backend-triton)
+   Compiling vig-backend-tflite v0.1.0 (/tmp/inferenceqos-review-20260915/source/backends/android-tflite)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 18.65s
+     Running unittests src/main.rs (/home/dd/.cache/vig-target/InferenceQoS/debug/deps/vig_tflite_server-739a5075ec02cd12)
+
+running 2 tests
+
+thread 'service::tests::review_20260915_rejects_wrong_shape_even_with_same_byte_count' (1244112) panicked at src/service.rs:700:9:
+NCHW declared input is silently interpreted as NHWC
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test service::tests::review_20260915_rejects_wrong_shape_even_with_same_byte_count ... FAILED
+
+thread 'models::tests::review_20260915_cancelled_call_still_counts_completed_gpu_work' (1244111) panicked at src/models.rs:267:9:
+assertion `left == right` failed: both jobs completed, but cancellation removed one from backend completion evidence
+  left: 1
+ right: 2
+test models::tests::review_20260915_cancelled_call_still_counts_completed_gpu_work ... FAILED
+
+failures:
+
+failures:
+    models::tests::review_20260915_cancelled_call_still_counts_completed_gpu_work
+    service::tests::review_20260915_rejects_wrong_shape_even_with_same_byte_count
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--bin vig-tflite-server`
+error: 1 target failed:
+    `--bin vig-tflite-server`

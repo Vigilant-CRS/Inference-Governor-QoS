@@ -1,0 +1,33 @@
+   Compiling vig-core v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-core)
+   Compiling vig-protocol-oip v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-protocol-oip)
+   Compiling vig-backend-triton v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-backend-triton)
+   Compiling vig-backend-tflite v0.1.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/backends/android-tflite)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.99s
+     Running unittests src/main.rs (/home/dd/.cache/vig-target/InferenceQoS/debug/deps/vig_tflite_server-d1154551cac96c75)
+
+running 22 tests
+test service::tests::a_different_shape_with_the_same_byte_count_is_refused ... ok
+test models::tests::a_model_that_does_not_load_reports_why ... ok
+test models::tests::a_model_answers_on_its_own_thread_and_counts_after_finishing ... ok
+test service::tests::a_failed_invoke_is_internal_and_counted_as_failed ... ok
+test models::tests::a_cancelled_call_still_counts_the_job_that_finished ... ok
+test service::tests::a_wrong_size_or_type_is_refused_before_anything_runs ... ok
+test service::tests::metadata_names_every_tensor_as_the_interpreter_sees_it ... ok
+test models::tests::a_failed_inference_is_counted_as_failed ... ok
+test service::tests::requested_outputs_select_a_subset ... ok
+test service::tests::an_unknown_model_is_not_found ... ok
+test service::tests::an_inference_returns_every_output_and_counts_as_evidence ... ok
+test service::tests::shared_memory_is_refused_not_misread ... ok
+test tests::models_are_named_and_unique ... ok
+test tests::quantiles_come_from_the_sorted_series ... ok
+test tests::the_gpu_is_the_default_and_the_cpu_must_be_asked_for ... ok
+test tflite::tests::a_missing_library_is_an_error_not_a_crash ... ok
+test service::tests::statistics_without_a_name_cover_every_model ... ok
+test tflite::tests::a_type_oip_does_not_know_has_no_name ... ok
+test tflite::tests::every_numeric_tflite_type_has_its_oip_name ... ok
+test tflite::tests::the_gpu_options_head_matches_the_c_layout ... ok
+test service::tests::the_governors_own_client_sees_a_complete_backend ... ok
+test models::tests::requests_to_one_model_queue_behind_each_other ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+

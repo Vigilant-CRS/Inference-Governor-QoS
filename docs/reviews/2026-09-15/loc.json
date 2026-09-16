@@ -1,0 +1,1312 @@
+{
+  "captured_at": "2026-09-15T15:39:33.573861+00:00",
+  "head": "90f517cf05b1cf9d5ef05184b1a7912a0b06ea0c",
+  "method": "Physical lines including comments, blank lines and tests; nonblank still includes comments. No claim of production-only or logical SLOC. Working-tree files, not an atomic Git snapshot; per-file SHA-256 recorded.",
+  "product": {
+    "total": {
+      "files": 167,
+      "physical_lines": 83423,
+      "nonblank_lines": 77559
+    },
+    "groups": {
+      "backends": {
+        "files": 4,
+        "physical_lines": 1797,
+        "nonblank_lines": 1671
+      },
+      "crates/vig-backend-triton": {
+        "files": 6,
+        "physical_lines": 1117,
+        "nonblank_lines": 1035
+      },
+      "crates/vig-bench": {
+        "files": 20,
+        "physical_lines": 10763,
+        "nonblank_lines": 10155
+      },
+      "crates/vig-cli": {
+        "files": 13,
+        "physical_lines": 11304,
+        "nonblank_lines": 10693
+      },
+      "crates/vig-config": {
+        "files": 8,
+        "physical_lines": 5948,
+        "nonblank_lines": 5600
+      },
+      "crates/vig-core": {
+        "files": 29,
+        "physical_lines": 21105,
+        "nonblank_lines": 19561
+      },
+      "crates/vig-gateway": {
+        "files": 23,
+        "physical_lines": 14109,
+        "nonblank_lines": 13131
+      },
+      "crates/vig-platform": {
+        "files": 7,
+        "physical_lines": 3984,
+        "nonblank_lines": 3681
+      },
+      "crates/vig-protocol-oip": {
+        "files": 5,
+        "physical_lines": 905,
+        "nonblank_lines": 834
+      },
+      "crates/vig-sim": {
+        "files": 18,
+        "physical_lines": 6345,
+        "nonblank_lines": 5941
+      },
+      "deploy": {
+        "files": 2,
+        "physical_lines": 133,
+        "nonblank_lines": 120
+      },
+      "integrations": {
+        "files": 12,
+        "physical_lines": 1938,
+        "nonblank_lines": 1594
+      },
+      "tools": {
+        "files": 20,
+        "physical_lines": 3975,
+        "nonblank_lines": 3543
+      }
+    },
+    "languages": {
+      ".py": {
+        "files": 18,
+        "physical_lines": 4395,
+        "nonblank_lines": 3727
+      },
+      ".rs": {
+        "files": 133,
+        "physical_lines": 77377,
+        "nonblank_lines": 72302
+      },
+      ".sh": {
+        "files": 16,
+        "physical_lines": 1651,
+        "nonblank_lines": 1530
+      }
+    },
+    "files": [
+      {
+        "path": "backends/android-tflite/src/main.rs",
+        "physical_lines": 338,
+        "nonblank_lines": 316,
+        "sha256": "60f70182eae6c1f8a803820ffd1c6ea7e5259a1b247300a07458e493bf1a7640"
+      },
+      {
+        "path": "backends/android-tflite/src/models.rs",
+        "physical_lines": 245,
+        "nonblank_lines": 228,
+        "sha256": "7afeae9fff9db9b2044921ae476d22a807dbbc363a277fca6d2fa0c861c4ab4f"
+      },
+      {
+        "path": "backends/android-tflite/src/service.rs",
+        "physical_lines": 695,
+        "nonblank_lines": 641,
+        "sha256": "66b11946dc037c4d2b2e74e1844c5ecaca6b28b35926190f8378e5402ab05cf2"
+      },
+      {
+        "path": "backends/android-tflite/src/tflite.rs",
+        "physical_lines": 519,
+        "nonblank_lines": 486,
+        "sha256": "0cdebd89136eaf41c78723c015797a86b03acfa789eee3da600ad824bc645dcc"
+      },
+      {
+        "path": "crates/vig-backend-triton/src/capabilities.rs",
+        "physical_lines": 142,
+        "nonblank_lines": 129,
+        "sha256": "610f285e0fc533a97161790f7568e3d2b0954fde4d87c25522fe90bce60ad3e2"
+      },
+      {
+        "path": "crates/vig-backend-triton/src/client.rs",
+        "physical_lines": 439,
+        "nonblank_lines": 408,
+        "sha256": "8b33fe4aa84269a5732477aea04f9ecbbad9862529360e29685a17f5bb908008"
+      },
+      {
+        "path": "crates/vig-backend-triton/src/error.rs",
+        "physical_lines": 128,
+        "nonblank_lines": 121,
+        "sha256": "b3042cdbb776613b61db9faafda5a1c376c74495b946e2ca93ed100f424f4fa0"
+      },
+      {
+        "path": "crates/vig-backend-triton/src/fingerprint.rs",
+        "physical_lines": 233,
+        "nonblank_lines": 215,
+        "sha256": "8566f730a02d467055249004b248b71cbb62049de575b2b68690331dd74b1e8e"
+      },
+      {
+        "path": "crates/vig-backend-triton/src/lib.rs",
+        "physical_lines": 35,
+        "nonblank_lines": 32,
+        "sha256": "246875ab995772fc57cc4fe3a5bff898d13a90e69dc3297d3e6dcbe197239c4b"
+      },
+      {
+        "path": "crates/vig-backend-triton/src/request.rs",
+        "physical_lines": 140,
+        "nonblank_lines": 130,
+        "sha256": "9918f4d50a9845919dd78b6e7013269703597c5da36d4d11deca6f1f2e19a8a2"
+      },
+      {
+        "path": "crates/vig-bench/src/backend.rs",
+        "physical_lines": 135,
+        "nonblank_lines": 126,
+        "sha256": "feb030dfd6f517114650a7cd5d6f48ae78ac4afb918d8e9364ba2810793fb22b"
+      },
+      {
+        "path": "crates/vig-bench/src/bin/diy-baseline.rs",
+        "physical_lines": 345,
+        "nonblank_lines": 322,
+        "sha256": "9c07bf32b4c2adf208bb6fa0699a8414d84f8654923c7fe405d624ce9eae57bb"
+      },
+      {
+        "path": "crates/vig-bench/src/bin/edge-pilot.rs",
+        "physical_lines": 1861,
+        "nonblank_lines": 1799,
+        "sha256": "30689c7a31cc33ab8cc842daa75df4aaeffb707aeecb039eb98f67e0ff4381a2"
+      },
+      {
+        "path": "crates/vig-bench/src/bin/frontier.rs",
+        "physical_lines": 620,
+        "nonblank_lines": 580,
+        "sha256": "c1b5100c1355e4f36d533779072969eb634e4f38f0170cdc134f655c0acd636b"
+      },
+      {
+        "path": "crates/vig-bench/src/bin/gate-m3.rs",
+        "physical_lines": 588,
+        "nonblank_lines": 553,
+        "sha256": "52b3a56b604b0bc452ba98668cc672abfedca73da113d407e74faac032d4fcae"
+      },
+      {
+        "path": "crates/vig-bench/src/bin/load-ramp.rs",
+        "physical_lines": 751,
+        "nonblank_lines": 704,
+        "sha256": "88b296221c3be20b938a520dd4d24dcf18c2c3c67160f3ae44a70e5f6daebbdb"
+      },
+      {
+        "path": "crates/vig-bench/src/bin/oip-check.rs",
+        "physical_lines": 189,
+        "nonblank_lines": 173,
+        "sha256": "ee70ff73384f0bdf43591c21bb346ec329c9f3965d4cd484cfd0ac5f8b1c1f10"
+      },
+      {
+        "path": "crates/vig-bench/src/bin/serve-latency.rs",
+        "physical_lines": 251,
+        "nonblank_lines": 235,
+        "sha256": "8cb556166e6978c60f1122b5ba8a6948e4506d884ca12ae68ffebfcc0de6b74a"
+      },
+      {
+        "path": "crates/vig-bench/src/bin/shm-latency.rs",
+        "physical_lines": 325,
+        "nonblank_lines": 306,
+        "sha256": "cc5840026b9137b9cb912780325329bbfb1d734fc25866b21e820cc26a7f6459"
+      },
+      {
+        "path": "crates/vig-bench/src/bin/soak.rs",
+        "physical_lines": 579,
+        "nonblank_lines": 544,
+        "sha256": "e285a4e8297436610a9f78e171150d5c286bc3c61d6609c2225dc022e79a6c9c"
+      },
+      {
+        "path": "crates/vig-bench/src/bin/vig-fit.rs",
+        "physical_lines": 861,
+        "nonblank_lines": 814,
+        "sha256": "563a48d350cf6098b0ecac38466f2a989afc8670221b4582f67cee52f6edc508"
+      },
+      {
+        "path": "crates/vig-bench/src/bin/wire-bench.rs",
+        "physical_lines": 388,
+        "nonblank_lines": 366,
+        "sha256": "523828dab935eb9906bbdc568c6144aee843f03b29b6f623f4556c0afedbddfc"
+      },
+      {
+        "path": "crates/vig-bench/src/bin/wp26.rs",
+        "physical_lines": 595,
+        "nonblank_lines": 563,
+        "sha256": "2523282877f1cfd6b9810f745b07797358f5debd4e3cf2386e5196720a1db10d"
+      },
+      {
+        "path": "crates/vig-bench/src/lib.rs",
+        "physical_lines": 50,
+        "nonblank_lines": 46,
+        "sha256": "e51904ebefba54e8a2f921028e4de46cd749893d9b914fc6d33c9b02c98e09b4"
+      },
+      {
+        "path": "crates/vig-bench/src/pilot.rs",
+        "physical_lines": 1917,
+        "nonblank_lines": 1803,
+        "sha256": "5222e6aba57f522813634e864d91d579fb42abbf14bd7f7167f75d929ba07b49"
+      },
+      {
+        "path": "crates/vig-bench/src/service.rs",
+        "physical_lines": 188,
+        "nonblank_lines": 164,
+        "sha256": "4ed016596fde9cd3bcf96492de5bf42dfcbda911153215602f7583cb5b0d3210"
+      },
+      {
+        "path": "crates/vig-bench/src/shm.rs",
+        "physical_lines": 98,
+        "nonblank_lines": 90,
+        "sha256": "1d3ceec705dffdb0e9cc3992f572306bd79d784f91a0938af50b07b61fccc5c9"
+      },
+      {
+        "path": "crates/vig-bench/src/workload.rs",
+        "physical_lines": 721,
+        "nonblank_lines": 686,
+        "sha256": "99dd76618201a4722a4853bba8ca1bba2b2d669d84df9ff08c0bf3149061eb93"
+      },
+      {
+        "path": "crates/vig-bench/tests/arm_drain.rs",
+        "physical_lines": 82,
+        "nonblank_lines": 75,
+        "sha256": "61b5da4dc8b4befefd23d0ed61c27821aad57f4368ed01d31e8abd5066b49a0e"
+      },
+      {
+        "path": "crates/vig-bench/tests/edge_pilot.rs",
+        "physical_lines": 219,
+        "nonblank_lines": 206,
+        "sha256": "7d02d3de7199b06746b8edd4eb633ba4e38bb20f8e5c5290b428c8f858a9cd00"
+      },
+      {
+        "path": "crates/vig-cli/src/artifact.rs",
+        "physical_lines": 353,
+        "nonblank_lines": 327,
+        "sha256": "8dd1ed6224076e20384e6ca2a6892653cac8f2881d3bdf146c9a395bc6eb018e"
+      },
+      {
+        "path": "crates/vig-cli/src/autotune.rs",
+        "physical_lines": 3293,
+        "nonblank_lines": 3131,
+        "sha256": "aa62e2cdb777308465ee931518556f7e194ca7944426f35f0a0cbd6dd0a14129"
+      },
+      {
+        "path": "crates/vig-cli/src/autotune/tune.rs",
+        "physical_lines": 1843,
+        "nonblank_lines": 1755,
+        "sha256": "519e3308ecb4750ace54690f8f354df0ef19d2859b5181de4f72627a0d788c5c"
+      },
+      {
+        "path": "crates/vig-cli/src/calibrate.rs",
+        "physical_lines": 1535,
+        "nonblank_lines": 1455,
+        "sha256": "6044339e242ca2a6f288f7f7e200308e8737c8a9f6d6a2ec22975ae2cf9c3be2"
+      },
+      {
+        "path": "crates/vig-cli/src/doctor.rs",
+        "physical_lines": 1392,
+        "nonblank_lines": 1319,
+        "sha256": "89ce6f5292ba5e99b78de7d2464280972403835413348e35b5de90b6488cff29"
+      },
+      {
+        "path": "crates/vig-cli/src/identity.rs",
+        "physical_lines": 395,
+        "nonblank_lines": 373,
+        "sha256": "303465e25fce1aacf0e34674cb6ce5f6d5f1ff4bdca47b139ac1fb52f1f58431"
+      },
+      {
+        "path": "crates/vig-cli/src/init.rs",
+        "physical_lines": 432,
+        "nonblank_lines": 403,
+        "sha256": "2c3ed9dba8c1e052ebae140d6db54244aba6ea43c57b6fd970f2b4e398cd797f"
+      },
+      {
+        "path": "crates/vig-cli/src/main.rs",
+        "physical_lines": 308,
+        "nonblank_lines": 298,
+        "sha256": "d610b7634b6f41d78a0fa48f60ae105b0dfa86732c92453d572af01d09c59ca4"
+      },
+      {
+        "path": "crates/vig-cli/src/profile.rs",
+        "physical_lines": 330,
+        "nonblank_lines": 307,
+        "sha256": "96d5e69977481a03dd9f8deb222e387a5c1d61865ca030e2257c288ee5951edf"
+      },
+      {
+        "path": "crates/vig-cli/src/runloop.rs",
+        "physical_lines": 147,
+        "nonblank_lines": 135,
+        "sha256": "9f8809610fdb239d5bab0da704d718870da4e6d8ab3ba3f1528bde9e75154b9b"
+      },
+      {
+        "path": "crates/vig-cli/src/serve.rs",
+        "physical_lines": 646,
+        "nonblank_lines": 606,
+        "sha256": "b3018632848008369590a769b5a00827e45845e0bb68df4d448bbfe9622fe0a2"
+      },
+      {
+        "path": "crates/vig-cli/src/verify.rs",
+        "physical_lines": 455,
+        "nonblank_lines": 428,
+        "sha256": "174493d0d4032f12db68cc33ee7ee287a376da72487e6e0df86bb8a43ee08054"
+      },
+      {
+        "path": "crates/vig-cli/tests/autotune_mock.rs",
+        "physical_lines": 175,
+        "nonblank_lines": 156,
+        "sha256": "c7375d20d5557bb563bed39259328360b89f05f57d975cc5362d5e7e1babe3e4"
+      },
+      {
+        "path": "crates/vig-config/src/error.rs",
+        "physical_lines": 143,
+        "nonblank_lines": 135,
+        "sha256": "f53679887614f346930c1c495cf7b8cfdade6f859e74f612afdc5c96b3e3ddd9"
+      },
+      {
+        "path": "crates/vig-config/src/lib.rs",
+        "physical_lines": 33,
+        "nonblank_lines": 31,
+        "sha256": "8e90311274a9a3ba8db18958c10c7a00445c4a6fa358fb938152eff2b3bf0a9b"
+      },
+      {
+        "path": "crates/vig-config/src/manifest.rs",
+        "physical_lines": 767,
+        "nonblank_lines": 720,
+        "sha256": "0adbfbdaa05209be39b55a73a6e3c0a17a15467eaa488226984f66afae193347"
+      },
+      {
+        "path": "crates/vig-config/src/schema.rs",
+        "physical_lines": 3009,
+        "nonblank_lines": 2870,
+        "sha256": "c694a8a5ba380397b8a289616aa11517d9fe980abd08fd054f5b9a77724be6dd"
+      },
+      {
+        "path": "crates/vig-config/src/window.rs",
+        "physical_lines": 132,
+        "nonblank_lines": 118,
+        "sha256": "3694ec555cd22c26d9239b479daa6d15a2afd0b2b7b2783214d9e512be3478b2"
+      },
+      {
+        "path": "crates/vig-config/tests/domains.rs",
+        "physical_lines": 372,
+        "nonblank_lines": 344,
+        "sha256": "e1f2e7deb90fe5985083f99b6d4150a999052c8408cbaba20140302362f53d82"
+      },
+      {
+        "path": "crates/vig-config/tests/repro_scenarios.rs",
+        "physical_lines": 139,
+        "nonblank_lines": 128,
+        "sha256": "679097f69c5d0b3e3a1b68e950d50a64bd63cd0d92e87ec43ff95dc1a9e3b274"
+      },
+      {
+        "path": "crates/vig-config/tests/schema.rs",
+        "physical_lines": 1353,
+        "nonblank_lines": 1254,
+        "sha256": "a394012d1543da6eb99fbbd3258ce3621062f5ecd94a8e7e4444f79074a91dbe"
+      },
+      {
+        "path": "crates/vig-core/src/arrayvec.rs",
+        "physical_lines": 338,
+        "nonblank_lines": 303,
+        "sha256": "f5d95b7e362d38a25a1035a0cc2434b4c2c313c0d90936c058e9b9dd07adde5f"
+      },
+      {
+        "path": "crates/vig-core/src/arrival.rs",
+        "physical_lines": 254,
+        "nonblank_lines": 232,
+        "sha256": "a8c3e1a5415d3fd0bd32776877d6ff6f14fa7ab546a3688f1782f45edb226de4"
+      },
+      {
+        "path": "crates/vig-core/src/contract_ext.rs",
+        "physical_lines": 1715,
+        "nonblank_lines": 1599,
+        "sha256": "3532ab6874c2b794cccc3922e3c3300d43d6b97d25fbbdae627554098c492888"
+      },
+      {
+        "path": "crates/vig-core/src/dag.rs",
+        "physical_lines": 925,
+        "nonblank_lines": 844,
+        "sha256": "a0b873e2995bb48462a74953654c2d589192bfd4281da46e8184b7cb8c24a90c"
+      },
+      {
+        "path": "crates/vig-core/src/estimator.rs",
+        "physical_lines": 858,
+        "nonblank_lines": 791,
+        "sha256": "8e7bc542de62832d5438a1798bfe4026677ca1093e49e01724e4db8e93be6ae1"
+      },
+      {
+        "path": "crates/vig-core/src/feasibility.rs",
+        "physical_lines": 571,
+        "nonblank_lines": 534,
+        "sha256": "d1a3e30b5f2e4aa0665598e08b26693f23d16d3342acfaeab02d969511d7e760"
+      },
+      {
+        "path": "crates/vig-core/src/generative.rs",
+        "physical_lines": 832,
+        "nonblank_lines": 775,
+        "sha256": "495ecf3eb0d20bc949dde268196930499027f194ecca5cd8065a9edfd536d6cd"
+      },
+      {
+        "path": "crates/vig-core/src/hints.rs",
+        "physical_lines": 900,
+        "nonblank_lines": 835,
+        "sha256": "ffcec82dbf1c070694cb7223c6c8a90c818f85a75c9bbee9d5586cb69071b97f"
+      },
+      {
+        "path": "crates/vig-core/src/ids.rs",
+        "physical_lines": 126,
+        "nonblank_lines": 107,
+        "sha256": "cf41e372b5e95cbea5b8df65576ab8e4c3b25e407c83cf3cdd87755d10178748"
+      },
+      {
+        "path": "crates/vig-core/src/interference.rs",
+        "physical_lines": 642,
+        "nonblank_lines": 593,
+        "sha256": "6fc958083e5d91b3c4d862b634f22e26055a17fd43995717f9e7c2ea4d71f29e"
+      },
+      {
+        "path": "crates/vig-core/src/learning.rs",
+        "physical_lines": 653,
+        "nonblank_lines": 608,
+        "sha256": "e6a5bc214438eef04a22bb763aae1e8543645cb48c49152c614bca698cec0307"
+      },
+      {
+        "path": "crates/vig-core/src/lib.rs",
+        "physical_lines": 63,
+        "nonblank_lines": 61,
+        "sha256": "01d62d29430b8f821c4e8f5760694b814c6324fad9d67180b59d50369d26bbe9"
+      },
+      {
+        "path": "crates/vig-core/src/metrics.rs",
+        "physical_lines": 599,
+        "nonblank_lines": 582,
+        "sha256": "1e51dac834012b34bd4bfed015d7f85a51e3f881827899e02914efdad279a700"
+      },
+      {
+        "path": "crates/vig-core/src/model.rs",
+        "physical_lines": 599,
+        "nonblank_lines": 562,
+        "sha256": "d6618dd618c393495e66650311a5ac9649797c7e6635ff3a7417d6f23705d3c1"
+      },
+      {
+        "path": "crates/vig-core/src/overload.rs",
+        "physical_lines": 378,
+        "nonblank_lines": 348,
+        "sha256": "a3c9d14908c352a66135428e5e32d56a5fc5816c76fc20854ea952f8f5f2b327"
+      },
+      {
+        "path": "crates/vig-core/src/predictor.rs",
+        "physical_lines": 1122,
+        "nonblank_lines": 1041,
+        "sha256": "d13c217cd8d46887027d0134c3d25b54e6383b10c0ed83233b7a158b3ba38223"
+      },
+      {
+        "path": "crates/vig-core/src/profile.rs",
+        "physical_lines": 412,
+        "nonblank_lines": 374,
+        "sha256": "b7f99abf17ca3b181eb24fedf19e67483ebf46e2b620899a01e528a9e1f4e334"
+      },
+      {
+        "path": "crates/vig-core/src/queue.rs",
+        "physical_lines": 421,
+        "nonblank_lines": 387,
+        "sha256": "82e484334732fc24bd1b43cbc83a4bb1c7fe0cbebf37bbf56ae8bb8fd957e64a"
+      },
+      {
+        "path": "crates/vig-core/src/request.rs",
+        "physical_lines": 320,
+        "nonblank_lines": 300,
+        "sha256": "5872b46bb6ffc67e8d68fbf2a065160f13fcbdff3de0b35b91d38a324fe2315e"
+      },
+      {
+        "path": "crates/vig-core/src/scheduler.rs",
+        "physical_lines": 2297,
+        "nonblank_lines": 2177,
+        "sha256": "043cfa29896df1644eb3f98197d323802d8c3822527153dc3d51f12f51eea246"
+      },
+      {
+        "path": "crates/vig-core/src/semantics.rs",
+        "physical_lines": 676,
+        "nonblank_lines": 627,
+        "sha256": "743fcfe53224b22a478e51f4d7cea059aef9a9e80474a2c3dccadd602255baeb"
+      },
+      {
+        "path": "crates/vig-core/src/slots.rs",
+        "physical_lines": 680,
+        "nonblank_lines": 624,
+        "sha256": "a0b9cf2d81bee87f3b47c413ed612aeaa43c685c17a6c5da85aedd156f2d24d5"
+      },
+      {
+        "path": "crates/vig-core/src/time.rs",
+        "physical_lines": 417,
+        "nonblank_lines": 368,
+        "sha256": "999f6a4adec0f7d99f9f8423618182cb87491945f13558e229d392bd802fce98"
+      },
+      {
+        "path": "crates/vig-core/src/variant.rs",
+        "physical_lines": 380,
+        "nonblank_lines": 362,
+        "sha256": "8bd402627a491f1c2174b3f99781dcddc8b665b91029276e82535492b77f5d3d"
+      },
+      {
+        "path": "crates/vig-core/tests/golden_queue.rs",
+        "physical_lines": 448,
+        "nonblank_lines": 392,
+        "sha256": "bdd1aeb5b01acc1ad6dc4e8aa1c5f09b4c6b658e21c7d28778879f5f37b49528"
+      },
+      {
+        "path": "crates/vig-core/tests/golden_scheduling.rs",
+        "physical_lines": 785,
+        "nonblank_lines": 709,
+        "sha256": "b8ec18d93aeeb162720c71aa4a709e21f396ed40ec57cb8040e0e2fb51dcb515"
+      },
+      {
+        "path": "crates/vig-core/tests/review_invariants.rs",
+        "physical_lines": 1273,
+        "nonblank_lines": 1174,
+        "sha256": "88f4aebc087fb3cb552fd75bca9b6ba8df79d847052f4ce23fe9fa163d15ab84"
+      },
+      {
+        "path": "crates/vig-core/tests/scheduler_flow.rs",
+        "physical_lines": 2222,
+        "nonblank_lines": 2068,
+        "sha256": "571118e548beeacf32285e89e6db4f007fefc56b8f67c6dc94be0427deb0b095"
+      },
+      {
+        "path": "crates/vig-core/tests/variant_supply.rs",
+        "physical_lines": 199,
+        "nonblank_lines": 184,
+        "sha256": "bf654b2f138efe7c45bf8825363a0b50ae8b27efd206060b166bea0fca2b94e7"
+      },
+      {
+        "path": "crates/vig-gateway/src/actor.rs",
+        "physical_lines": 3125,
+        "nonblank_lines": 2993,
+        "sha256": "2d231856bdfde14b1b0e4f3084e9d9b4fc510759ef2ef76716014209b0a419ea"
+      },
+      {
+        "path": "crates/vig-gateway/src/auth.rs",
+        "physical_lines": 568,
+        "nonblank_lines": 515,
+        "sha256": "80197ccd35b6f2fef215aaa15189e505db033040e0f461c77065ac4551da99c1"
+      },
+      {
+        "path": "crates/vig-gateway/src/budget.rs",
+        "physical_lines": 109,
+        "nonblank_lines": 102,
+        "sha256": "ca7f6a3c978d5cce59b7e1227dcbec4e49292c28a4789ad822deb203442be8fa"
+      },
+      {
+        "path": "crates/vig-gateway/src/clock.rs",
+        "physical_lines": 92,
+        "nonblank_lines": 82,
+        "sha256": "07b67aab87d826e4c57b35fb1b5ea40b56abdf488af9aad61e8234ed4941ff5e"
+      },
+      {
+        "path": "crates/vig-gateway/src/cooperative.rs",
+        "physical_lines": 862,
+        "nonblank_lines": 804,
+        "sha256": "774a1b8cb0617f90cb31100c8f2133f975a62322db97bda33481cc0bddb02cc8"
+      },
+      {
+        "path": "crates/vig-gateway/src/datapath_budget.rs",
+        "physical_lines": 489,
+        "nonblank_lines": 463,
+        "sha256": "6bc0ba34655b76c78d22117528241f33c5b7083897062db61fca83f6edbd1b14"
+      },
+      {
+        "path": "crates/vig-gateway/src/executor.rs",
+        "physical_lines": 293,
+        "nonblank_lines": 272,
+        "sha256": "d7c7368d759412cc5bae91d519c9f11ea1e69353278c1d5575b4ed2b0c876887"
+      },
+      {
+        "path": "crates/vig-gateway/src/exporter.rs",
+        "physical_lines": 1200,
+        "nonblank_lines": 1125,
+        "sha256": "6eedba04bc47ba6978911350f4badc625c6acb335566c7e093a73193df0e9450"
+      },
+      {
+        "path": "crates/vig-gateway/src/lib.rs",
+        "physical_lines": 38,
+        "nonblank_lines": 36,
+        "sha256": "ea42f350cf3b3ae059f0c2ec97218ba286333951cf8521e6f1d2cfff887f167a"
+      },
+      {
+        "path": "crates/vig-gateway/src/outcome.rs",
+        "physical_lines": 114,
+        "nonblank_lines": 108,
+        "sha256": "b27fd9dd5254096d23e5f8746057c1730b8da522794529cf041b011b9eec8505"
+      },
+      {
+        "path": "crates/vig-gateway/src/service.rs",
+        "physical_lines": 1032,
+        "nonblank_lines": 960,
+        "sha256": "5b91086a0f12f32dd9707e3cc0411e3798a562d0e54d1d2033e5f78eb8e40534"
+      },
+      {
+        "path": "crates/vig-gateway/src/shm.rs",
+        "physical_lines": 349,
+        "nonblank_lines": 318,
+        "sha256": "65368d58d48feeb0cf091ecf96668473afdb059a6fe5de9ab654d3d4af07171e"
+      },
+      {
+        "path": "crates/vig-gateway/src/testing.rs",
+        "physical_lines": 272,
+        "nonblank_lines": 247,
+        "sha256": "0a11f8cd493db9a3ad60c4bb58aa6c227d9baf8a5e66df5384064a9e4c6dc1e7"
+      },
+      {
+        "path": "crates/vig-gateway/tests/domains.rs",
+        "physical_lines": 400,
+        "nonblank_lines": 374,
+        "sha256": "de9c7f9e4269976e9a5e845982a6eae69565da0170d0c6a2d12ff6bf06b42542"
+      },
+      {
+        "path": "crates/vig-gateway/tests/end_to_end.rs",
+        "physical_lines": 596,
+        "nonblank_lines": 548,
+        "sha256": "96626a299a2c0890eec77b2ef25aba27d7d6007f124218766a91bc4634826faa"
+      },
+      {
+        "path": "crates/vig-gateway/tests/fake_executor.rs",
+        "physical_lines": 274,
+        "nonblank_lines": 252,
+        "sha256": "fb8dde7f3348045ef87f603e2a600301167e8d98f8757a8c20168910400ba7bc"
+      },
+      {
+        "path": "crates/vig-gateway/tests/fault_injection.rs",
+        "physical_lines": 751,
+        "nonblank_lines": 698,
+        "sha256": "c6f42f561d8b192ee87ccbddab7f121262f6099d9ad5a1869ed5b956291ce1e6"
+      },
+      {
+        "path": "crates/vig-gateway/tests/metrics_listener.rs",
+        "physical_lines": 34,
+        "nonblank_lines": 28,
+        "sha256": "4e972fee796da50ed546b5afb16016653ac66de7d9ba87b34dbfd94ac247ef31"
+      },
+      {
+        "path": "crates/vig-gateway/tests/mock_backend.rs",
+        "physical_lines": 521,
+        "nonblank_lines": 481,
+        "sha256": "4bb05f55d88cd3f26a7e2d278af99a2a21023c7479446dade4b913a5e7ae1021"
+      },
+      {
+        "path": "crates/vig-gateway/tests/reconciliation.rs",
+        "physical_lines": 561,
+        "nonblank_lines": 512,
+        "sha256": "924b7dcae607ee1ea84f1594efbda269f63dada1dea659418d4b9e721751f8ea"
+      },
+      {
+        "path": "crates/vig-gateway/tests/repro_scenario_mock.rs",
+        "physical_lines": 130,
+        "nonblank_lines": 115,
+        "sha256": "284163695779adafb860eafb8458402068ec24bbb9e7e93c8960d4f624c7f96f"
+      },
+      {
+        "path": "crates/vig-gateway/tests/review_invariants.rs",
+        "physical_lines": 1582,
+        "nonblank_lines": 1446,
+        "sha256": "4bdbc4a5879a77da100bb3fd444f8dfe69ebc8309a56e31651237e2a0b6c7dd7"
+      },
+      {
+        "path": "crates/vig-gateway/tests/security.rs",
+        "physical_lines": 717,
+        "nonblank_lines": 652,
+        "sha256": "8fc0e50abe82dfd0901cf350be2a8c1f1fb943ca451a62747904aab3fe0590b6"
+      },
+      {
+        "path": "crates/vig-platform/src/actuation.rs",
+        "physical_lines": 1236,
+        "nonblank_lines": 1142,
+        "sha256": "8dcd9ce6f3e686426b27b4dbb812673d78d20c26d424b5e5e6cad15fdf2404d4"
+      },
+      {
+        "path": "crates/vig-platform/src/collector.rs",
+        "physical_lines": 565,
+        "nonblank_lines": 514,
+        "sha256": "d7ac27f27efbabcd79ef7d14bff37b5e550c350a543db464967e3d6e56c33bb2"
+      },
+      {
+        "path": "crates/vig-platform/src/cpu.rs",
+        "physical_lines": 138,
+        "nonblank_lines": 130,
+        "sha256": "9c484ca17e1e2c3d36d4e600af33ca639e093bbd1dca502dc3db665bc45fdca9"
+      },
+      {
+        "path": "crates/vig-platform/src/gpu.rs",
+        "physical_lines": 472,
+        "nonblank_lines": 442,
+        "sha256": "26ddf496c039177eba23b7c794c2d16188832fc28a006d02ebca96e38f0ab6c0"
+      },
+      {
+        "path": "crates/vig-platform/src/lib.rs",
+        "physical_lines": 242,
+        "nonblank_lines": 225,
+        "sha256": "903b2c8a97784c5656a95d271d716059451aafec7fc522a1642839f998ec1051"
+      },
+      {
+        "path": "crates/vig-platform/src/measure.rs",
+        "physical_lines": 920,
+        "nonblank_lines": 847,
+        "sha256": "baa0a0cea603c099ad47e6be823d8111a56330ecbe8b1e468e950a53d1e77ae2"
+      },
+      {
+        "path": "crates/vig-platform/src/snapshot.rs",
+        "physical_lines": 411,
+        "nonblank_lines": 381,
+        "sha256": "3ab726bd4f545b47095e659a89a1d9bea3f1cbd84e52ec09d77d3cb96d152148"
+      },
+      {
+        "path": "crates/vig-protocol-oip/build.rs",
+        "physical_lines": 49,
+        "nonblank_lines": 43,
+        "sha256": "e791a00bb2697f9d96ba82ff38375c13f19a78186463f87ab676d0fc965153f4"
+      },
+      {
+        "path": "crates/vig-protocol-oip/src/bytes.rs",
+        "physical_lines": 122,
+        "nonblank_lines": 109,
+        "sha256": "bf7687904d7cff20eabdb734fe7ead92ab61da289b22d0ca59eea2f1f19ebc6f"
+      },
+      {
+        "path": "crates/vig-protocol-oip/src/inference.rs",
+        "physical_lines": 17,
+        "nonblank_lines": 15,
+        "sha256": "c8865d344a135e0fbd9b9905aa32e8c4fda422f8c4a8130f9138a5e4155362be"
+      },
+      {
+        "path": "crates/vig-protocol-oip/src/lib.rs",
+        "physical_lines": 15,
+        "nonblank_lines": 13,
+        "sha256": "64d0bc8707831cd7c9f4446ce36342647411dafb404c0b098026b1ca9ffc5529"
+      },
+      {
+        "path": "crates/vig-protocol-oip/src/params.rs",
+        "physical_lines": 702,
+        "nonblank_lines": 654,
+        "sha256": "1355af084046975f7d6d1a1b65ea41db6b6650de103a46a95d50f0f8f5576a68"
+      },
+      {
+        "path": "crates/vig-sim/src/baseline.rs",
+        "physical_lines": 247,
+        "nonblank_lines": 234,
+        "sha256": "8201674664849d61f086532879e68488cc40e18b2db6f2d640ec9995bb886b41"
+      },
+      {
+        "path": "crates/vig-sim/src/bin/decision-bench.rs",
+        "physical_lines": 322,
+        "nonblank_lines": 305,
+        "sha256": "dbb0da14ce15a31da74aa9751421b0b2daffa4167f4e0cd1ba559773859f41d3"
+      },
+      {
+        "path": "crates/vig-sim/src/bin/gate-s.rs",
+        "physical_lines": 352,
+        "nonblank_lines": 324,
+        "sha256": "29c41044975a87016476aa88d297e97b05ae41750f9c2cfca10b9918d8da6451"
+      },
+      {
+        "path": "crates/vig-sim/src/bounded.rs",
+        "physical_lines": 912,
+        "nonblank_lines": 873,
+        "sha256": "75fc517a40fb312dce6ea39f4d67304ecd2a0455d6ac710d9fd01ab93d9d1d3c"
+      },
+      {
+        "path": "crates/vig-sim/src/coverage.rs",
+        "physical_lines": 709,
+        "nonblank_lines": 656,
+        "sha256": "a8927155b10d92020edfa63036f7b8fb6dea995be33e98e5606b51a93a53e6b8"
+      },
+      {
+        "path": "crates/vig-sim/src/decision.rs",
+        "physical_lines": 450,
+        "nonblank_lines": 425,
+        "sha256": "f626bc46dbf9a2037036c095c931293ea290d777ab1fa87e282c07886359abd4"
+      },
+      {
+        "path": "crates/vig-sim/src/event.rs",
+        "physical_lines": 257,
+        "nonblank_lines": 232,
+        "sha256": "cdf4ea871548cd4f9510bc227923bed4166629fd41dae203be032ea1771f903a"
+      },
+      {
+        "path": "crates/vig-sim/src/harness.rs",
+        "physical_lines": 456,
+        "nonblank_lines": 427,
+        "sha256": "7f2a6fb32163ad300ca8f4dae6588ff4495ca0957dfdf90209de75879b898714"
+      },
+      {
+        "path": "crates/vig-sim/src/lib.rs",
+        "physical_lines": 49,
+        "nonblank_lines": 46,
+        "sha256": "df529d85d04d20f7bf82fb687e295a80e70252acc1fd34408343fbca41a9dceb"
+      },
+      {
+        "path": "crates/vig-sim/src/rng.rs",
+        "physical_lines": 163,
+        "nonblank_lines": 148,
+        "sha256": "b46885db331c79c26015c459612349715d4fc5a41896ae7f149836a40d2d1791"
+      },
+      {
+        "path": "crates/vig-sim/src/scenario.rs",
+        "physical_lines": 351,
+        "nonblank_lines": 336,
+        "sha256": "1b92c33fd7d370b6b80257aa6aea88542e616406fee35f609c7e00af0a020b7b"
+      },
+      {
+        "path": "crates/vig-sim/src/trace.rs",
+        "physical_lines": 111,
+        "nonblank_lines": 100,
+        "sha256": "ee9f1fc0a1693880d097dc0bef6718e2cc880a9fdc4ccaafeea06d04888be1c0"
+      },
+      {
+        "path": "crates/vig-sim/src/workload.rs",
+        "physical_lines": 311,
+        "nonblank_lines": 287,
+        "sha256": "df46c72d6dae54ec1b33533ee7946e1dfe42beb99c872680a986c07e246ef2a3"
+      },
+      {
+        "path": "crates/vig-sim/tests/bursts_and_frontier.rs",
+        "physical_lines": 329,
+        "nonblank_lines": 305,
+        "sha256": "0b7cd981131a04c6ac99a1015d3edf3c3af0971ffa3d0260ea40d1cfb17bc7d1"
+      },
+      {
+        "path": "crates/vig-sim/tests/margin_learning.rs",
+        "physical_lines": 454,
+        "nonblank_lines": 435,
+        "sha256": "cf99f418b4e20866dd3f9428d0c57269f04f394770e8d85a57600dc4cea7665a"
+      },
+      {
+        "path": "crates/vig-sim/tests/nv23_bounded.rs",
+        "physical_lines": 436,
+        "nonblank_lines": 404,
+        "sha256": "318468af1c3199dc0c6faed926b4be1c7ea191b6d01884bcaa0ad88e32f0c764"
+      },
+      {
+        "path": "crates/vig-sim/tests/supply_guard.rs",
+        "physical_lines": 237,
+        "nonblank_lines": 223,
+        "sha256": "0e993130116cd4ba7e0b6b0b7e5574f09d26bb6ed040b5d7b866c4dc270867c7"
+      },
+      {
+        "path": "crates/vig-sim/tests/wp1_determinism.rs",
+        "physical_lines": 199,
+        "nonblank_lines": 181,
+        "sha256": "6f6dd1712c176ab54d9a72c478fc39970bb5f87f396c1a39ce9fe415e75c2901"
+      },
+      {
+        "path": "deploy/xsched/build-xsched.sh",
+        "physical_lines": 33,
+        "nonblank_lines": 28,
+        "sha256": "fb54b4e5a384c767df93320c827bf991638891c1d29b19935a3248b9980a7b8d"
+      },
+      {
+        "path": "deploy/xsched/triton-two-process.sh",
+        "physical_lines": 100,
+        "nonblank_lines": 92,
+        "sha256": "b6d9e65bd6b7eb3bf7e891ae33b4f835f3d892ab7f7f2109c243d9b5495a8802"
+      },
+      {
+        "path": "integrations/ros2/scripts/live-smoke.sh",
+        "physical_lines": 61,
+        "nonblank_lines": 56,
+        "sha256": "5d33e19e2838782ac8a07f24ba50c2d2fc146b6c43c4dc92e1074354f7356fd3"
+      },
+      {
+        "path": "integrations/ros2/scripts/live_smoke.py",
+        "physical_lines": 100,
+        "nonblank_lines": 86,
+        "sha256": "e714b7f339e4ad7dc229abde1b2dfbc8b725e8bf9a81b1b668ae4cc308c15a38"
+      },
+      {
+        "path": "integrations/ros2/vig_bridge/setup.py",
+        "physical_lines": 21,
+        "nonblank_lines": 19,
+        "sha256": "84cf8f4072013905e89a4f4a87f08fe299d83bc4466b2cef533b4060d44a3c01"
+      },
+      {
+        "path": "integrations/ros2/vig_bridge/test/conftest.py",
+        "physical_lines": 8,
+        "nonblank_lines": 6,
+        "sha256": "dccce8df3224f2f51919f1473da17aa54734ffe850161f76b376433ba166ad33"
+      },
+      {
+        "path": "integrations/ros2/vig_bridge/test/stub_governor.py",
+        "physical_lines": 123,
+        "nonblank_lines": 100,
+        "sha256": "4b90443431f85ad390ad4647963a4e7ea412742ee2020c4a9e61b917c5b5eba5"
+      },
+      {
+        "path": "integrations/ros2/vig_bridge/test/test_bridge_ros.py",
+        "physical_lines": 137,
+        "nonblank_lines": 115,
+        "sha256": "6851c99e5ec389dc46bbc54c3f7937983c82bde773560591e9afc5ab6187b95d"
+      },
+      {
+        "path": "integrations/ros2/vig_bridge/test/test_core.py",
+        "physical_lines": 297,
+        "nonblank_lines": 211,
+        "sha256": "9eadac6451104d9a705b8e9704fca89c66519672fe1cba1553e04920f104d46c"
+      },
+      {
+        "path": "integrations/ros2/vig_bridge/test/test_oip.py",
+        "physical_lines": 120,
+        "nonblank_lines": 92,
+        "sha256": "6dcf54c8f8317076fd18d04bfb6f2bda633cfc720f3c162ce98e8c96e495905d"
+      },
+      {
+        "path": "integrations/ros2/vig_bridge/vig_bridge/__init__.py",
+        "physical_lines": 1,
+        "nonblank_lines": 1,
+        "sha256": "f45e9310155df83b73960d9c160aff423e74d48b6482edff8f7684e3224cc5d4"
+      },
+      {
+        "path": "integrations/ros2/vig_bridge/vig_bridge/core.py",
+        "physical_lines": 512,
+        "nonblank_lines": 419,
+        "sha256": "cbc64b1897ff3a6d0dbe84b1ea91e0fcd2799b31fc0640408aa7537d02add59f"
+      },
+      {
+        "path": "integrations/ros2/vig_bridge/vig_bridge/node.py",
+        "physical_lines": 315,
+        "nonblank_lines": 284,
+        "sha256": "1f2387fa0256beb6d29a7ceeccad89a0971e8d57f34e3ef9b47609e75951837e"
+      },
+      {
+        "path": "integrations/ros2/vig_bridge/vig_bridge/oip.py",
+        "physical_lines": 243,
+        "nonblank_lines": 205,
+        "sha256": "82e007a7c40ae83e306d54732168ab104544e4d62cb17e105921838c4a4c9e29"
+      },
+      {
+        "path": "tools/android/build-backend.sh",
+        "physical_lines": 31,
+        "nonblank_lines": 28,
+        "sha256": "1a3dda918abed6dc933c98888b48584a329bec617367f662ff8503e23b851190"
+      },
+      {
+        "path": "tools/android/build-llama.sh",
+        "physical_lines": 29,
+        "nonblank_lines": 26,
+        "sha256": "d225996b07b4818e0a988a92ace04dfe6b22e4cf13f351c04a1f0af403439d9b"
+      },
+      {
+        "path": "tools/android/fetch-assets.sh",
+        "physical_lines": 66,
+        "nonblank_lines": 61,
+        "sha256": "35cef1abe9a29cf11d8dfc9563d01088cd1353299c4dfce58c15b796969b8858"
+      },
+      {
+        "path": "tools/android/gate-on-phone.sh",
+        "physical_lines": 160,
+        "nonblank_lines": 152,
+        "sha256": "108cfb708cb5d3470a4541e3af9474b0642780e39977b4e12a46ff28f6879207"
+      },
+      {
+        "path": "tools/android/llm-neighbour.sh",
+        "physical_lines": 88,
+        "nonblank_lines": 79,
+        "sha256": "d1e3708afad0171dfc22bb5e26e42dc7b8f47767a3f63e4904c5486489f6d615"
+      },
+      {
+        "path": "tools/arm/build-and-run.sh",
+        "physical_lines": 75,
+        "nonblank_lines": 67,
+        "sha256": "2db39fb4c17da1338834fc1fa9d8902c04e90d61b2455ccf7c3cbf0dc135b909"
+      },
+      {
+        "path": "tools/arm/serve-on-phone.sh",
+        "physical_lines": 212,
+        "nonblank_lines": 194,
+        "sha256": "ad4bf1c92495245f9b282e8c1e6e4854717bc225eb94717a8ca56f173ac36436"
+      },
+      {
+        "path": "tools/arm/zig-ar.sh",
+        "physical_lines": 6,
+        "nonblank_lines": 6,
+        "sha256": "aeb938221b306ffdecd6a7255ebb6e724827b6f98f52c31823f88fccf7f9aa43"
+      },
+      {
+        "path": "tools/arm/zig-cc.sh",
+        "physical_lines": 25,
+        "nonblank_lines": 25,
+        "sha256": "d7b74d4fc4a271c1e6e27ef5bc6821867003ca5ba257cb402012d1ce538e1d91"
+      },
+      {
+        "path": "tools/onnx-signature.py",
+        "physical_lines": 233,
+        "nonblank_lines": 195,
+        "sha256": "70298c6f085cf5a73915b821321efe81c034ebb2990b0d70337062a306ed028e"
+      },
+      {
+        "path": "tools/pilot/prepare-data.sh",
+        "physical_lines": 82,
+        "nonblank_lines": 79,
+        "sha256": "ef6b43f32c0b9d4255bf61565ecdd571cc4b6a2bd7257d332dcb2c8650f661c9"
+      },
+      {
+        "path": "tools/repro/fetch-models.sh",
+        "physical_lines": 207,
+        "nonblank_lines": 195,
+        "sha256": "8bf3b829ec54d05c3e31f1f5f6ff54e45204a07fcde0a3f0db8fee58d8af94a7"
+      },
+      {
+        "path": "tools/repro/run.sh",
+        "physical_lines": 347,
+        "nonblank_lines": 322,
+        "sha256": "86dc7d5441945f8e80ff546b951af66fabc78af38725d85345d12a724f11998d"
+      },
+      {
+        "path": "tools/run-watch.sh",
+        "physical_lines": 129,
+        "nonblank_lines": 120,
+        "sha256": "c04770e550e85a4ee9fed54034ee237d7ce75c1ffe2db6b09eb86491f0e7f161"
+      },
+      {
+        "path": "tools/soak-report.py",
+        "physical_lines": 230,
+        "nonblank_lines": 204,
+        "sha256": "302ccb1f6ca6fe43997c79cf6a7c496c4290eee524ea936afe06bdc38f550223"
+      },
+      {
+        "path": "tools/video/make_video.py",
+        "physical_lines": 414,
+        "nonblank_lines": 356,
+        "sha256": "ee6aced6107b312c8abb3a84d5eba042a0c4f3224e9254d845917c77322658fc"
+      },
+      {
+        "path": "tools/video/render.py",
+        "physical_lines": 853,
+        "nonblank_lines": 746,
+        "sha256": "5dfafa1f9274a82d6fb82abb4aec2557562b335cded1a8afcb4b7c2fe1a2a297"
+      },
+      {
+        "path": "tools/video/report.py",
+        "physical_lines": 344,
+        "nonblank_lines": 290,
+        "sha256": "7cbe0c3691c4ed4585528ce9c5abab91b0957068fb39b2b6883c5212198ec1d5"
+      },
+      {
+        "path": "tools/video/script.py",
+        "physical_lines": 311,
+        "nonblank_lines": 293,
+        "sha256": "4c08cfa8b377f94ccdf0111af9b0a6fbc98c4fb071785664efff4ceef409e591"
+      },
+      {
+        "path": "tools/video/sim.py",
+        "physical_lines": 133,
+        "nonblank_lines": 105,
+        "sha256": "4a6b6d757c24b6bc8b1548393edf20d9b2478aa2906895fbf671eca9a423075d"
+      }
+    ]
+  },
+  "runtime_operations": {
+    "total": {
+      "files": 29,
+      "physical_lines": 2620,
+      "nonblank_lines": 2376
+    },
+    "groups": {
+      "messungen": {
+        "files": 1,
+        "physical_lines": 115,
+        "nonblank_lines": 108
+      },
+      "root": {
+        "files": 1,
+        "physical_lines": 35,
+        "nonblank_lines": 34
+      },
+      "skripte": {
+        "files": 27,
+        "physical_lines": 2470,
+        "nonblank_lines": 2234
+      }
+    },
+    "languages": {
+      ".py": {
+        "files": 2,
+        "physical_lines": 148,
+        "nonblank_lines": 117
+      },
+      ".sh": {
+        "files": 27,
+        "physical_lines": 2472,
+        "nonblank_lines": 2259
+      }
+    },
+    "files": [
+      {
+        "path": "messungen/pilot/prepare-alarm.sh",
+        "physical_lines": 115,
+        "nonblank_lines": 108,
+        "sha256": "fefd347342d4b097ca09405e53ac3c50e658525365421571784f90982a882676"
+      },
+      {
+        "path": "quiet-build.sh",
+        "physical_lines": 35,
+        "nonblank_lines": 34,
+        "sha256": "5bded5cc86493f76db56702f3607517e3be824ea5c40166c4c5e9737216d5a64"
+      },
+      {
+        "path": "skripte/autotune-laptop-rerun.sh",
+        "physical_lines": 43,
+        "nonblank_lines": 38,
+        "sha256": "e0a83fa0288fb89ddb08108c7d973ae8c4df1567cdc157f795be67d1fe18bf73"
+      },
+      {
+        "path": "skripte/autotune-pixel2-rerun.sh",
+        "physical_lines": 50,
+        "nonblank_lines": 45,
+        "sha256": "8e6fcb5e6f47b1755633b9bca4b2c7e0829549a86c69d24e4f2ae86363d7a2ee"
+      },
+      {
+        "path": "skripte/autotune-pixel5-run.sh",
+        "physical_lines": 52,
+        "nonblank_lines": 47,
+        "sha256": "4c13c8b456718549d398e83ea0eb7b2423b53bab07ca2139c602c23a474c036a"
+      },
+      {
+        "path": "skripte/autotune-tuned-laptop.sh",
+        "physical_lines": 35,
+        "nonblank_lines": 32,
+        "sha256": "94b0289b18f61943c37f3f42d25ab9a4656970a3d41dd3671abe0a28d29a243f"
+      },
+      {
+        "path": "skripte/autotune-tuned-pixel2.sh",
+        "physical_lines": 49,
+        "nonblank_lines": 46,
+        "sha256": "7cdfe8a8a1348b5fc4b218a0ae1ea5f45aa9ca3663f14930eeb4271c69600cfb"
+      },
+      {
+        "path": "skripte/compare-measured.py",
+        "physical_lines": 96,
+        "nonblank_lines": 73,
+        "sha256": "7cf5f260e3037818718c8b269b7e0b1253b4971985ae0125aef85d6b30563f3c"
+      },
+      {
+        "path": "skripte/measure-2026-09-11.sh",
+        "physical_lines": 57,
+        "nonblank_lines": 47,
+        "sha256": "4f1d487c8af1abb0fce19a4178fc67cba573f0990ae6d737de5d24bf5df344bf"
+      },
+      {
+        "path": "skripte/measure-2026-09-11b.sh",
+        "physical_lines": 87,
+        "nonblank_lines": 76,
+        "sha256": "f54891bcddcb95c7d87a02ef42b0df50bde1b22c506ddee682120f4383b9534d"
+      },
+      {
+        "path": "skripte/measure-abnahme-2026-09-12.sh",
+        "physical_lines": 145,
+        "nonblank_lines": 131,
+        "sha256": "857681d91ad180d368cd6f66bb43bd4ee255bfa2ea107489e7cc575e2c00d377"
+      },
+      {
+        "path": "skripte/measure-chain-2026-09-11c.sh",
+        "physical_lines": 208,
+        "nonblank_lines": 191,
+        "sha256": "59382623e853b889fedc92502f962a3eeb7791df193195a2829174c8070b1823"
+      },
+      {
+        "path": "skripte/measure-chain-2026-09-11d.sh",
+        "physical_lines": 209,
+        "nonblank_lines": 192,
+        "sha256": "20a70fa61b800667dc91a7c362255394431b059cd62d3b881b2dc407ad5666c2"
+      },
+      {
+        "path": "skripte/measure-edge-pilot.sh",
+        "physical_lines": 80,
+        "nonblank_lines": 72,
+        "sha256": "b242ac1a0280d6274def1ec8896caa09942cc4f3132b3def3a1ef0da976b23c4"
+      },
+      {
+        "path": "skripte/measure-morgen-2026-09-12.sh",
+        "physical_lines": 210,
+        "nonblank_lines": 192,
+        "sha256": "364208defa888ac15e80726bf1ed38932db76e0dc8cbd2ee14cb167f4973e780"
+      },
+      {
+        "path": "skripte/measure-nachlauf-2026-09-11e.sh",
+        "physical_lines": 151,
+        "nonblank_lines": 138,
+        "sha256": "ea05d69a0d3edf3187a6333bc3703501d82be28f7e366539002ccb6664deae87"
+      },
+      {
+        "path": "skripte/measure-nv06-margin.sh",
+        "physical_lines": 34,
+        "nonblank_lines": 29,
+        "sha256": "b5b80ec3096b6a30413f2aa674a485e2ea6a80a3373258787073f3ca995b0816"
+      },
+      {
+        "path": "skripte/measure-pilot-lane-2026-09-12.sh",
+        "physical_lines": 134,
+        "nonblank_lines": 123,
+        "sha256": "1b10be60d2baeb56df2713155bf45c6abbda115a31a04ab4724d2f5e9a8a334e"
+      },
+      {
+        "path": "skripte/measure-pilot-praemption-2026-09-12.sh",
+        "physical_lines": 163,
+        "nonblank_lines": 150,
+        "sha256": "9a095c2ee1a5a92603230cf71ac1ad68c6bff76f6a95f350a23f897fe9783dee"
+      },
+      {
+        "path": "skripte/measure-preemption.sh",
+        "physical_lines": 83,
+        "nonblank_lines": 74,
+        "sha256": "258987f75ea5d5c8ea9d47266dbfe31b3382471c9bf9c362f9ae382cf36c7575"
+      },
+      {
+        "path": "skripte/measure-xsched.sh",
+        "physical_lines": 65,
+        "nonblank_lines": 59,
+        "sha256": "d6baba5750afbd9c2c28985f5f1b658d22b52ebed39597187eef18965d90441d"
+      },
+      {
+        "path": "skripte/pilot-xsched.sh",
+        "physical_lines": 122,
+        "nonblank_lines": 115,
+        "sha256": "3f376391dcee695b458037d7afed0344c69345946b20e826084320f6b88e21e9"
+      },
+      {
+        "path": "skripte/serve-phone.sh",
+        "physical_lines": 34,
+        "nonblank_lines": 33,
+        "sha256": "c029d1f1a68453da89c6c49b0ace20534cb847cc4b382d4a4cab7341ae17a871"
+      },
+      {
+        "path": "skripte/soak-2026-09-11.sh",
+        "physical_lines": 94,
+        "nonblank_lines": 84,
+        "sha256": "ac17d4b368760825d23801226edbdefb0482190eab673c33be1820fa77bc0470"
+      },
+      {
+        "path": "skripte/triton-umzug.sh",
+        "physical_lines": 23,
+        "nonblank_lines": 23,
+        "sha256": "817331349c84913de8a6df6b4d556902d5c74d917b295e00898bf5eed01aa82e"
+      },
+      {
+        "path": "skripte/usecase-beide-telefone.sh",
+        "physical_lines": 24,
+        "nonblank_lines": 22,
+        "sha256": "84c6069143af3f737393ebaa82879a1aee8433632f5ae0c06293ded784c6feb0"
+      },
+      {
+        "path": "skripte/xsched-infer-check.py",
+        "physical_lines": 52,
+        "nonblank_lines": 44,
+        "sha256": "ce0b844f55aa023268f61be9032e85e9587a959e6437862b6b57bc81d2edcbd8"
+      },
+      {
+        "path": "skripte/xsched-triton-alt.sh",
+        "physical_lines": 98,
+        "nonblank_lines": 92,
+        "sha256": "04ce8bcbd8d4be95ff73b053e8b2b04d9b69faa605628d74a5e36cd0b34f0210"
+      },
+      {
+        "path": "skripte/xsched-triton.sh",
+        "physical_lines": 72,
+        "nonblank_lines": 66,
+        "sha256": "b3ca7effe7e4d16f588dd880a9c2c4b9afbc2f0ee0adeb92a7a0b207bc1da3f8"
+      }
+    ]
+  }
+}

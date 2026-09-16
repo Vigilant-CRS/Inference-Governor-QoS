@@ -1,0 +1,5 @@
+    Checking vig-config v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-config)
+    Checking vig-gateway v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-gateway)
+    Checking vig-bench v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-bench)
+    Checking vig-cli v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.88s

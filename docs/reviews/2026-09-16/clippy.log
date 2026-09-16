@@ -1,0 +1,8 @@
+    Checking vig-sim v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-sim)
+    Checking vig-core v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-core)
+    Checking vig-protocol-oip v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-protocol-oip)
+    Checking vig-backend-triton v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-backend-triton)
+    Checking vig-gateway v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-gateway)
+    Checking vig-bench v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-bench)
+    Checking vig-cli v0.2.0 (/run/media/dd/USB_4028/Projekte/InferenceQoS/crates/vig-cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.24s

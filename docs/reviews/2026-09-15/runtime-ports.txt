@@ -1,0 +1,6 @@
+Read-only observation, 2026-09-15
+Command: docker ps --format "{{.Names}}  {{.Ports}}"
+
+vig-triton  0.0.0.0:8000-8002->8000-8002/tcp, [::]:8000-8002->8000-8002/tcp
+
+External firewall reachability was not tested. No containers were changed.
