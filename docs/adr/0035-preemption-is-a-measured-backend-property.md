@@ -58,6 +58,25 @@ er ruft XSched nie auf.
    seine Laufzeit sagt.
 5. **Ein praemptierbarer Auftrag wird nicht in Quanten zugeschnitten**
    (ADR-0014): er muss in keine Luecke passen.
+5a. **Ein zerlegbarer Auftrag blockiert nur fuer ein Quantum** — Nachtrag vom
+   16.09.2026. Die Zulassungspruefung rechnet fuer ein Modell mit
+   `cooperative:` nicht mit der Laufzeit des ganzen Auftrags, sondern mit der
+   des **spaetesten** Quantums: `min_tokens` bei vollem Kontext, also der
+   unguenstigste Fall (NV-16). Liegt die unter der engsten Zusage, ist das
+   Modell kein Blocker. Liegt sie darueber, bleibt der Befund — nennt aber
+   einen anderen Ausweg (kleineres `min_tokens`, kleineres
+   `max_total_tokens`, ein wirksamer Prefix-Cache), denn zum Zerlegen zu
+   raten waere hier sinnlos.
+
+   *Anlass:* die Regel fragte urspruenglich nicht nach `cooperative:`. Ihr
+   Befundtext empfahl die Zerlegung als wirksamsten Ausweg — wer ihm folgte,
+   bekam denselben Befund erneut, und der Governor verweigerte den Start.
+   Damit war ADR-0014 in genau dem Fall gesperrt, fuer den es geschrieben
+   wurde: auf **einer** Ausfuehrungseinheit. Auf zwei Slots faellt es nicht
+   auf, weil die Regel dort ohnehin schweigt — und das erklaert, warum kein
+   ausgeliefertes Beispiel `cooperative:` trug. Gefunden beim Versuch, das
+   erste solche Beispiel zu messen (`examples/cooperative_llm/vig.yaml`);
+   Tests in `crates/vig-config/tests/blocking_work.rs`.
 6. **Seine eigene Fertigstellung wird gelernt, nicht angenommen.** Die
    Wandzeit eines unterbrochenen Auftrags ist laenger als sein Profil; der
    Schaetzer lernt sie in der Zelle seines Belegungsgrads. Die

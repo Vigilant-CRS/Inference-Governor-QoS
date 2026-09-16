@@ -1,0 +1,118 @@
+# Beispielkonfiguration: ein Sprachmodell laeuft in Stuecken neben einer
+# geschuetzten Kamera (ADR-0014).
+#
+# Der Fall, den `vig doctor` sonst ablehnt: ein generatives Modell rechnet
+# laenger als die engste Zusage eines bewachten Modells. Ohne Praemption
+# laeuft ein begonnener Aufruf zu Ende — die Zusage ist dann nicht haltbar,
+# und der Befund nennt drei Auswege. Dieser hier ist der wirksamste: der
+# Auftrag wird in Quanten zerlegt, und **zwischen zwei Quanten ist der Slot
+# frei**. Der Zustand faehrt im Prompt mit, es geht nichts verloren.
+#
+# Gemessen am 16.09.2026 (RTX 4070 Laptop, 30 s je Arm, 48 Token je Antwort).
+# Dieselbe Last, einmal ohne und einmal mit Zerlegung:
+#
+#                              2 Slots ohne   2 Slots mit   1 Slot mit
+#   Kamerabilder geliefert       804 / 910         908         782
+#   unabgedeckte Zyklen             1 ‰            1 ‰          7 ‰
+#   laengste Luecke                65 ms          57 ms       231 ms
+#   Antworten geliefert              51             67           72
+#   abgewiesen „nicht machbar"      608              0            0
+#   erzeugte Zeichen              15045          14202        15262
+#
+# Ohne Zerlegung weist der Governor 608 Auftraege ab, weil sie ihre Frist
+# reissen wuerden — der Aufrufer bekommt Fehler statt Antworten. Mit
+# Zerlegung keinen einzigen, und die Kamera liefert 104 Bilder mehr, bei
+# gleichem Textausstoss. Kein Kompromiss, sondern beidseitig besser.
+#
+# Auf **einem** Slot traegt es ebenfalls — keine Abweisungen, 72 Antworten —,
+# aber die Kamera bezahlt: die laengste Luecke waechst auf 231 ms und reisst
+# damit ihre Zusage von 100 ms, weil der eine Slot zu 100 % ausgelastet ist.
+# Ehrlich gelesen: die Zerlegung erkauft einen funktionierenden Dienst auf
+# einer Einheit, die Zusage erkauft erst die zweite. Sie ersetzt keine
+# Kapazitaet.
+#
+# Pruefen mit:  vig doctor -c vig.yaml --offline
+version: 1
+
+backend:
+  type: triton
+  grpc_endpoint: "127.0.0.1:9501"
+
+  # **Ein** Slot, und das ist der Kern des Beispiels. Mit zwei Slots braucht
+  # es die Zerlegung gar nicht: ein einzelner langer Auftrag laesst dem
+  # bewachten Modell dann noch einen Slot, und die Blockierpruefung schweigt
+  # zu Recht (`blockers.len() >= regular`). Genau das hielt schon WP26 fest.
+  # Der Fall, fuer den ADR-0014 geschrieben wurde, ist die eine
+  # Ausfuehrungseinheit — da laeuft ein begonnener Aufruf ohne Praemption zu
+  # Ende, und 194 ms Block neben 33 ms Periode sind toedlich.
+  slots: 1
+  pipelining_depth: 0
+  safety_margin_percent: 110
+
+models:
+  camera:
+    class: protected
+    queue:
+      policy: latest        # nur der juengste wartende Frame bleibt erhalten
+      capacity: 1
+      overflow: reject_new
+    contract:
+      period_ms: 33         # 30 FPS
+      deadline_ms: 66
+      max_age_ms: 100
+    variants:
+      - id: medium
+        backend_model: rfdetr_medium
+        quality: { value: 1.00, source: user_declared }
+        # vig calibrate, 20 Laeufe, RTX 4070 Laptop, 16.09.2026
+        profile: { p50_us: 17297, p95_us: 17756, p99_us: 17948, samples: 110 }
+
+  assistant:
+    class: best_effort
+    # Generative Backends sind in Triton decoupled; der Governor nimmt den
+    # Request unaer entgegen und uebersetzt intern auf den Stream-Aufruf.
+    decoupled: true
+    backend_endpoint: "127.0.0.1:9701"
+    queue: { policy: fifo, capacity: 2, overflow: backpressure_client }
+    contract:
+      deadline_ms: 2000
+      max_age_ms: 4000
+
+    # Die vier Zahlen, an denen alles haengt — und sie sind **gemessen**, nicht
+    # geraten. Ein geratener Sockel ist hier besonders teuer: ist er so gross
+    # wie die Luecke bis zur naechsten Kameraankunft, passt kein Quantum,
+    # egal wie klein man es schneidet. Genau daran scheiterte WP26 am
+    # 01.09.2026, und der Review vom 07.09. hielt fest, dass der Wert von Hand
+    # eingetragen war.
+    #
+    # Qwen3-0.6B auf vLLM, RTX 4070 Laptop, 16.09.2026, zwei unabhaengige
+    # Verfahren:
+    #
+    #   Messreihe 8/16/32/48 Token, 40 Laeufe je Punkt:  6100 us / 256 Tok/s
+    #   `vig calibrate` (4 gegen 32 Token, Median aus 5): 6277 us / 258 Tok/s
+    #
+    # Auf anderer Hardware und mit einem anderen Modell sind es andere Zahlen.
+    # `vig calibrate -c vig.yaml -o gemessen.yaml` misst sie nach — aber nur
+    # fuer Modelle, die diesen Block bereits tragen. Ohne die Zeilen gibt es
+    # nichts zu messen.
+    #
+    # prefill_per_token_us: 1 heisst, dass die erneute Berechnung des
+    # gewachsenen Kontexts fast nichts kostet — das Prefix-Caching des
+    # Backends wirkt. Das ist die Bedingung, unter der sich Zerlegung
+    # ueberhaupt lohnt (ADR-0031). Ein Backend ohne wirksamen Cache traegt
+    # hier einen deutlich groesseren Wert, und dann waechst jedes spaetere
+    # Quantum ueber seine Luecke hinaus.
+    cooperative:
+      tokens_per_second: 258
+      min_tokens: 8
+      max_total_tokens: 48
+      base_cost_us: 6277
+      prefill_per_token_us: 1
+
+    variants:
+      - id: main
+        backend_model: qwen
+        quality: { value: 1.00, source: user_declared }
+        # Der ungeteilte Aufruf, zum Vergleich: 194 ms gegen 33 ms Periode.
+        # Das ist der Block, den die Zerlegung aufloest.
+        profile: { p50_us: 194379, p95_us: 195432, p99_us: 196417, samples: 110 }

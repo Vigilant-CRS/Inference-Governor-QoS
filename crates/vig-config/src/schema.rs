@@ -2025,8 +2025,8 @@ fn check_blocking_work(
         let Ok(runtime) = best.profile.conservative_at(0, margin) else {
             continue;
         };
-        if runtime > tightest {
-            blockers.push(name);
+        if blocking_time(contract, runtime) > tightest {
+            blockers.push((name, contract.cooperative.is_some()));
         }
     }
 
@@ -2034,21 +2034,69 @@ fn check_blocking_work(
     // verloren. Ein einzelner langer Auftrag neben zwei Slots laesst dem
     // bewachten Modell noch einen.
     if blockers.len() >= regular {
-        for name in blockers {
+        for (name, decomposable) in blockers {
             findings.push(
                 ConfigError::Inconsistent {
-                    what: "dieses Modell rechnet laenger als die engste Zusage eines bewachten \
-                           Modells, und es gibt genug solche Modelle, um jeden regulaeren Slot \
-                           zu belegen. Ohne Praemption laeuft ein begonnener Aufruf zu Ende, \
-                           also ist die Zusage nicht haltbar. Bei einem generativen Modell ist \
-                           `cooperative:` der wirksamste Ausweg — der Auftrag laeuft dann in \
-                           Quanten, und zwischen zweien ist der Slot frei (ADR-0014). Sonst: \
-                           `preemptible:` mit gemessener Restblockierung (ADR-0035), mehr \
-                           Slots, oder eine kuerzere Variante",
+                    what: blocking_advice(decomposable),
                 }
                 .at(format!("models.{name}.contract")),
             );
         }
+    }
+}
+
+/// Wie lange dieses Modell einen Slot **am Stueck** belegt.
+///
+/// Fuer einen unteilbaren Auftrag ist das seine konservative Laufzeit. Ein
+/// Modell mit `cooperative:` (ADR-0014) belegt den Slot dagegen nur fuer ein
+/// Quantum — zwischen zweien ist er frei, und genau darum geht es.
+///
+/// Gerechnet wird das **spaeteste** Quantum, nicht das erste: sein Prompt
+/// traegt allen bisher erzeugten Text, und ohne wirksames Prefix-Caching
+/// kostet dessen erneute Berechnung mit jedem Token mehr (NV-16, ADR-0031).
+/// Die Zulassung muss den unguenstigen Fall annehmen, sonst laesst sie eine
+/// Konfiguration durch, die erst gegen Ende eines Auftrags reisst.
+///
+/// Nie laenger als der ungeteilte Lauf: ein Auftrag, der insgesamt kuerzer
+/// ist als ein Quantum, blockiert auch nur so lange, wie er dauert.
+///
+/// Ohne diese Unterscheidung war `cooperative:` in genau dem Fall gesperrt,
+/// fuer den es gebaut wurde — auf **einer** Ausfuehrungseinheit. Der Befund
+/// riet zur Zerlegung; wer ihr folgte, bekam denselben Befund erneut und
+/// konnte den Governor nicht starten. Gefunden am 16.09.2026 beim Versuch,
+/// `examples/cooperative_llm/vig.yaml` zu messen.
+fn blocking_time(contract: &ModelContract, runtime: Duration) -> Duration {
+    match contract.cooperative {
+        Some(cooperative) => cooperative
+            .cost_of_with_context(cooperative.min_tokens, cooperative.max_total_tokens)
+            .min(runtime),
+        None => runtime,
+    }
+}
+
+/// Der Befundtext, je nachdem ob das Modell zerlegbar ist.
+///
+/// Wer `cooperative:` gesetzt hat, hat den Rat bereits befolgt. Ihm denselben
+/// Rat ein zweites Mal zu geben waere die schlechteste aller Antworten: er
+/// sucht den Fehler dann dort, wo keiner ist. Was fehlt, ist ein kleineres
+/// Quantum — und das sagt der zweite Text.
+const fn blocking_advice(decomposable: bool) -> &'static str {
+    if decomposable {
+        "dieses Modell ist zerlegbar, aber schon sein laengstes Quantum rechnet laenger als die \
+         engste Zusage eines bewachten Modells — und es gibt genug solche Modelle, um jeden \
+         regulaeren Slot zu belegen. Zerlegen allein genuegt hier nicht. Abhilfe: kleineres \
+         `min_tokens`, kleineres `max_total_tokens` (das spaeteste Quantum traegt den laengsten \
+         Kontext), ein Backend mit wirksamem Prefix-Cache, oder `preemptible:` mit gemessener \
+         Restblockierung (ADR-0035)"
+    } else {
+        "dieses Modell rechnet laenger als die engste Zusage eines bewachten \
+         Modells, und es gibt genug solche Modelle, um jeden regulaeren Slot \
+         zu belegen. Ohne Praemption laeuft ein begonnener Aufruf zu Ende, \
+         also ist die Zusage nicht haltbar. Bei einem generativen Modell ist \
+         `cooperative:` der wirksamste Ausweg — der Auftrag laeuft dann in \
+         Quanten, und zwischen zweien ist der Slot frei (ADR-0014). Sonst: \
+         `preemptible:` mit gemessener Restblockierung (ADR-0035), mehr \
+         Slots, oder eine kuerzere Variante"
     }
 }
 

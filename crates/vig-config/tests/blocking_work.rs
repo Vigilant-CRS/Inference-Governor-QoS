@@ -62,6 +62,62 @@ backend:
     yaml
 }
 
+/// Dieselbe Lage wie `yaml(1, 1, false)`, nur ist das Sprachmodell zerlegbar.
+///
+/// `min_tokens` bestimmt, wie lange das laengste Quantum dauert: bei 258
+/// Token/s und 6277 us Sockel kostet ein 8-Token-Quantum rund 37 ms, ein
+/// 32-Token-Quantum rund 130 ms. Die Zusage der Kamera betraegt 100 ms —
+/// dazwischen liegt die Grenze, um die es geht.
+fn decomposable_yaml(min_tokens: u32) -> String {
+    let cooperative = format!(
+        "    cooperative: {{ tokens_per_second: 258, min_tokens: {min_tokens}, \
+         max_total_tokens: 48, base_cost_us: 6277, prefill_per_token_us: 1 }}\n"
+    );
+    yaml(1, 1, false).replace(
+        "    variants:\n      - id: main\n        backend_model: qwen",
+        &format!("{cooperative}    variants:\n      - id: main\n        backend_model: qwen"),
+    )
+}
+
+/// Ein zerlegbarer Auftrag belegt den Slot nur fuer ein Quantum (ADR-0014).
+///
+/// Der Anlass ist ein Widerspruch im eigenen Werkzeug, gefunden am
+/// 16.09.2026: der Befund riet zu `cooperative:`, aber die Regel fragte gar
+/// nicht danach. Wer dem Rat folgte, bekam denselben Befund erneut — und der
+/// Governor verweigerte den Start. Damit war die Zerlegung in genau dem Fall
+/// gesperrt, fuer den sie gebaut wurde: auf **einer** Ausfuehrungseinheit.
+#[test]
+fn a_small_quantum_is_no_longer_a_blocker() {
+    let findings = Config::from_yaml(&decomposable_yaml(8)).unwrap().diagnose();
+    assert!(findings.is_empty(), "{findings:?}");
+}
+
+/// Zerlegen allein genuegt nicht — das Quantum muss auch hineinpassen.
+///
+/// Die Gegenprobe zur Lockerung: ein 32-Token-Quantum dauert rund 130 ms und
+/// reisst die 100-ms-Zusage genauso wie der ungeteilte Auftrag. Der Befund
+/// bleibt also, nennt aber einen **anderen** Ausweg: wer `cooperative:` schon
+/// gesetzt hat, braucht nicht denselben Rat noch einmal, sondern ein
+/// kleineres Quantum.
+#[test]
+fn a_quantum_that_does_not_fit_stays_a_blocker() {
+    let findings = Config::from_yaml(&decomposable_yaml(32))
+        .unwrap()
+        .diagnose();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.to_string().contains("schon sein laengstes Quantum")),
+        "{findings:?}"
+    );
+    assert!(
+        !findings
+            .iter()
+            .any(|f| f.to_string().contains("ist `cooperative:` der wirksamste Ausweg")),
+        "wer zerlegt, darf nicht zum Zerlegen geraten bekommen: {findings:?}"
+    );
+}
+
 /// Zwei lange Auftraege auf zwei Slots: die Kamera kann ihre 100 ms nicht
 /// halten, und die Konfiguration sagt es — an beiden Verursachern.
 #[test]

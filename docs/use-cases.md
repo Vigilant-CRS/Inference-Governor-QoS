@@ -110,3 +110,48 @@ This is the pipeline we propose to pilot partners
 not measured: the contract comes from the partner's warning deadline, and the
 first step of a pilot is to measure whether the problem exists on their
 hardware at all.
+
+## 4. One camera and a language model on a single execution unit
+
+*The hardest layout: one GPU slot, a 33 ms camera, and a language model whose
+call takes 194 ms. A started call runs to the end — there is no preemption.*
+
+| Stream | Model | Class | Contract | Why |
+|---|---|---|---|---|
+| camera | RF-DETR Medium, 576 px (real) | protected | period 33 ms, max age 100 ms | one camera frame |
+| assistant | Qwen3-0.6B on vLLM (real) | best effort | deadline 2 s, `cooperative:` | answers a question about the scene; may wait, must not block |
+
+Config: [`examples/cooperative_llm/vig.yaml`](../examples/cooperative_llm/vig.yaml).
+The language model is declared **splittable**: it runs in quanta sized from the
+time actually free, and between two of them the slot is open. Its state travels
+in the prompt, so nothing is lost and nothing is recomputed — provided the
+backend has a working prefix cache, which is the precondition
+([ADR-0031](adr/0031-a-re-prefill-is-not-free-progress.md)).
+
+Measured on 16 September, RTX 4070 Laptop, 30 s per arm, 48 tokens per answer:
+
+| | two slots, **no** splitting | two slots, split | one slot, split |
+|---|---:|---:|---:|
+| camera frames served | 804 of 910 | **908** | 782 |
+| uncovered cycles | 1 ‰ | 1 ‰ | 7 ‰ |
+| longest gap | 65 ms | 57 ms | 231 ms |
+| answers delivered | 51 | 67 | 72 |
+| **refused as unkeepable** | **608** | **0** | **0** |
+| characters generated | 15045 | 14202 | 15262 |
+
+**Splitting is not a trade here, it is better on both sides.** Without it the
+governor refuses 608 requests because they would miss their deadline — the
+client gets errors, not answers. With it, none are refused *and* the camera
+serves 104 more frames, at the same text output.
+
+On a single slot it still works — no refusals, 72 answers — but the camera pays:
+the longest gap grows to 231 ms, past its 100 ms promise, because that one slot
+is busy 100 % of the time. **The honest reading: splitting buys you a working
+service on one unit, a second unit buys you the promise.** What it is not is a
+substitute for capacity.
+
+The four numbers in the contract are measured, not guessed, and the file says
+how: a token series (8/16/32/48, 40 runs each) and `vig calibrate` independently
+give 6100 vs 6277 µs fixed cost and 256 vs 258 tokens/s. A guessed fixed cost is
+the expensive mistake here — if it is as large as the gap to the next camera
+frame, no quantum fits, however small you cut it.
