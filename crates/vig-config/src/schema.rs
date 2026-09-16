@@ -2033,6 +2033,12 @@ fn check_blocking_work(
     // Erst wenn sie jeden regulaeren Slot besetzen koennen, ist die Zusage
     // verloren. Ein einzelner langer Auftrag neben zwei Slots laesst dem
     // bewachten Modell noch einen.
+    //
+    // Gezaehlt werden **gleichzeitige Auftraege, nicht Modelle**:
+    // `SlotSet::ready_slot` kennt keine Grenze „ein Modell, ein Slot" — es
+    // nimmt den ersten Slot, der das Modell zulaesst und noch Kredit hat. Ein
+    // Modell mit `capacity: 2` belegt damit zwei Slots und zaehlte trotzdem
+    // als *ein* Blocker. Gefunden in der erneuten Pruefung vom 16.09.2026.
     if blockers.len() >= regular {
         for (name, decomposable) in blockers {
             findings.push(

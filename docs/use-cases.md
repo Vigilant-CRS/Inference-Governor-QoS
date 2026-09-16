@@ -111,10 +111,10 @@ not measured: the contract comes from the partner's warning deadline, and the
 first step of a pilot is to measure whether the problem exists on their
 hardware at all.
 
-## 4. One camera and a language model on a single execution unit
+## 4. A camera and a language model on the same GPU
 
-*The hardest layout: one GPU slot, a 33 ms camera, and a language model whose
-call takes 194 ms. A started call runs to the end — there is no preemption.*
+*A 33 ms camera and a language model whose call takes 194 ms, on one card. A
+started call runs to the end — there is no preemption.*
 
 | Stream | Model | Class | Contract | Why |
 |---|---|---|---|---|
@@ -130,7 +130,7 @@ backend has a working prefix cache, which is the precondition
 
 Measured on 16 September, RTX 4070 Laptop, 30 s per arm, 48 tokens per answer:
 
-| | two slots, **no** splitting | two slots, split | one slot, split |
+| | two slots, **no** splitting | two slots, split *(shipped)* | one slot, split |
 |---|---:|---:|---:|
 | camera frames served | 804 of 910 | **908 / 907** | **905 / 905** |
 | uncovered cycles | 1 ‰ | 1 ‰ | 6 ‰ |
@@ -146,11 +146,15 @@ camera serves about 100 more frames, at the same text output. (The 26 refusals
 in the second two-slot run are scatter; the direction is the same in both runs
 and far larger than it.)
 
-On a single slot it still works — no refusals, 52 answers — but the camera pays:
-the longest gap grows past its 100 ms promise, because that one slot is busy
-100 % of the time. **The honest reading: splitting buys you a working service on
-one unit, a second unit buys you the promise.** What it is not is a substitute
-for capacity.
+**On a single slot the promise breaks, and that is why the shipped file uses
+two.** It still works there — no refusals, 52 answers — but the camera's longest
+gap grows to 213–236 ms, past its 100 ms promise. That is not an artefact of a
+hammering test client: with the language model asked only every three seconds
+(59 % utilisation) it is still 236 ms. The counters say why — during *one* job
+six camera frames are superseded, and 6 × 33 ms plus runtime is exactly that
+gap. **Splitting buys you a working service on one execution unit; the promise
+is bought by the second one.** It is not a substitute for capacity, and a
+shipped template should keep the promise it makes.
 
 **`min_tokens` is measured too, and it only matters when capacity is tight.**
 Same load, one slot, two runs per point:

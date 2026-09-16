@@ -41,14 +41,20 @@ backend:
   type: triton
   grpc_endpoint: "127.0.0.1:9501"
 
-  # **Ein** Slot, und das ist der Kern des Beispiels. Mit zwei Slots braucht
-  # es die Zerlegung gar nicht: ein einzelner langer Auftrag laesst dem
-  # bewachten Modell dann noch einen Slot, und die Blockierpruefung schweigt
-  # zu Recht (`blockers.len() >= regular`). Genau das hielt schon WP26 fest.
-  # Der Fall, fuer den ADR-0014 geschrieben wurde, ist die eine
-  # Ausfuehrungseinheit — da laeuft ein begonnener Aufruf ohne Praemption zu
-  # Ende, und 194 ms Block neben 33 ms Periode sind toedlich.
-  slots: 1
+  # **Zwei** Slots, und das ist eine gemessene Entscheidung, keine Vorsicht.
+  #
+  # Mit einem Slot laeuft diese Last zwar — keine Abweisungen, 52 Antworten —,
+  # aber die Kamera haelt ihre Zusage von 100 ms Hoechstalter **nicht**:
+  # gemessen 213 bis 236 ms laengste Luecke, und zwar auch dann, wenn das
+  # Sprachmodell nur alle drei Sekunden gefragt wird (59 % Auslastung). Der
+  # Grund steht in den Zaehlern: waehrend **eines** Auftrags werden sechs
+  # Kamerabilder ueberholt, 6 x 33 ms plus Laufzeit ergeben genau die Luecke.
+  # Die Zerlegung macht den Dienst moeglich, sie ersetzt aber keine
+  # Ausfuehrungseinheit.
+  #
+  # Eine ausgelieferte Vorlage soll ihre eigene Zusage halten. Deshalb zwei
+  # Slots: dort sind es 48 bis 57 ms Luecke und 1 Promille unabgedeckt.
+  slots: 2
   pipelining_depth: 0
   safety_margin_percent: 110
 

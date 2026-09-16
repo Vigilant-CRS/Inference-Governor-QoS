@@ -43,16 +43,30 @@ fn the_language_model_is_decomposable() {
     assert!(cooperative.prefill_per_token < Duration::from_micros(10).unwrap());
 }
 
-/// Ohne die Zerlegung lehnt dieselbe Konfiguration ab.
+/// Auf **einem** Slot waere dieselbe Last ohne Zerlegung nicht zulaessig.
 ///
-/// Das ist die Probe darauf, dass das Beispiel den Fall wirklich zeigt und
-/// nicht bloss eine harmlose Datei ist, die auch ohne `cooperative:`
-/// durchginge. Faellt der Befund hier weg, hat das Beispiel seinen Zweck
-/// verloren — dann ist die Kamera zu langsam oder der Aufruf zu kurz.
+/// Das Beispiel selbst faehrt zwei Slots, weil eine ausgelieferte Vorlage
+/// ihre eigene Zusage halten soll: mit einem Slot reisst die Kamera ihre
+/// 100 ms (gemessen 213 bis 236 ms, auch bei nur zehn Anfragen in 30 s).
+/// Die Zerlegung ist hier also kein Zulassungsersatz, sondern gemessener
+/// Nutzen — 608 Abweisungen gegen null.
+///
+/// Dass sie auf einer Ausfuehrungseinheit den Unterschied zwischen
+/// „laeuft gar nicht" und „laeuft" macht, prueft dieser Test an derselben
+/// Datei mit einem Slot. Faellt der Befund hier weg, zeigt das Beispiel den
+/// Fall nicht mehr, fuer den ADR-0014 geschrieben wurde.
 #[test]
-fn without_decomposition_the_same_configuration_is_refused() {
-    let without = strip_cooperative(EXAMPLE);
-    let findings = Config::from_yaml(&without).unwrap().diagnose();
+fn on_one_slot_the_same_load_needs_the_decomposition() {
+    let one_slot = EXAMPLE.replace("  slots: 2", "  slots: 1");
+    assert!(one_slot.contains("slots: 1"), "Slotzahl nicht ersetzt");
+
+    // Mit Zerlegung: zulaessig, weil ein Quantum in die Zusage passt.
+    let findings = Config::from_yaml(&one_slot).unwrap().diagnose();
+    assert!(findings.is_empty(), "mit Zerlegung: {findings:?}");
+
+    // Ohne sie: der ungeteilte Aufruf rechnet laenger als die Zusage.
+    let bare = strip_cooperative(&one_slot);
+    let findings = Config::from_yaml(&bare).unwrap().diagnose();
     assert!(
         findings
             .iter()

@@ -111,6 +111,25 @@ fn scheduler(contracts: &[ModelContract], slots: SlotSet) -> Scheduler {
     .unwrap()
 }
 
+/// Wie [`scheduler`], aber mit einer eigenen Sicherheitsmarge.
+fn scheduler_with_margin(
+    contracts: &[ModelContract],
+    slots: SlotSet,
+    margin: SafetyMargin,
+) -> Scheduler {
+    let mut list = ArrayVec::new();
+    for c in contracts {
+        list.push(c.clone()).unwrap();
+    }
+    Scheduler::new(
+        list,
+        slots,
+        OverloadController::new(OverloadConfig::default(), at(0)).unwrap(),
+        margin,
+    )
+    .unwrap()
+}
+
 fn event(s: &mut Scheduler, time_ms: u64, e: Event) -> Vec<Action> {
     let mut actions = Vec::new();
     s.on_event(at(time_ms), e, &mut |a| actions.push(a));
@@ -1271,5 +1290,56 @@ fn the_consumer_age_starts_at_capture_not_at_completion() {
         before.saturating_add(1),
         "70 ms nach der Aufnahme ist das Ergebnis zu alt, gleich wann es \
          fertig wurde"
+    );
+}
+
+/// Die Sicherheitsmarge erreicht auch die Quantenkosten (Recheck 16.09.).
+///
+/// `size_quantum` ersetzte die konservativ geplante Laufzeit durch
+/// `cooperative.cost_of_with_context(...)` — und die rechnet ohne Marge.
+/// Konfigurierte wie gelernte Reserve schuetzte damit ausgerechnet den Term
+/// nicht, der ueber Slotbelegung und Look-ahead entscheidet: zwei Governor
+/// mit 100 und 200 Prozent Marge planten dasselbe Quantum gleich lang.
+///
+/// Ohne Prefill-Anteil und ohne Sockel ist die erwartete Dauer exakt
+/// `tokens / tokens_per_second`, also bleibt nur die Marge als Unterschied.
+#[test]
+fn the_safety_margin_reaches_the_quantum_cost() {
+    fn planned(margin: SafetyMargin) -> Duration {
+        let mut llm = contract(Criticality::BestEffort, QueuePolicy::Fifo, &[100]);
+        llm.cooperative = Some(Cooperative {
+            tokens_per_second: 1_000,
+            min_tokens: 10,
+            max_total_tokens: 10,
+            base_cost: Duration::ZERO,
+            prefill_per_token: Duration::from_nanos_unbounded(0),
+            max_overhead_permille: None,
+        });
+        let mut s =
+            scheduler_with_margin(&[llm.clone()], SlotSet::homogeneous(1, 0).unwrap(), margin);
+        let actions = event(&mut s, 0, Event::Arrival(frame(1, 0, 0, &llm)));
+        actions
+            .iter()
+            .find_map(|a| match a {
+                Action::Dispatch {
+                    predicted_runtime, ..
+                } => Some(*predicted_runtime),
+                _ => None,
+            })
+            .expect("das Sprachmodell wurde nicht weitergereicht")
+    }
+
+    // Zehn Token bei 1000 Token/s: 10 ms ohne Marge, 20 ms bei 200 Prozent.
+    let ohne = planned(SafetyMargin::NONE);
+    let mit = planned(SafetyMargin::from_percent(200).unwrap());
+    assert_eq!(
+        ohne,
+        ms(10),
+        "ohne Marge sind es die reinen Erzeugungskosten"
+    );
+    assert_eq!(
+        mit,
+        ms(20),
+        "mit doppelter Marge muss das geplante Quantum doppelt so lang sein"
     );
 }

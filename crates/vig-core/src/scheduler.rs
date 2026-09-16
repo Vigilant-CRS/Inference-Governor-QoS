@@ -1806,7 +1806,15 @@ impl Scheduler {
         // liesse es starten, weil er mit der falschen Zahl rechnet. Bei einem
         // Sockel in der Groessenordnung des Slack ist das der Unterschied
         // zwischen „passt knapp" und „passt grundsaetzlich nicht".
-        let duration = cooperative.cost_of_with_context(tokens, context_tokens);
+        //
+        // Mit derselben Sicherheitsmarge wie jede andere geplante Laufzeit.
+        // Ohne sie ersetzte die Zuschneidung eine konservativ geplante Dauer
+        // (`estimator.conservative(..., margin)`) durch eine ungemargte — und
+        // konfigurierte wie gelernte Reserve schuetzte ausgerechnet den Term
+        // nicht mehr, der ueber Slotbelegung und Look-ahead entscheidet.
+        // Gefunden in der erneuten Pruefung vom 16.09.2026.
+        let bare = cooperative.cost_of_with_context(tokens, context_tokens);
+        let duration = self.margin_of(model).apply(bare).unwrap_or(bare);
         (
             duration.max(Duration::from_nanos_unbounded(1)),
             Some(tokens),

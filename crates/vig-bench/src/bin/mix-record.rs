@@ -33,6 +33,11 @@
 //!   `VIG_MIX_CHUNK_MS` (1000).
 //! * `VIG_MIX_SECONDS` (30), `VIG_MIX_PROMPT`, `VIG_MIX_TOKENS` (48),
 //!   `VIG_MIX_SAMPLES` (110, nur `profile`), `VIG_MIX_OUT`, `VIG_MIX_LABEL`.
+//! * `VIG_MIX_LLM_PERIOD_MS` (0) — Abstand zwischen zwei Anfragen an das
+//!   Sprachmodell, gemessen ab Beginn der vorigen. Null ist Dauerbeschuss und
+//!   damit die haerteste Last; ein echter Assistent wird alle paar Sekunden
+//!   gefragt. Wer eine Frischezusage daneben bewertet, sollte die Rate
+//!   angeben, die der Dienst wirklich hat.
 
 #![allow(
     clippy::print_stdout,
@@ -234,7 +239,15 @@ impl LlmReport {
     }
 }
 
-/// Faehrt das Sprachmodell, so oft es darf, bis die Zeit um ist.
+/// Faehrt das Sprachmodell bis die Zeit um ist, mit `pace` Abstand zwischen
+/// zwei Anfragen.
+///
+/// `pace` null heisst Dauerbeschuss: die naechste Anfrage geht ab, sobald die
+/// vorige beantwortet ist. Das ist die haerteste Last — aber **nicht** die
+/// eines echten Assistenten, der alle paar Sekunden gefragt wird. Wer eine
+/// Frischezusage neben einem Sprachmodell bewerten will, misst mit der Rate,
+/// die der Dienst wirklich hat; sonst misst er die Saettigung seines eigenen
+/// Treibers und schreibt sie dem Governor zu.
 async fn drive_llm(
     target: &Target,
     endpoint: &str,
@@ -242,6 +255,7 @@ async fn drive_llm(
     prompt: &str,
     tokens: u32,
     duration: Duration,
+    pace: Duration,
 ) -> LlmReport {
     let direct = vig_backend_triton::TritonClient::new(endpoint);
     let mut unary = connect(endpoint).await;
@@ -296,6 +310,14 @@ async fn drive_llm(
                 // Eine Ablehnung ist kein Grund, das Backend zu bestuermen.
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
+        }
+        // Der Takt gilt ab dem **Beginn** der Anfrage, nicht ab ihrem Ende:
+        // sonst haengt die Rate an der Antwortzeit, und genau die soll der
+        // Governor ja veraendern duerfen. Dauert eine Antwort laenger als der
+        // Takt, geht die naechste sofort — der Treiber holt nicht nach.
+        let rest = pace.saturating_sub(started.elapsed());
+        if !rest.is_zero() {
+            tokio::time::sleep(rest).await;
         }
     }
     report
@@ -492,6 +514,11 @@ async fn run() {
     let chunk_ms: usize =
         env("VIG_MIX_CHUNK_MS").map_or(1000, |v| v.parse().expect("VIG_MIX_CHUNK_MS"));
     let tokens: u32 = env("VIG_MIX_TOKENS").map_or(48, |v| v.parse().expect("VIG_MIX_TOKENS"));
+    // Ohne Angabe Dauerbeschuss — die bisherige Betriebsart, damit aeltere
+    // Messungen vergleichbar bleiben.
+    let llm_pace = Duration::from_millis(
+        env("VIG_MIX_LLM_PERIOD_MS").map_or(0, |v| v.parse().expect("VIG_MIX_LLM_PERIOD_MS")),
+    );
     let samples: usize =
         env("VIG_MIX_SAMPLES").map_or(110, |v| v.parse().expect("VIG_MIX_SAMPLES"));
     let prompt = env("VIG_MIX_PROMPT").unwrap_or_else(|| {
@@ -618,6 +645,7 @@ async fn run() {
                         &llm_prompt,
                         tokens,
                         duration,
+                        llm_pace,
                     ))
                     .await
                 }),
