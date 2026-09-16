@@ -111,9 +111,9 @@ fn a_quantum_that_does_not_fit_stays_a_blocker() {
         "{findings:?}"
     );
     assert!(
-        !findings
-            .iter()
-            .any(|f| f.to_string().contains("ist `cooperative:` der wirksamste Ausweg")),
+        !findings.iter().any(|f| f
+            .to_string()
+            .contains("ist `cooperative:` der wirksamste Ausweg")),
         "wer zerlegt, darf nicht zum Zerlegen geraten bekommen: {findings:?}"
     );
 }
