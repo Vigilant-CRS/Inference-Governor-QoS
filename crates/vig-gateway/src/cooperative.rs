@@ -121,7 +121,7 @@ impl GenerativeJob {
             read_sampling_parameters(request).filter(|text| !text.trim().is_empty());
         if declared_sampling
             .as_deref()
-            .is_some_and(|text| !is_json_object(text))
+            .is_some_and(|text| !is_splittable_sampling(text))
         {
             return None;
         }
@@ -175,9 +175,9 @@ impl GenerativeJob {
     /// Der Texteingang wird auf Prompt plus bisher Erzeugtes gesetzt, die
     /// Tokenzahl auf die Quantengroesse begrenzt.
     ///
-    /// `None`, wenn Prompt plus Erzeugtes nicht mehr in einen `BYTES`-Rahmen
-    /// passt (ab 4 GiB). Einen gekuerzten Kontext zu schicken hiesse, das
-    /// Modell an einer anderen Stelle weiterschreiben zu lassen.
+    /// `None`, wenn kein Tokenbudget mehr besteht oder Prompt plus Erzeugtes
+    /// nicht mehr in einen `BYTES`-Rahmen passt (ab 4 GiB). Einen gekuerzten
+    /// Kontext zu schicken hiesse, das Modell anders weiterschreiben zu lassen.
     #[must_use]
     pub fn build_quantum(
         &mut self,
@@ -185,15 +185,29 @@ impl GenerativeJob {
         quantum_tokens: u32,
     ) -> Option<ModelInferRequest> {
         let mut request = template.clone();
-        let tokens = quantum_tokens.min(self.remaining_tokens()).max(1);
+        let tokens = quantum_tokens.min(self.remaining_tokens());
+        if tokens == 0 {
+            return None;
+        }
         let continuation = format!("{}{}", self.prompt, self.generated);
         let sampling = self.sampling_for(tokens);
 
         // Text und Samplingparameter werden ersetzt, **alles andere bleibt**.
         // Bei einem VLM steht der eigentliche Inhalt in den uebrigen Eingaben.
-        let mut inputs = vec![text_tensor(TEXT_INPUT, &continuation)];
+        let text = template
+            .inputs
+            .iter()
+            .find(|input| input.name == TEXT_INPUT)?;
+        let mut inputs = vec![text.clone()];
         let mut raw = vec![length_prefixed(&continuation)?];
-        inputs.push(text_tensor(SAMPLING_PARAMETERS, &sampling));
+        inputs.push(
+            template
+                .inputs
+                .iter()
+                .find(|input| input.name == SAMPLING_PARAMETERS)
+                .cloned()
+                .unwrap_or_else(|| text_tensor(SAMPLING_PARAMETERS, &sampling)),
+        );
         raw.push(length_prefixed(&sampling)?);
         for (tensor, bytes) in &self.extra_inputs {
             inputs.push(tensor.clone());
@@ -239,8 +253,8 @@ impl GenerativeJob {
     ///
     /// # Errors
     ///
-    /// [`BackendError::Malformed`], wenn die Antwort eine Textausgabe traegt,
-    /// die nicht aus genau einem sauber gerahmten UTF-8-String besteht. Das
+    /// [`BackendError::Malformed`], wenn die Antwort keine eindeutige
+    /// Textausgabe mit genau einem sauber gerahmten UTF-8-String traegt. Das
     /// ist kein Ende der Erzeugung, sondern eine kaputte Antwort: sie als
     /// „nichts Neues" zu lesen gaebe dem Client das bisher Erzeugte als
     /// vollstaendig zurueck, und eine abgeschnittene Laenge haette ihm sogar
@@ -249,8 +263,11 @@ impl GenerativeJob {
         self.quanta = self.quanta.saturating_add(1);
         self.last_quantum_tokens = 0;
         let Some(raw) = text_output_raw(response) else {
-            // Ohne Ausgabe ist nichts fortzusetzen.
-            return Ok(true);
+            return Err(BackendError::Malformed {
+                detail: format!(
+                    "`{TEXT_OUTPUT}` fehlt oder ist kein einzelner BYTES-Tensor mit Rohdaten"
+                ),
+            });
         };
         let Some(text) = read_length_prefixed(raw) else {
             return Err(BackendError::Malformed {
@@ -302,8 +319,8 @@ impl GenerativeJob {
     ///
     /// # Errors
     ///
-    /// [`BackendError::Malformed`], wenn der gesammelte Text nicht in einen
-    /// `BYTES`-Rahmen passt (ab 4 GiB).
+    /// [`BackendError::Malformed`], wenn der Text nicht in einen `BYTES`-Rahmen
+    /// passt oder die Antwort keinen eindeutig zugeordneten Texttensor traegt.
     pub fn build_response(
         &self,
         template: &ModelInferResponse,
@@ -315,7 +332,22 @@ impl GenerativeJob {
             ),
         })?;
         let mut response = template.clone();
-        response.raw_output_contents = vec![raw];
+        let index = text_output_index(&response).ok_or_else(|| BackendError::Malformed {
+            detail: format!("die Antwort enthaelt keinen `{TEXT_OUTPUT}`-Tensor"),
+        })?;
+        if response.raw_output_contents.len() != response.outputs.len() {
+            return Err(BackendError::Malformed {
+                detail: "Ausgabetensoren und Rohdaten sind nicht eindeutig zugeordnet".to_owned(),
+            });
+        }
+        let target =
+            response
+                .raw_output_contents
+                .get_mut(index)
+                .ok_or_else(|| BackendError::Malformed {
+                    detail: format!("Rohdaten fuer `{TEXT_OUTPUT}` fehlen"),
+                })?;
+        *target = raw;
         Ok(response)
     }
 }
@@ -363,28 +395,40 @@ fn read_length_prefixed(bytes: &[u8]) -> Option<String> {
 /// Liest den Texteingang eines Requests.
 #[must_use]
 pub fn read_text_input(request: &ModelInferRequest) -> Option<String> {
-    let index = request.inputs.iter().position(|i| i.name == TEXT_INPUT)?;
-    let raw = request.raw_input_contents.get(index)?;
-    read_length_prefixed(raw)
+    read_length_prefixed(single_input_raw(request, TEXT_INPUT)?)
 }
 
 /// Liest die Samplingparameter eines Requests, falls vorhanden.
 #[must_use]
 pub fn read_sampling_parameters(request: &ModelInferRequest) -> Option<String> {
-    let index = request
+    read_length_prefixed(single_input_raw(request, SAMPLING_PARAMETERS)?)
+}
+
+/// Nur einen eindeutig benannten BYTES-Tensor mit einem Element umschreiben.
+/// Andernfalls wuerde der Quantumbau Form, Typ oder doppelte Eingaben reparieren.
+fn single_input_raw<'a>(request: &'a ModelInferRequest, name: &str) -> Option<&'a [u8]> {
+    let mut matches = request
         .inputs
         .iter()
-        .position(|i| i.name == SAMPLING_PARAMETERS)?;
-    let raw = request.raw_input_contents.get(index)?;
-    read_length_prefixed(raw)
+        .enumerate()
+        .filter(|(_, input)| input.name == name);
+    let (index, input) = matches.next()?;
+    if matches.next().is_some()
+        || input.datatype != "BYTES"
+        || !input.shape.iter().all(|dimension| *dimension == 1)
+        || input.contents.is_some()
+    {
+        return None;
+    }
+    request.raw_input_contents.get(index).map(Vec::as_slice)
 }
 
 /// Liest die vom Client angeforderte Tokenobergrenze.
 ///
 /// Nur das Feld `max_tokens` auf oberster Ebene zaehlt. Die Textsuche davor
 /// fand auch ein `max_tokens` in einem verschachtelten Objekt oder in einem
-/// String (Review R05). Keine ganze Zahl, kein Objekt oder kein JSON heisst:
-/// keine Vorgabe des Clients, und es gilt die Obergrenze der Konfiguration.
+/// String (Review R05). `None` bedeutet fehlend oder unlesbar;
+/// [`GenerativeJob::from_request`] unterscheidet beides vor dem Zuschneiden.
 #[must_use]
 pub fn read_max_tokens(request: &ModelInferRequest) -> Option<u32> {
     let sampling = read_sampling_parameters(request)?;
@@ -393,12 +437,16 @@ pub fn read_max_tokens(request: &ModelInferRequest) -> Option<u32> {
     Some(u32::try_from(tokens).unwrap_or(u32::MAX))
 }
 
-/// Ob die Samplingparameter ein JSON-Objekt sind.
-fn is_json_object(sampling: &str) -> bool {
-    matches!(
-        serde_json::from_str::<serde_json::Value>(sampling),
-        Ok(serde_json::Value::Object(_))
-    )
+/// Ein JSON-Objekt mit fehlender oder positiver ganzzahliger Tokenobergrenze.
+/// Eine ungueltige Vorgabe unveraendert dem Backend ueberlassen, statt sie
+/// beim Zuschneiden still durch eine gueltige zu ersetzen.
+fn is_splittable_sampling(sampling: &str) -> bool {
+    let Ok(serde_json::Value::Object(fields)) = serde_json::from_str(sampling) else {
+        return false;
+    };
+    fields
+        .get("max_tokens")
+        .is_none_or(|value| value.as_u64().is_some_and(|tokens| tokens > 0))
 }
 
 /// Alle Eingaben ausser Text und Samplingparametern, mit ihren Rohdaten.
@@ -422,8 +470,8 @@ fn extra_inputs(request: &ModelInferRequest) -> Vec<(InferInputTensor, Vec<u8>)>
 
 /// Liest die Textausgabe einer Antwort.
 ///
-/// `None` sowohl ohne Ausgabe als auch bei einer kaputten; wer beides
-/// unterscheiden muss, nimmt [`GenerativeJob::absorb`].
+/// `None` ohne lesbaren einzelnen Texttensor. [`GenerativeJob::absorb`]
+/// meldet diesen Fall als fehlerhafte Backendantwort.
 #[must_use]
 pub fn read_text_output(response: &ModelInferResponse) -> Option<String> {
     read_length_prefixed(text_output_raw(response)?)
@@ -431,12 +479,26 @@ pub fn read_text_output(response: &ModelInferResponse) -> Option<String> {
 
 /// Die Rohdaten der Textausgabe, falls die Antwort welche traegt.
 fn text_output_raw(response: &ModelInferResponse) -> Option<&[u8]> {
-    let index = response
+    let index = text_output_index(response)?;
+    response.raw_output_contents.get(index).map(Vec::as_slice)
+}
+
+/// Eine Textausgabe darf nicht mit einem beliebigen ersten Tensor verwechselt werden.
+fn text_output_index(response: &ModelInferResponse) -> Option<usize> {
+    let mut matches = response
         .outputs
         .iter()
-        .position(|o| o.name == TEXT_OUTPUT)
-        .unwrap_or(0);
-    response.raw_output_contents.get(index).map(Vec::as_slice)
+        .enumerate()
+        .filter(|(_, output)| output.name == TEXT_OUTPUT);
+    let (index, output) = matches.next()?;
+    if matches.next().is_some()
+        || output.datatype != "BYTES"
+        || !output.shape.iter().all(|dimension| *dimension == 1)
+        || output.contents.is_some()
+    {
+        return None;
+    }
+    Some(index)
 }
 
 #[cfg(test)]
@@ -550,11 +612,11 @@ mod tests {
             assert_eq!(job.generated, "", "nichts davon wird uebernommen");
         }
 
-        // Ohne Ausgabe bleibt es beim bisherigen Ende.
+        // Fehlende Rohdaten sind kein gueltiges leeres Quantum.
         let mut job = GenerativeJob::from_request(&request_with("Prompt"), 64).unwrap();
         let mut empty = response_with("");
         empty.raw_output_contents.clear();
-        assert!(job.absorb(&empty).unwrap());
+        assert!(job.absorb(&empty).is_err());
     }
 
     /// Die Zerlegung darf nicht mehr Tokens bestellen als der Client.
@@ -591,6 +653,90 @@ mod tests {
             .raw_input_contents
             .push(length_prefixed(sampling).unwrap());
         request
+    }
+
+    #[test]
+    fn invalid_token_limits_are_not_rewritten_into_valid_work() {
+        for limit in ["0", "-1", "1.5", "\"4\"", "null", "true"] {
+            let request = with_sampling(&format!("{{\"max_tokens\":{limit}}}"));
+            assert!(
+                GenerativeJob::from_request(&request, 64).is_none(),
+                "die ungueltige Vorgabe {limit} darf nicht durch 1 oder 64 ersetzt werden"
+            );
+        }
+    }
+
+    #[test]
+    fn an_exhausted_job_cannot_order_another_token() {
+        let template = request_with("Prompt:");
+        let mut job = GenerativeJob::from_request(&template, 8).unwrap();
+        job.tokens = 8;
+        assert!(job.build_quantum(&template, 8).is_none());
+    }
+
+    #[test]
+    fn incompatible_text_metadata_is_not_silently_repaired() {
+        let mut batched = request_with("Prompt:");
+        batched.inputs.first_mut().unwrap().shape = vec![2];
+        let mut numeric = request_with("Prompt:");
+        numeric.inputs.first_mut().unwrap().datatype = "FP32".into();
+        let mut duplicate = request_with("Prompt:");
+        duplicate
+            .inputs
+            .push(duplicate.inputs.first().unwrap().clone());
+        duplicate
+            .raw_input_contents
+            .push(length_prefixed("other prompt").unwrap());
+        for request in [batched, numeric, duplicate] {
+            assert!(GenerativeJob::from_request(&request, 64).is_none());
+        }
+    }
+
+    #[test]
+    fn a_quantum_preserves_valid_single_element_tensor_shapes() {
+        let mut template = with_sampling("{\"max_tokens\":16}");
+        for input in &mut template.inputs {
+            input.shape = vec![1, 1];
+        }
+        let mut job = GenerativeJob::from_request(&template, 64).unwrap();
+        let quantum = job.build_quantum(&template, 8).unwrap();
+        assert_eq!(quantum.inputs, template.inputs);
+        assert_eq!(read_max_tokens(&quantum), Some(8));
+    }
+
+    #[test]
+    fn a_non_text_output_is_not_interpreted_as_generated_text() {
+        let mut response = response_with("metadata");
+        response.outputs.first_mut().unwrap().name = "status".into();
+        let mut job = GenerativeJob::from_request(&request_with("Prompt:"), 64).unwrap();
+        assert!(job.absorb(&response).is_err());
+        assert!(job.generated.is_empty());
+    }
+
+    #[test]
+    fn collected_text_keeps_output_metadata_and_payloads_aligned() {
+        let mut response = response_with("last quantum");
+        response.outputs.insert(
+            0,
+            InferOutputTensor {
+                name: "score".into(),
+                datatype: "FP32".into(),
+                shape: vec![1],
+                ..Default::default()
+            },
+        );
+        let score = 0.5_f32.to_le_bytes().to_vec();
+        response.raw_output_contents.insert(0, score.clone());
+        let mut job = GenerativeJob::from_request(&request_with("Prompt:"), 64).unwrap();
+        job.generated = "whole answer".into();
+        let collected = job.build_response(&response).unwrap();
+        assert_eq!(collected.outputs, response.outputs);
+        assert_eq!(collected.raw_output_contents.len(), collected.outputs.len());
+        assert_eq!(collected.raw_output_contents.first(), Some(&score));
+        assert_eq!(
+            read_text_output(&collected).as_deref(),
+            Some("whole answer")
+        );
     }
 
     fn sampling_of(request: &ModelInferRequest) -> serde_json::Map<String, serde_json::Value> {

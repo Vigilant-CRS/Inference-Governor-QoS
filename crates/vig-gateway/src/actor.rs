@@ -1145,10 +1145,6 @@ impl Actor {
         sink: &mut S,
     ) -> bool {
         let id = descriptor.id;
-        // Ab hier gehoert die Reservierung dem Actor. Wird der Request unten
-        // abgewiesen, faellt sie mit dieser Funktion — das ist richtig, denn
-        // dann hat nichts gerechnet.
-        self.permits.insert(id, permit);
 
         // Steht jeder Slotkredit in Quarantaene, kann nichts starten — und
         // zwar nicht "gerade nicht", sondern bis das Backend antwortet. Diesen
@@ -1216,6 +1212,10 @@ impl Actor {
             }
         }
 
+        // Erst nach den direkten Ablehnungen uebernimmt der Actor die
+        // Reservierung. Bis hier gibt ein fruehes Return sie automatisch
+        // frei; in der Map wuerde sie ohne Schedulerabschluss liegen bleiben.
+        self.permits.insert(id, permit);
         self.waiting.insert(id, reply);
         self.inbox.insert(id, request);
         self.scheduler

@@ -2051,14 +2051,11 @@ fn check_blocking_work(
 /// Modell mit `cooperative:` (ADR-0014) belegt den Slot dagegen nur fuer ein
 /// Quantum — zwischen zweien ist er frei, und genau darum geht es.
 ///
-/// Gerechnet wird das **spaeteste** Quantum, nicht das erste: sein Prompt
-/// traegt allen bisher erzeugten Text, und ohne wirksames Prefix-Caching
-/// kostet dessen erneute Berechnung mit jedem Token mehr (NV-16, ADR-0031).
-/// Die Zulassung muss den unguenstigen Fall annehmen, sonst laesst sie eine
-/// Konfiguration durch, die erst gegen Ende eines Auftrags reisst.
-///
-/// Nie laenger als der ungeteilte Lauf: ein Auftrag, der insgesamt kuerzer
-/// ist als ein Quantum, blockiert auch nur so lange, wie er dauert.
+/// Geprueft wird die Mindestquantengroesse bei gewachsenem Ausgabetext.
+/// Der Clientprompt ist hier unbekannt; seine Kosten prueft der Scheduler
+/// pro Request. Diese Rechnung ist kein Nachweis einer maximalen Blockade.
+/// Ein Offlineprofil fuer einen kurzen Prompt begrenzt die Kosten eines
+/// spaeteren Re-Prefills nicht und darf sie deshalb nicht heruntersetzen.
 ///
 /// Ohne diese Unterscheidung war `cooperative:` in genau dem Fall gesperrt,
 /// fuer den es gebaut wurde — auf **einer** Ausfuehrungseinheit. Der Befund
@@ -2067,9 +2064,9 @@ fn check_blocking_work(
 /// `examples/cooperative_llm/vig.yaml` zu messen.
 fn blocking_time(contract: &ModelContract, runtime: Duration) -> Duration {
     match contract.cooperative {
-        Some(cooperative) => cooperative
-            .cost_of_with_context(cooperative.min_tokens, cooperative.max_total_tokens)
-            .min(runtime),
+        Some(cooperative) => {
+            cooperative.cost_of_with_context(cooperative.min_tokens, cooperative.max_total_tokens)
+        }
         None => runtime,
     }
 }

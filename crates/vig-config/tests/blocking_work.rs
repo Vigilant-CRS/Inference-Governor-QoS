@@ -118,6 +118,20 @@ fn a_quantum_that_does_not_fit_stays_a_blocker() {
     );
 }
 
+/// Ein kurzes Offlineprofil deckelt die Kosten der Re-Prefill-Quanten nicht.
+#[test]
+fn a_short_profile_cannot_hide_an_expensive_quantum() {
+    let yaml = decomposable_yaml(32).replace(
+        "p50_us: 193000, p95_us: 195000, p99_us: 196000",
+        "p50_us: 10000, p95_us: 11000, p99_us: 12000",
+    );
+    let findings = Config::from_yaml(&yaml).unwrap().diagnose();
+    assert!(
+        findings.iter().any(|f| f.path == "models.llm0.contract"),
+        "ein Quantum kostet weiterhin rund 130 ms gegen 100 ms Zusage: {findings:?}"
+    );
+}
+
 /// Zwei lange Auftraege auf zwei Slots: die Kamera kann ihre 100 ms nicht
 /// halten, und die Konfiguration sagt es — an beiden Verursachern.
 #[test]

@@ -933,6 +933,35 @@ async fn full_quarantine_refuses_new_work_instead_of_letting_it_wait() {
     assert_eq!(handle.metrics().await.unwrap().rejected_quarantined, 1);
 }
 
+/// Abgewiesene Arbeit darf das Bytebudget nicht dauerhaft verkleinern.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quarantine_rejections_release_the_payload_reservation() {
+    let backend_impl = Arc::new(mock_backend::MockBackend::hanging());
+    let endpoint = mock_backend::start(backend_impl).await.to_string();
+    let service = service_with(
+        &endpoint,
+        "  inference_timeout_ms: 150\n  max_inflight_mib: 1\n",
+    );
+    let handle = service.scheduler_handle();
+    let _ = service.model_infer(tonic::Request::new(request())).await;
+    assert_eq!(handle.metrics().await.unwrap().quarantined, 1);
+
+    for attempt in 0..5 {
+        let mut rejected = request();
+        rejected.raw_input_contents = vec![vec![0; 512 * 1024]];
+        let status = service
+            .model_infer(tonic::Request::new(rejected))
+            .await
+            .expect_err("kein freier Slot");
+        assert_eq!(
+            status.code(),
+            tonic::Code::Unavailable,
+            "Versuch {attempt}: nie gestartete Arbeit darf das Budget nicht erschoepfen"
+        );
+    }
+    assert_eq!(handle.metrics().await.unwrap().rejected_quarantined, 5);
+}
+
 /// Ein abgelehnter Verbindungsaufbau nimmt den Governor aus der Rotation.
 ///
 /// Er erzeugt **keine** Quarantäne — der Aufruf kehrt sofort zurück, der
