@@ -315,6 +315,17 @@ Versuche dieses Tages hätten beinahe einen Effekt gemeldet, den ein
 Kontrolllauf desselben Arms widerlegt — Einzelläufe streuen hier mehr als der
 gesuchte Unterschied, und ein Versuch bei halber Auslastung prüft nichts.
 
+**Nach den Reparaturen R10 bis R14 bestätigt.** Alle Messungen dieses Tages
+liefen gegen den Stand **vor** der erneuten Prüfung, und drei der fünf
+Reparaturen sitzen in `cooperative.rs` — also im gemessenen Pfad. Zwei Läufe
+mit dem reparierten Stand und derselben Konfiguration: 903/905 statt 905/905
+Kamerabilder, 8/6 statt 6/6 ‰ unabgedeckt, 11022/11234 statt 11022/10810
+Zeichen. Alles innerhalb der Streuung; die berichteten Zahlen gelten weiter.
+Der Sockel von 3847/3923 ms bestätigt die Zerlegung zusätzlich quantitativ:
+bei 6,277 ms je Quantum sind das rund zwölf Quanten je Auftrag, also genau
+`max_total_tokens / min_tokens`. Eine neue **Qualifikation** ist das nicht —
+es ist ein Gegenlauf auf derselben Maschine.
+
 **11.09.2026, Treiber 580.178.04.** Gate M3 dreimal ([R04](benchmark/gate-m3-r04.md)),
 NV-06 scharf gegen Schatten ([nv06-ab.md](benchmark/nv06-ab.md)),
 weitere Messungen des Tages laufen auf ruhiger Maschine.
