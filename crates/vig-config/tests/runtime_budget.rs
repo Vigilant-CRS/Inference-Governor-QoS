@@ -106,8 +106,14 @@ fn a_budget_beyond_the_slots_is_refused_with_its_location() {
     let findings = Config::from_yaml(&yaml(1, "best_effort", two_seconds))
         .unwrap()
         .diagnose();
-    assert_eq!(findings.len(), 1, "{findings:?}");
-    assert_eq!(findings[0].path, "models.vlm.contract.min_runtime");
+    // Gefiltert statt gezaehlt: auf einem Slot meldet die Blockierpruefung
+    // (ADR-0035) hier zu Recht ebenfalls etwas, und dieser Test gilt dem
+    // Budget.
+    let at_budget: Vec<_> = findings
+        .iter()
+        .filter(|f| f.path == "models.vlm.contract.min_runtime")
+        .collect();
+    assert_eq!(at_budget.len(), 1, "{findings:?}");
     assert!(
         Config::from_yaml(&yaml(2, "best_effort", two_seconds))
             .unwrap()

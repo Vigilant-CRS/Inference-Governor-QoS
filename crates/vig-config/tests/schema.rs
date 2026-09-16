@@ -18,7 +18,9 @@ fn the_shipped_example_resolves() {
     let resolved = config.resolve().unwrap();
     assert_eq!(resolved.model_names, vec!["detector", "vlm"]);
     assert_eq!(resolved.contracts.len(), 2);
-    assert_eq!(resolved.slots.len(), 1);
+    // Zwei Slots: ein 320-ms-VLM neben einer 66-ms-Zusage braucht einen
+    // zweiten Slot, sonst ist die Zusage nicht haltbar (ADR-0035).
+    assert_eq!(resolved.slots.len(), 2);
     assert_eq!(resolved.backend_endpoint, "127.0.0.1:8001");
 
     let detector = resolved.model_index("detector").unwrap();
@@ -103,10 +105,15 @@ fn a_preemptible_model_gets_its_own_lane() {
     );
     assert_eq!(resolved.preemptible[detector.get()], None);
 
-    let without = Config::from_yaml(&preemption_yaml(
-        "",
-        "    backend_endpoint: \"127.0.0.1:9101\"\n",
-    ))
+    // Ohne Spur belegt das VLM den einzigen regulaeren Slot. Mit 99 ms waere
+    // das gegen 66 ms Hoechstalter nicht haltbar (ADR-0035) — hier geht es
+    // aber um die Spur, nicht um die Blockierung, also rechnet das VLM kurz.
+    let without = Config::from_yaml(
+        &preemption_yaml("", "    backend_endpoint: \"127.0.0.1:9101\"\n").replace(
+            "p50_us: 90000, p95_us: 95000, p99_us: 99000",
+            "p50_us: 20000, p95_us: 24000, p99_us: 28000",
+        ),
+    )
     .unwrap()
     .resolve()
     .unwrap();

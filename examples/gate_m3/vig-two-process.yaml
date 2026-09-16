@@ -26,6 +26,12 @@
 #
 # Am 2026-09-01 lag dieselbe Konfiguration bei 92 % und `doctor` warnte nur.
 # Gewechselt hat nicht das Szenario, sondern der Zustand der Karte.
+#
+# Seit dem 16.09.2026 nennt `doctor` einen zweiten Grund: das VLM rechnet
+# laenger als das Hoechstalter des Detektors, und auf einem einzigen
+# regulaeren Slot laeuft ein begonnener Aufruf ohne Praemption zu Ende
+# (ADR-0035). Genau dafuer gibt es vig-preemptible.yaml: dieselbe Lage, aber
+# mit XSched und einer eigenen Spur fuer das VLM.
 version: 1
 
 backend:

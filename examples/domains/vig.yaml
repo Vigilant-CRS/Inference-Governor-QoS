@@ -23,7 +23,11 @@ backend:
     gpu1:
       gpu_index: 1                      # wie nvidia-smi sie zaehlt
       grpc_endpoint: "127.0.0.1:8101"   # ein Triton, das nur GPU 1 sieht
-      slots: 1
+      # Zwei Slots: das Sprachmodell rechnet 320 ms, `depth` verspricht 132 ms
+      # Hoechstalter. Ohne Praemption laeuft ein begonnener Aufruf zu Ende —
+      # auf einem einzigen Slot waere die Zusage von `depth` nicht haltbar
+      # (ADR-0035). GPU 0 traegt nur den Detektor und bleibt bei einem Slot.
+      slots: 2
       pipelining_depth: 1
       # Co-Run-Verbote und Interferenz gelten innerhalb einer GPU.
       no_corun:

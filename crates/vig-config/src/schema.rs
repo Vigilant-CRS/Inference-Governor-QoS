@@ -1858,6 +1858,80 @@ fn quality_from_f64(value: f64) -> Result<Quality, ConfigError> {
     })
 }
 
+/// Ob lange nachrangige Arbeit die Zusage bewachter Modelle unmoeglich macht
+/// (ADR-0035).
+///
+/// Ein Aufruf, der laeuft, laeuft zu Ende: ohne `preemptible:` gibt es keine
+/// Praemption. Belegen so viele nicht bewachte Modelle alle regulaeren Slots,
+/// deren konservative Laufzeit ueber der engsten Zusage eines bewachten
+/// Modells liegt, dann ist diese Zusage arithmetisch nicht haltbar — und das
+/// soll die Konfiguration sagen, nicht erst die Messung.
+///
+/// Gemessen am 16.09.2026: zwei Sprachmodelle mit 195 ms p99 auf zwei Slots
+/// rissen eine geschuetzte Kamera mit 100 ms Hoechstalter auf eine Luecke von
+/// 245 ms; ohne die beiden blieb dieselbe Kamera bei 86 ms.
+fn check_blocking_work(
+    model_names: &[String],
+    contracts: &ArrayVec<ModelContract, MAX_MODELS>,
+    preemptible: &[Option<ResolvedPreemptible>],
+    slots: &SlotSet,
+    margin: SafetyMargin,
+    findings: &mut Vec<Located>,
+) {
+    let regular = slots.regular_len();
+    if regular == 0 {
+        return;
+    }
+    // Die engste Zusage, die gehalten werden muss. Das Hoechstalter ist die
+    // fachliche Grenze; fehlt es, zaehlt die Frist.
+    let Some(tightest) = contracts
+        .iter()
+        .filter(|contract| contract.criticality.is_guarded())
+        .map(|contract| contract.max_age.unwrap_or(contract.deadline))
+        .min()
+    else {
+        return;
+    };
+
+    let mut blockers = Vec::new();
+    for (i, (name, contract)) in model_names.iter().zip(contracts.iter()).enumerate() {
+        if contract.criticality.is_guarded() {
+            continue;
+        }
+        // Wer seine Restblockierung erklaert hat, ist eingeplant (ADR-0035).
+        if preemptible.get(i).copied().flatten().is_some() {
+            continue;
+        }
+        let Some(best) = contract.variants.get(0) else {
+            continue;
+        };
+        let Ok(runtime) = best.profile.conservative_at(0, margin) else {
+            continue;
+        };
+        if runtime > tightest {
+            blockers.push(name);
+        }
+    }
+
+    // Erst wenn sie jeden regulaeren Slot besetzen koennen, ist die Zusage
+    // verloren. Ein einzelner langer Auftrag neben zwei Slots laesst dem
+    // bewachten Modell noch einen.
+    if blockers.len() >= regular {
+        for name in blockers {
+            findings.push(
+                ConfigError::Inconsistent {
+                    what: "dieses Modell rechnet laenger als die engste Zusage eines bewachten \
+                           Modells, und es gibt genug solche Modelle, um jeden regulaeren Slot \
+                           zu belegen. Ohne Praemption laeuft ein begonnener Aufruf zu Ende, \
+                           also ist die Zusage nicht haltbar: `preemptible:` mit gemessener \
+                           Restblockierung (ADR-0035), mehr Slots, oder eine kuerzere Variante",
+                }
+                .at(format!("models.{name}.contract")),
+            );
+        }
+    }
+}
+
 /// Ob die Slots jedes Mindestlaufzeitbudget in einem Fenster rechnen koennen
 /// (ADR-0046).
 ///
@@ -2189,6 +2263,14 @@ impl Config {
             );
             interference = resolve_interference(&self.backend.interference, &model_names, findings);
             check_runtime_budgets(&model_names, &contracts, &slots, findings);
+            check_blocking_work(
+                &model_names,
+                &contracts,
+                &preemptible,
+                &slots,
+                margin,
+                findings,
+            );
         }
 
         // Die Grenzen vor den Domaenen: deren Aufloesung meldet dieselben

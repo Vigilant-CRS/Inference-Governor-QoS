@@ -5,6 +5,13 @@
 # nach der Aufnahme, nach 100 ms wertlos (bei 30 km/h rund 80 cm Fahrt).
 # Variante A: `slots: 1` und `no_corun` — der Governor laesst die beiden nie
 # gleichzeitig rechnen.
+#
+# `vig doctor` lehnt diese Datei seit dem 16.09.2026 ab, und das ist die
+# Aussage der Demo: SmolVLM rechnet 170 ms, der Detektor verspricht 100 ms
+# Hoechstalter, und auf einem einzigen Slot laeuft ein begonnener Aufruf ohne
+# Praemption zu Ende (ADR-0035). Gemessen: ein Slot und ein langer Auftrag
+# rissen die Versorgung auf 234 ms, zwei Slots hielten sie bei 39 ms. Die
+# Variante mit zwei Slots ist krakow-sat-slots2.yaml.
 version: 1
 backend:
   type: triton

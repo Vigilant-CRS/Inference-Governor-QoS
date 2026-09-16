@@ -98,7 +98,7 @@ fn without_domains_nothing_changes() {
     let config = Config::from_yaml(SINGLE).unwrap();
     let resolved = config.resolve().unwrap();
     assert!(resolved.domains.is_empty());
-    assert_eq!(resolved.slots.len(), 1);
+    assert_eq!(resolved.slots.len(), 2);
     let yaml = config.to_yaml().unwrap();
     assert!(!yaml.contains("domain"), "{yaml}");
 }
@@ -109,7 +109,7 @@ fn a_domain_round_trips_through_yaml() {
     let again = Config::from_yaml(&config.to_yaml().unwrap()).unwrap();
     let resolved = again.resolve().unwrap();
     assert_eq!(resolved.domains.len(), 2);
-    assert_eq!(resolved.domains[1].resolved.slots.len(), 1);
+    assert_eq!(resolved.domains[1].resolved.slots.len(), 2);
 }
 
 /// `domain: gpu1` ohne angelegte Domaene liefe sonst still auf GPU 0.

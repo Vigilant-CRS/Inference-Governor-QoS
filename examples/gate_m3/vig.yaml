@@ -21,6 +21,14 @@
 #
 # Am 2026-09-01 lag dieselbe Konfiguration bei 92 % und `doctor` warnte nur.
 # Gewechselt hat nicht das Szenario, sondern der Zustand der Karte.
+#
+# Seit dem 16.09.2026 nennt `doctor` einen zweiten Grund: das VLM rechnet
+# 110 ms, der Detektor verspricht 66 ms Hoechstalter, und auf einem einzigen
+# regulaeren Slot laeuft ein begonnener Aufruf ohne Praemption zu Ende
+# (ADR-0035). Gemessen: ein Slot und ein langer Auftrag rissen die Versorgung
+# auf 234 ms, zwei Slots hielten sie bei 39 ms. Der Weg heraus steht in
+# vig-preemptible.yaml — hier bleibt die Datei, wie sie ist, weil sie eine
+# gemessene Hardwarelage beschreibt und nicht als Vorlage gedacht ist.
 version: 1
 
 backend:

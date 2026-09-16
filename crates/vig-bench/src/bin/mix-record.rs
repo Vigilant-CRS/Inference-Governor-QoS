@@ -26,7 +26,9 @@
 //!   oder `normal`, das Sprachmodell das der Klasse `best_effort`.
 //! * `VIG_MIX_ARM` — `direct`, `governed` oder `profile` (misst Spracherkennung
 //!   und Sprachmodell einzeln und gibt Profilzeilen aus).
-//! * `VIG_MIX_FRAMES` — Rohbilder RGB24, quadratisch (`VIG_MIX_SIZE`, 576).
+//! * `VIG_MIX_FRAMES` — Vorlage fuer die Rohbilder (RGB24, quadratisch), z. B.
+//!   `demo/frames/krakow-{size}.raw`. `{size}` wird durch die Kantenlaenge
+//!   ersetzt, die das jeweilige Modell laut Backend erwartet.
 //! * `VIG_MIX_AUDIO` — Mono-Audio als `f32` bei 16 kHz, Schnipsel
 //!   `VIG_MIX_CHUNK_MS` (1000).
 //! * `VIG_MIX_SECONDS` (30), `VIG_MIX_PROMPT`, `VIG_MIX_TOKENS` (48),
@@ -68,11 +70,6 @@ fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
-fn size() -> usize {
-    static SIZE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *SIZE.get_or_init(|| env("VIG_MIX_SIZE").map_or(576, |v| v.parse().expect("VIG_MIX_SIZE")))
-}
-
 /// Ein Modell der Konfiguration, so wie der jeweilige Arm es anspricht.
 #[derive(Debug, Clone)]
 struct Target {
@@ -108,6 +105,77 @@ fn by_class(config: &Config, class: &str) -> Vec<String> {
         .filter(|(_, m)| m.class == class)
         .map(|(name, _)| name.clone())
         .collect()
+}
+
+/// Was ein Modell als Eingabe erwartet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// Ein Bild mit dieser Kantenlaenge.
+    Image(usize),
+    Audio,
+    Text,
+}
+
+/// Die Art eines Modells sagt das Backend selbst: ein Bild bringt vier
+/// Dimensionen mit und damit seine Kantenlaenge, Audio heisst `AUDIO`, ein
+/// Sprachmodell nimmt `text_input`. So muss die Konfiguration nichts
+/// wiederholen, was Triton ohnehin weiss — und drei Detektoren mit 384, 512
+/// und 576 Pixeln bekommen jeder das Bild, das zu ihm passt.
+async fn kind_of(target: &Target) -> Kind {
+    let client = vig_backend_triton::TritonClient::new(&target.endpoint);
+    let meta = client
+        .model_metadata(&target.model)
+        .await
+        .unwrap_or_else(|error| panic!("Metadaten fuer {}: {error}", target.model));
+    for input in &meta.inputs {
+        if input.name == "text_input" {
+            return Kind::Text;
+        }
+        if input.name.eq_ignore_ascii_case("audio") {
+            return Kind::Audio;
+        }
+        if input.shape.len() == 4 {
+            let edge = input.shape.last().copied().unwrap_or_default();
+            return Kind::Image(usize::try_from(edge).expect("Kantenlaenge"));
+        }
+    }
+    panic!("unbekannte Eingabe fuer {}", target.model);
+}
+
+/// Rohbilder einer Kantenlaenge. `VIG_MIX_FRAMES` ist eine Vorlage: `{size}`
+/// wird ersetzt, damit jede Bildgroesse ihre eigene Datei bekommt.
+fn frames_of(pattern: &str, size: usize) -> Arc<Vec<Vec<u8>>> {
+    let path = pattern.replace("{size}", &size.to_string());
+    let raw = std::fs::read(&path).unwrap_or_else(|error| panic!("Rohbilder {path}: {error}"));
+    let frames: Vec<Vec<u8>> = raw
+        .chunks_exact(size * size * 3)
+        .take(30)
+        .map(|rgb| frame_tensor(rgb, size, size))
+        .collect();
+    assert!(!frames.is_empty(), "keine Rohbilder in {path}");
+    Arc::new(frames)
+}
+
+fn image_input(size: usize, frames: Arc<Vec<Vec<u8>>>) -> InputSpec {
+    InputSpec {
+        name: "input".to_owned(),
+        datatype: "FP32".to_owned(),
+        shape: vec![1, 3, size as i64, size as i64],
+        region: None,
+        byte_size: (size * size * 3 * 4) as u64,
+        payload: Some(frames),
+    }
+}
+
+fn audio_input(chunk_samples: usize, chunks: Arc<Vec<Vec<u8>>>) -> InputSpec {
+    InputSpec {
+        name: "AUDIO".to_owned(),
+        datatype: "FP32".to_owned(),
+        shape: vec![chunk_samples as i64],
+        region: None,
+        byte_size: (chunk_samples * 4) as u64,
+        payload: Some(chunks),
+    }
 }
 
 /// Ein Textauftrag fuer das vLLM-Backend: Prompt und Samplingparameter als
@@ -394,22 +462,16 @@ async fn run() {
         std::process::exit(2);
     }
 
-    let detector = target(
-        &config,
-        by_class(&config, "protected").first().expect("protected"),
-    );
-    let asr_name = by_class(&config, "high")
-        .into_iter()
-        .chain(by_class(&config, "normal"))
-        .next()
-        .expect("ein Modell der Klasse high oder normal (Spracherkennung)");
-    let asr = target(&config, &asr_name);
-    let llm = target(
-        &config,
-        by_class(&config, "best_effort")
-            .first()
-            .expect("best_effort"),
-    );
+    // Alle Modelle der Konfiguration, nach Wichtigkeit geordnet — beliebig
+    // viele Kameras, Detektoren, Spracherkennungen und Sprachmodelle. Der
+    // Bericht liest sich dann von oben nach unten wie die Rangfolge.
+    let mut targets: Vec<Target> = Vec::new();
+    for class in ["protected", "high", "normal", "best_effort"] {
+        for name in by_class(&config, class) {
+            targets.push(target(&config, &name));
+        }
+    }
+    assert!(!targets.is_empty(), "keine Modelle in der Konfiguration");
 
     let seconds: u64 = env("VIG_MIX_SECONDS").map_or(30, |v| v.parse().expect("VIG_MIX_SECONDS"));
     let chunk_ms: usize =
@@ -422,57 +484,65 @@ async fn run() {
             .to_owned()
     });
 
+    // Die Art jedes Modells kommt vom Backend, nicht aus der Konfiguration.
+    let mut kinds = Vec::new();
+    for t in &targets {
+        kinds.push(kind_of(t).await);
+    }
+
     // Bilder: nur so viele, wie eine Sekunde braucht — die Nutzlast reist im
-    // Request, und ein ganzer Clip im Speicher waeren Gigabyte.
-    let frame_bytes = size() * size() * 3;
-    let raw = std::fs::read(env("VIG_MIX_FRAMES").expect("VIG_MIX_FRAMES")).expect("Rohbilder");
-    let frames: Vec<Vec<u8>> = raw
-        .chunks_exact(frame_bytes)
-        .take(30)
-        .map(|rgb| frame_tensor(rgb, size(), size()))
-        .collect();
-    assert!(!frames.is_empty(), "keine Rohbilder");
+    // Request, und ein ganzer Clip im Speicher waeren Gigabyte. Je
+    // Kantenlaenge eine Datei, denn nano, small und medium erwarten
+    // verschiedene Groessen.
+    let pattern = env("VIG_MIX_FRAMES").expect("VIG_MIX_FRAMES");
+    let mut images: HashMap<usize, Arc<Vec<Vec<u8>>>> = HashMap::new();
+    for kind in &kinds {
+        if let Kind::Image(edge) = *kind {
+            images
+                .entry(edge)
+                .or_insert_with(|| frames_of(&pattern, edge));
+        }
+    }
 
     // Audio: Schnipsel von `chunk_ms`, als f32-Bytes wie sie im Request reisen.
-    let audio = std::fs::read(env("VIG_MIX_AUDIO").expect("VIG_MIX_AUDIO")).expect("Audio");
     let chunk_samples = SAMPLE_RATE * chunk_ms / 1000;
-    let chunks: Vec<Vec<u8>> = audio
-        .chunks_exact(chunk_samples * 4)
-        .map(<[u8]>::to_vec)
-        .collect();
-    assert!(!chunks.is_empty(), "kein Audio");
-
-    let image_input = InputSpec {
-        name: "input".to_owned(),
-        datatype: "FP32".to_owned(),
-        shape: vec![1, 3, size() as i64, size() as i64],
-        region: None,
-        byte_size: (frame_bytes * 4) as u64,
-        payload: Some(Arc::new(frames)),
+    let audio_chunks = if kinds.contains(&Kind::Audio) {
+        let audio = std::fs::read(env("VIG_MIX_AUDIO").expect("VIG_MIX_AUDIO")).expect("Audio");
+        let chunks: Vec<Vec<u8>> = audio
+            .chunks_exact(chunk_samples * 4)
+            .map(<[u8]>::to_vec)
+            .collect();
+        assert!(!chunks.is_empty(), "kein Audio");
+        Arc::new(chunks)
+    } else {
+        Arc::new(Vec::new())
     };
-    let audio_input = InputSpec {
-        name: "AUDIO".to_owned(),
-        datatype: "FP32".to_owned(),
-        shape: vec![chunk_samples as i64],
-        region: None,
-        byte_size: (chunk_samples * 4) as u64,
-        payload: Some(Arc::new(chunks)),
+
+    let input_for = |kind: Kind| -> Option<InputSpec> {
+        match kind {
+            Kind::Image(edge) => images
+                .get(&edge)
+                .map(|frames| image_input(edge, Arc::clone(frames))),
+            Kind::Audio => Some(audio_input(chunk_samples, Arc::clone(&audio_chunks))),
+            Kind::Text => None,
+        }
     };
 
     if profile_only {
         println!("Profile, {samples} Aufrufe je Modell, direkt an den Backends:");
-        // Geboxt: die OIP-Typen machen das Future groesser als der Stack
-        // eines Aufrufers vertragen soll (clippy.toml, 4096 Bytes).
-        Box::pin(profile(
-            &asr,
-            true,
-            Some(audio_input),
-            &prompt,
-            tokens,
-            samples,
-        ))
-        .await;
-        Box::pin(profile(&llm, false, None, &prompt, tokens, samples)).await;
+        for (t, kind) in targets.iter().zip(&kinds) {
+            // Geboxt: die OIP-Typen machen das Future groesser als der Stack
+            // eines Aufrufers vertragen soll (clippy.toml, 4096 Bytes).
+            Box::pin(profile(
+                t,
+                *kind != Kind::Text,
+                input_for(*kind),
+                &prompt,
+                tokens,
+                samples,
+            ))
+            .await;
+        }
         return;
     }
 
@@ -496,46 +566,60 @@ async fn run() {
         Box::leak(name.into_boxed_str())
     };
 
-    let detector_stream = StreamDef {
-        name: "detector",
-        model: model_of(&detector),
-        period: Duration::from_millis(detector.period_ms),
-        max_age: Duration::from_millis(detector.max_age_ms),
-        in_flight_cap: 4,
-        input: Some(image_input),
-        text: None,
-        pump: false,
-        burst: None,
-    };
-    let asr_stream = StreamDef {
-        name: "asr",
-        model: model_of(&asr),
-        period: Duration::from_millis(asr.period_ms),
-        max_age: Duration::from_millis(asr.max_age_ms),
-        in_flight_cap: 2,
-        input: Some(audio_input),
-        text: None,
-        pump: false,
-        burst: None,
-    };
-
     let duration = Duration::from_secs(seconds);
     println!(
-        "Arm {} · {} s · Detektor {} ({} ms) · Spracherkennung {} ({} ms) · Sprachmodell {} ({} Token)",
+        "Arm {} · {} s · {} Modelle · {} Token",
         if governed { "governed" } else { "direct" },
         seconds,
-        detector.model,
-        detector.period_ms,
-        asr.model,
-        asr.period_ms,
-        llm.model,
+        targets.len(),
         tokens
     );
+    for (t, kind) in targets.iter().zip(&kinds) {
+        let art = match *kind {
+            Kind::Image(edge) => format!("Bild {edge} px, {} ms", t.period_ms),
+            Kind::Audio => format!("Audio, {} ms", t.period_ms),
+            Kind::Text => "Text".to_owned(),
+        };
+        println!("  {:<10} {:<22} {art}", t.name, t.model);
+    }
 
-    // Direkt liegen die Modelle auf zwei Servern, ueber den Governor auf einem.
-    // Deshalb faehrt jeder Endpunkt seinen eigenen Treiber, gleichzeitig.
+    // Direkt liegen die Modelle auf mehreren Servern, ueber den Governor auf
+    // einem. Deshalb faehrt jeder Endpunkt seinen eigenen Treiber,
+    // gleichzeitig; die Sprachmodelle laufen als eigene Auftraege daneben.
     let mut groups: Vec<(String, Vec<StreamDef>)> = Vec::new();
-    for (t, stream) in [(&detector, detector_stream), (&asr, asr_stream)] {
+    let mut llm_tasks: Vec<(String, tokio::task::JoinHandle<LlmReport>)> = Vec::new();
+    for (t, kind) in targets.iter().zip(&kinds) {
+        if *kind == Kind::Text {
+            let endpoint = endpoint_of(t);
+            let llm_target = t.clone();
+            let llm_prompt = prompt.clone();
+            llm_tasks.push((
+                t.name.clone(),
+                tokio::spawn(async move {
+                    Box::pin(drive_llm(
+                        &llm_target,
+                        &endpoint,
+                        governed,
+                        &llm_prompt,
+                        tokens,
+                        duration,
+                    ))
+                    .await
+                }),
+            ));
+            continue;
+        }
+        let stream = StreamDef {
+            name: Box::leak(t.name.clone().into_boxed_str()),
+            model: model_of(t),
+            period: Duration::from_millis(t.period_ms),
+            max_age: Duration::from_millis(t.max_age_ms),
+            in_flight_cap: if *kind == Kind::Audio { 2 } else { 4 },
+            input: input_for(*kind),
+            text: None,
+            pump: false,
+            burst: None,
+        };
         let endpoint = endpoint_of(t);
         match groups.iter_mut().find(|(e, _)| *e == endpoint) {
             Some((_, streams)) => streams.push(stream),
@@ -548,31 +632,20 @@ async fn run() {
             drive(&endpoint, &streams, duration, governed).await
         }));
     }
-    let llm_endpoint = endpoint_of(&llm);
-    let llm_target = llm.clone();
-    let llm_prompt = prompt.clone();
-    let llm_task = tokio::spawn(async move {
-        Box::pin(drive_llm(
-            &llm_target,
-            &llm_endpoint,
-            governed,
-            &llm_prompt,
-            tokens,
-            duration,
-        ))
-        .await
-    });
 
     let mut reports = Vec::new();
     for task in tasks {
         reports.extend(task.await.expect("Treiber"));
     }
-    let llm_report = llm_task.await.expect("Sprachmodell");
+    let mut llm_reports = Vec::new();
+    for (name, task) in llm_tasks {
+        llm_reports.push((name, task.await.expect("Sprachmodell")));
+    }
     reports.sort_by_key(|r| r.name);
 
     for report in &reports {
         println!(
-            "  {:<9} gesendet {:>4} geliefert {:>4} abgewiesen {:>4} Fehler {:>3} unabgedeckt {:>4} ‰ Alter p50 {:>5} ms",
+            "  {:<10} gesendet {:>4} geliefert {:>4} abgewiesen {:>4} Fehler {:>3} unabgedeckt {:>4} ‰ Alter p50 {:>5} ms",
             report.name,
             report.sent,
             report.delivered,
@@ -582,16 +655,18 @@ async fn run() {
             report.coverage.response_age_p50_ns / 1_000_000,
         );
     }
-    println!(
-        "  {:<9} gesendet {:>4} geliefert {:>4} abgewiesen {:>4} Fehler {:>3} Zeichen {:>6} Dauer p50 {:>5} ms",
-        "llm",
-        llm_report.sent,
-        llm_report.delivered,
-        llm_report.refused,
-        llm_report.errors,
-        llm_report.chars,
-        llm_report.quantile(50),
-    );
+    for (name, report) in &llm_reports {
+        println!(
+            "  {:<10} gesendet {:>4} geliefert {:>4} abgewiesen {:>4} Fehler {:>3} Zeichen {:>6} Dauer p50 {:>5} ms",
+            name,
+            report.sent,
+            report.delivered,
+            report.refused,
+            report.errors,
+            report.chars,
+            report.quantile(50),
+        );
+    }
 
     if let Some(path) = env("VIG_MIX_OUT") {
         let value = serde_json::json!({
@@ -602,16 +677,16 @@ async fn run() {
             "tokens": tokens,
             "prompt": prompt,
             "streams": reports.iter().map(report_json).collect::<Vec<_>>(),
-            "llm": {
-                "stream": "llm",
-                "sent": llm_report.sent,
-                "delivered": llm_report.delivered,
-                "refused": llm_report.refused,
-                "errors": llm_report.errors,
-                "chars": llm_report.chars,
-                "latency_p50_ms": llm_report.quantile(50),
-                "latency_p95_ms": llm_report.quantile(95),
-            },
+            "llms": llm_reports.iter().map(|(name, r)| serde_json::json!({
+                "stream": name,
+                "sent": r.sent,
+                "delivered": r.delivered,
+                "refused": r.refused,
+                "errors": r.errors,
+                "chars": r.chars,
+                "latency_p50_ms": r.quantile(50),
+                "latency_p95_ms": r.quantile(95),
+            })).collect::<Vec<_>>(),
         });
         std::fs::write(
             &path,

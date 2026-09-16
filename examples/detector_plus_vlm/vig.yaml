@@ -11,7 +11,15 @@ backend:
   # Muss zur Instance-Group-Konfiguration in Triton passen (ADR-0004).
   # Zu hoch gesetzt entsteht hinter dem Governor eine unsichtbare Queue,
   # zu niedrig bleibt Rechenkapazitaet ungenutzt.
-  slots: 1
+  #
+  # Zwei Slots, und das ist hier keine Feinheit: das VLM rechnet 320 ms, der
+  # Detektor verspricht 66 ms Hoechstalter. Ein begonnener Aufruf laeuft ohne
+  # Praemption zu Ende — auf einem einzigen Slot ist die Zusage damit tot.
+  # Gemessen am 16.09.2026 (ein langer Auftrag, 30 s): bei einem Slot riss die
+  # Versorgung auf 234 ms, bei zwei Slots blieb sie bei 39 ms. Wer nur einen
+  # Slot hat, braucht eine praemptierbare Spur (ADR-0035,
+  # examples/gate_m3/vig-preemptible.yaml).
+  slots: 2
 
   # Ein zusaetzlicher Kredit haelt das Backend warm und die Backend-Queue
   # bei hoechstens eins (ADR-0002). 0 haelt sie exakt leer, kostet dafuer
