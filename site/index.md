@@ -150,22 +150,35 @@ loses and says so. For models that can be split, the trade becomes visible:
 [twenty times more background progress for seven points of detector
 coverage](docs/benchmark/wp26.md).
 
-**When the long job can be split, the trade largely disappears.** Internal
-measurement of 16 September, five streams on two slots, a language model next
-to 33 ms cameras — the same load, once as one block and once in quanta:
+**When the long job can be split, it stops being a trade.** A camera at 30 fps
+and a language model whose call takes 194 ms, 30 s per arm — the shipped
+configuration
+[`examples/cooperative_llm/`](https://github.com/Vigilant-CRS/Inference-Governor-QoS/blob/main/examples/cooperative_llm/vig.yaml),
+so you can run it yourself:
 
-| | one block | in quanta |
+| | no splitting | split into quanta |
 |---|---:|---:|
-| refused as unkeepable | 221 | **0** |
-| protected camera, frames served | 795 | **891** of 910 |
-| second camera, promise kept | 361 ‰ | **689 ‰** |
+| **refused as unkeepable** | **608** | **0** |
+| camera frames served | 804 of 910 | **908** |
+| characters generated | 15045 | 14202 |
 
-Same total compute, and the price is named: the language model produces about
-1554 instead of 2640 tokens, because that GPU time went to the cameras. That it
-really split is visible in the governor's own counters — 189 pieces for 38
-jobs, context growing to 70 tokens, no refused decomposition. Single runs
-scatter (two identical reference runs gave 361 ‰ and 465 ‰); the direction was
-the same in every run and far larger than the scatter.
+Without splitting the governor refuses 608 requests because they would miss
+their deadline — the caller gets errors, not answers. With it, none are
+refused *and* the camera serves 104 more frames, at the same text output.
+Both sides win at once.
+
+**And the honest limit:** on a single execution unit it still works — 72
+answers, no refusals — but the camera's longest gap grows to 231 ms, past its
+100 ms promise, because that one slot is busy all the time. Splitting buys you
+a working service on one unit; the promise is bought by the second one. It
+does not replace capacity
+([the full comparison](docs/use-cases.md)).
+
+*This capability was unusable until 16 September, and not because nobody had
+built it: the admission check that recommends splitting never asked whether a
+model could be split, so following its own advice produced the same refusal
+again. We found it while writing the example above, and we say so rather than
+quietly shipping the fix.*
 
 <div class="karten">
 <div class="karte">
