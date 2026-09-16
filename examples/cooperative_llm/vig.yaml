@@ -8,24 +8,27 @@
 # Auftrag wird in Quanten zerlegt, und **zwischen zwei Quanten ist der Slot
 # frei**. Der Zustand faehrt im Prompt mit, es geht nichts verloren.
 #
-# Gemessen am 16.09.2026 (RTX 4070 Laptop, 30 s je Arm, 48 Token je Antwort).
-# Dieselbe Last, einmal ohne und einmal mit Zerlegung:
+# Gemessen am 16.09.2026 (RTX 4070 Laptop, 30 s je Arm, 48 Token je Antwort),
+# alle Zahlen mit dem `min_tokens` dieser Datei. Zwei Laeufe je Punkt:
 #
-#                              2 Slots ohne   2 Slots mit   1 Slot mit
-#   Kamerabilder geliefert       804 / 910         908         782
-#   unabgedeckte Zyklen             1 ‰            1 ‰          7 ‰
-#   laengste Luecke                65 ms          57 ms       231 ms
-#   Antworten geliefert              51             67           72
-#   abgewiesen „nicht machbar"      608              0            0
-#   erzeugte Zeichen              15045          14202        15262
+#                              2 Slots ohne   2 Slots mit    1 Slot mit
+#   Kamerabilder geliefert       804 / 910      908 / 907     905 / 905
+#   unabgedeckte Zyklen             1 ‰           1 ‰            6 ‰
+#   laengste Luecke                65 ms        48 / 57 ms   213 / 222 ms
+#   Antworten geliefert              51          72 / 68        52 / 51
+#   abgewiesen „nicht machbar"      608           0 / 26           0
+#   erzeugte Zeichen              15045      15248 / 14392  11022 / 10810
 #
 # Ohne Zerlegung weist der Governor 608 Auftraege ab, weil sie ihre Frist
 # reissen wuerden — der Aufrufer bekommt Fehler statt Antworten. Mit
-# Zerlegung keinen einzigen, und die Kamera liefert 104 Bilder mehr, bei
-# gleichem Textausstoss. Kein Kompromiss, sondern beidseitig besser.
+# Zerlegung praktisch keinen, und die Kamera liefert rund 100 Bilder mehr,
+# bei gleichem Textausstoss. Kein Kompromiss, sondern beidseitig besser.
+# (Die 26 Abweisungen im zweiten Zwei-Slot-Lauf sind Streuung; die Richtung
+# ist in beiden Laeufen dieselbe und weit groesser als sie.)
 #
-# Auf **einem** Slot traegt es ebenfalls — keine Abweisungen, 72 Antworten —,
-# aber die Kamera bezahlt: die laengste Luecke waechst auf 231 ms und reisst
+# Auf **einem** Slot traegt es ebenfalls — keine Abweisungen, 52 Antworten —,
+# aber die Kamera bezahlt: die laengste Luecke waechst auf 213 bis 222 ms und
+# reisst
 # damit ihre Zusage von 100 ms, weil der eine Slot zu 100 % ausgelastet ist.
 # Ehrlich gelesen: die Zerlegung erkauft einen funktionierenden Dienst auf
 # einer Einheit, die Zusage erkauft erst die zweite. Sie ersetzt keine
@@ -102,9 +105,28 @@ models:
     # ueberhaupt lohnt (ADR-0031). Ein Backend ohne wirksamen Cache traegt
     # hier einen deutlich groesseren Wert, und dann waechst jedes spaetere
     # Quantum ueber seine Luecke hinaus.
+    # `min_tokens` ist **gemessen**, nicht der Vorgabewert. Es entscheidet,
+    # wie fein zerlegt wird, und der Zielkonflikt ist scharf. Dieselbe Last,
+    # 30 s je Punkt, zwei Laeufe (16.09.2026):
+    #
+    #   min_tokens   Kamerabilder   Zeichen   Antworten   GPU-Zeit
+    #        2        903 / 905      ~8160       39/38      30 s
+    #        4        905 / 905     ~10900       52/51      30 s
+    #        8 (Vorgabe) 743 / 764  ~14840       68/72      30 s
+    #       16        904 / 905       422         2/2       16 s
+    #
+    # Der Vorgabewert 8 kostet hier **160 Kamerabilder** (18 %) und kauft
+    # dafuer Text — bei einem `protected`-Strom ist das der falsche Tausch.
+    # 4 liefert die volle Kameraleistung und drei Viertel des Textes.
+    #
+    # 16 **kollabiert**: zwei Antworten, sieben Ablehnungen, und die GPU laeuft
+    # nur halb. Das Quantum passt dann nicht mehr in die Luecke bis zur
+    # naechsten Kameraankunft, der Look-ahead vetoiert jede Fortsetzung, und
+    # der Auftrag endet ueber `max_age` statt ueber ein Ergebnis. Genau davor
+    # warnt der Kommentar an `size_quantum` — hier ist es gemessen.
     cooperative:
       tokens_per_second: 258
-      min_tokens: 8
+      min_tokens: 4
       max_total_tokens: 48
       base_cost_us: 6277
       prefill_per_token_us: 1

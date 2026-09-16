@@ -132,26 +132,46 @@ Measured on 16 September, RTX 4070 Laptop, 30 s per arm, 48 tokens per answer:
 
 | | two slots, **no** splitting | two slots, split | one slot, split |
 |---|---:|---:|---:|
-| camera frames served | 804 of 910 | **908** | 782 |
-| uncovered cycles | 1 ‰ | 1 ‰ | 7 ‰ |
-| longest gap | 65 ms | 57 ms | 231 ms |
-| answers delivered | 51 | 67 | 72 |
-| **refused as unkeepable** | **608** | **0** | **0** |
-| characters generated | 15045 | 14202 | 15262 |
+| camera frames served | 804 of 910 | **908 / 907** | **905 / 905** |
+| uncovered cycles | 1 ‰ | 1 ‰ | 6 ‰ |
+| longest gap | 65 ms | 48 / 57 ms | 213 / 222 ms |
+| answers delivered | 51 | 72 / 68 | 52 / 51 |
+| **refused as unkeepable** | **608** | **0 / 26** | **0** |
+| characters generated | 15045 | 15248 / 14392 | 11022 / 10810 |
 
 **Splitting is not a trade here, it is better on both sides.** Without it the
 governor refuses 608 requests because they would miss their deadline — the
-client gets errors, not answers. With it, none are refused *and* the camera
-serves 104 more frames, at the same text output.
+client gets errors, not answers. With it, next to none are refused *and* the
+camera serves about 100 more frames, at the same text output. (The 26 refusals
+in the second two-slot run are scatter; the direction is the same in both runs
+and far larger than it.)
 
-On a single slot it still works — no refusals, 72 answers — but the camera pays:
-the longest gap grows to 231 ms, past its 100 ms promise, because that one slot
-is busy 100 % of the time. **The honest reading: splitting buys you a working
-service on one unit, a second unit buys you the promise.** What it is not is a
-substitute for capacity.
+On a single slot it still works — no refusals, 52 answers — but the camera pays:
+the longest gap grows past its 100 ms promise, because that one slot is busy
+100 % of the time. **The honest reading: splitting buys you a working service on
+one unit, a second unit buys you the promise.** What it is not is a substitute
+for capacity.
 
-The four numbers in the contract are measured, not guessed, and the file says
-how: a token series (8/16/32/48, 40 runs each) and `vig calibrate` independently
-give 6100 vs 6277 µs fixed cost and 256 vs 258 tokens/s. A guessed fixed cost is
-the expensive mistake here — if it is as large as the gap to the next camera
-frame, no quantum fits, however small you cut it.
+**`min_tokens` is measured too, and it only matters when capacity is tight.**
+Same load, one slot, two runs per point:
+
+| `min_tokens` | camera frames | characters | answers | GPU busy |
+|---:|---:|---:|---:|---:|
+| 2 | 903 / 905 | ~8160 | 39 / 38 | 30 s |
+| **4** (shipped) | **905 / 905** | ~10900 | 52 / 51 | 30 s |
+| 8 (the default) | 743 / 764 | ~14840 | 68 / 72 | 30 s |
+| 16 | 904 / 905 | **422** | **2** | **16 s** |
+
+The default of 8 costs **160 protected camera frames** here and buys text with
+them — the wrong trade for a `protected` stream. At 16 the job **collapses**:
+the smallest quantum no longer fits the gap before the next frame, the
+look-ahead vetoes every continuation, and the job dies on `max_age` instead of
+finishing — two answers, and the GPU idle half the time. On *two* slots the same
+sweep barely moves: quantum size is not the bottleneck when there is a free
+slot.
+
+The four cost numbers in the contract are measured, not guessed, and the file
+says how: a token series (8/16/32/48, 40 runs each) and `vig calibrate`
+independently give 6100 vs 6277 µs fixed cost and 256 vs 258 tokens/s. A guessed
+fixed cost is the expensive mistake here — if it is as large as the gap to the
+next camera frame, no quantum fits, however small you cut it.

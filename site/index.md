@@ -167,11 +167,13 @@ their deadline — the caller gets errors, not answers. With it, none are
 refused *and* the camera serves 104 more frames, at the same text output.
 Both sides win at once.
 
-**And the honest limit:** on a single execution unit it still works — 72
-answers, no refusals — but the camera's longest gap grows to 231 ms, past its
-100 ms promise, because that one slot is busy all the time. Splitting buys you
-a working service on one unit; the promise is bought by the second one. It
-does not replace capacity
+**And the honest limit:** on a single execution unit it still works — 52
+answers, no refusals — but the camera's longest gap grows past its 100 ms
+promise, because that one slot is busy all the time. Splitting buys you a
+working service on one unit; the promise is bought by the second one. It does
+not replace capacity. How finely to cut is measured too, and it is not a free
+choice: the default cost 160 protected camera frames here, and cutting too
+coarsely makes the job collapse entirely
 ([the full comparison](docs/use-cases.md)).
 
 *This capability was unusable until 16 September, and not because nobody had
