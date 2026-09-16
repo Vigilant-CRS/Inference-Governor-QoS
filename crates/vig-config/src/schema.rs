@@ -2040,8 +2040,11 @@ fn check_blocking_work(
                     what: "dieses Modell rechnet laenger als die engste Zusage eines bewachten \
                            Modells, und es gibt genug solche Modelle, um jeden regulaeren Slot \
                            zu belegen. Ohne Praemption laeuft ein begonnener Aufruf zu Ende, \
-                           also ist die Zusage nicht haltbar: `preemptible:` mit gemessener \
-                           Restblockierung (ADR-0035), mehr Slots, oder eine kuerzere Variante",
+                           also ist die Zusage nicht haltbar. Bei einem generativen Modell ist \
+                           `cooperative:` der wirksamste Ausweg — der Auftrag laeuft dann in \
+                           Quanten, und zwischen zweien ist der Slot frei (ADR-0014). Sonst: \
+                           `preemptible:` mit gemessener Restblockierung (ADR-0035), mehr \
+                           Slots, oder eine kuerzere Variante",
                 }
                 .at(format!("models.{name}.contract")),
             );

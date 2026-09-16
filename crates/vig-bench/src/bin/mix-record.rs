@@ -722,6 +722,16 @@ async fn run() {
             metrics.stale_compute_nanos / 1_000_000,
             seconds * 1_000 * metrics.slots,
         );
+        // ADR-0014: der Fixaufwand faellt **je Quantum** an. Er ist damit der
+        // direkte Nachweis, ob wirklich zerlegt wurde — und wie fein.
+        println!(
+            "  Zerlegung: Sockel {} ms, Prefill {} ms, Dekodierung {} ms, laengster Kontext {} Token, abgelehnt {}",
+            metrics.generative_fixed_us / 1_000,
+            metrics.generative_prefill_us / 1_000,
+            metrics.generative_decode_us / 1_000,
+            metrics.generative_context_tokens,
+            metrics.decomposition_refused,
+        );
     }
 
     if let Some(path) = env("VIG_MIX_OUT") {

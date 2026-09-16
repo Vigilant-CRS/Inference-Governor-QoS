@@ -368,15 +368,16 @@ enum Scope {
 /// Ein reservierter Registrierungs- oder Abmeldeaufruf.
 ///
 /// [`Reservation::confirm`] bucht ihn, nachdem das Backend bestaetigt hat.
-/// Jeder andere Weg — Backendfehler, abgebrochene Aufgabe — gibt die
-/// Reservierung beim Fallenlassen zurueck, und der gebuchte Stand bleibt, wie
-/// er vorher war.
+/// Before dispatch, dropping it returns the reservation. After dispatch only
+/// a confirmed outcome may release it: a lost response does not prove that
+/// registration or unregistration did not take effect on the backend.
 #[derive(Debug)]
-#[must_use = "eine fallengelassene Reservierung ist sofort zurueckgegeben"]
+#[must_use = "die Reservierung muss bestaetigt oder nachweislich abgelehnt werden"]
 pub struct Reservation {
     book: Arc<Mutex<Book>>,
     scope: Scope,
     settled: bool,
+    dispatched: bool,
 }
 
 impl Reservation {
@@ -385,7 +386,18 @@ impl Reservation {
             book: Arc::clone(book),
             scope,
             settled: false,
+            dispatched: false,
         }
+    }
+
+    /// Marks the point after which the backend may have changed its state.
+    pub fn dispatched(&mut self) {
+        self.dispatched = true;
+    }
+
+    /// Releases a reservation after a definitive rejection by the backend.
+    pub fn reject(mut self) {
+        self.dispatched = false;
     }
 
     /// Das Backend hat bestaetigt: die Reservierung wird gebucht.
@@ -414,7 +426,7 @@ impl Reservation {
 
 impl Drop for Reservation {
     fn drop(&mut self) {
-        if self.settled {
+        if self.settled || self.dispatched {
             return;
         }
         let mut book = lock(&self.book);

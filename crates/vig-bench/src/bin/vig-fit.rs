@@ -79,7 +79,9 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
-use vig_bench::workload::{InputSpec, Integrity, StreamDef, StreamReport, connect, drive};
+use vig_bench::workload::{
+    InputSpec, Integrity, StreamDef, StreamReport, connect, drive, drive_routed,
+};
 use vig_config::Config;
 use vig_gateway::{GatewayService, MonotonicClock, actor};
 use vig_protocol_oip::inference::ModelMetadataRequest;
@@ -415,12 +417,9 @@ async fn run() {
     }
 
     // --- Eingaben vorbereiten: eine Nullnutzlast je Modell, aus den Metadaten
-    let client = vig_backend_triton::TritonClient::new(&base.backend_endpoint);
-    let health = client.health().await.expect("Backend erreichbar");
-    assert!(health.ready, "das Backend meldet sich als nicht bereit");
-
     let mut inputs: HashMap<String, InputSpec> = HashMap::new();
     let mut physical: HashMap<String, String> = HashMap::new();
+    let mut targets: HashMap<String, String> = HashMap::new();
     for (index, logical) in base.model_names.iter().enumerate() {
         let model = vig_core::ModelIdx(u16::try_from(index).unwrap_or(0));
         let name = base
@@ -429,6 +428,8 @@ async fn run() {
             .to_owned();
         let endpoint = base.endpoint_of(model).to_owned();
         let per_model = vig_backend_triton::TritonClient::new(endpoint.as_str());
+        let health = per_model.health().await.expect("Backend erreichbar");
+        assert!(health.ready, "das Backend meldet sich als nicht bereit");
         let metadata = per_model
             .raw()
             .await
@@ -461,6 +462,7 @@ async fn run() {
             },
         );
         physical.insert(logical.clone(), name);
+        targets.insert(logical.clone(), endpoint);
     }
 
     // --- Messen ------------------------------------------------------------
@@ -505,7 +507,17 @@ async fn run() {
         let direct = match arms {
             Arms::Both => {
                 print!(" direkt …");
-                Some(drive(&base.backend_endpoint, &defs(false), duration, false).await)
+                let streams = defs(false);
+                let endpoints: Vec<&str> = streams
+                    .iter()
+                    .map(|stream| {
+                        targets
+                            .get(stream.name)
+                            .expect("Modellendpunkt vorhanden")
+                            .as_str()
+                    })
+                    .collect();
+                Some(drive_routed(&endpoints, &streams, duration, false).await)
             }
             Arms::Governed => None,
         };

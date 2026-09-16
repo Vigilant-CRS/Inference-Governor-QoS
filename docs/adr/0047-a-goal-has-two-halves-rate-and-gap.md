@@ -173,6 +173,21 @@ sich sauber:
   verschwinden diese Abweisungen vollstaendig. Das deckt die Blockierpruefung
   ab — sie schuetzt seither auch Stroeme **mit Zusage**, nicht nur bewachte
   Klassen.
+
+  **Der wirksamste Ausweg stand dabei die ganze Zeit im Kern und war in keiner
+  Konfiguration eingeschaltet: die kooperativen Quanten aus ADR-0014.** Mit
+  `cooperative` laeuft derselbe 195-ms-Auftrag in rund fuenf Stuecken, und
+  zwischen zweien ist der Slot frei. Gemessen am 16.09.2026 mit derselben
+  Last: die Unmachbarkeits-Abweisungen fallen von 221 auf 0, die geschuetzte
+  Kamera bekommt 891 statt 795 von 910 Bildern, und die Zusage des
+  nachrangigen Stroms steigt von 361 auf 689 Promille — bei gleicher
+  Gesamtrechenzeit. Der Preis: das Sprachmodell erzeugt rund 1554 statt 2640
+  Token, weil seine Zeit an die Kameras geht
+  (`InferenceQoS-runtime/uebergabe/quanten-2026-09-16.md`).
+
+  Die Blockierpruefung ist damit die **zweite** Verteidigungslinie — fuer
+  Modelle, die sich nicht zerlegen lassen. Ihr Befund nennt jetzt zuerst
+  `cooperative:`.
 * **Kapazitaet.** Danach bleibt ein gradueller Rest (645 statt 800 ‰) ohne
   eine einzige Unmachbarkeit. Das ist eine Frage der Zulassungsrechnung und
   offen: sie kennt bewachte Arbeit, Budgets und Zusagen — nicht die

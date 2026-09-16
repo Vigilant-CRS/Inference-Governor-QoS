@@ -70,6 +70,16 @@ concurrent registrations cannot exceed `max_shm_regions`; a second
 registration or unregistration of a name whose call is still running is
 answered with `ABORTED`.
 
+After a request has been sent, a lost connection or response leaves its outcome
+unknown. The reservation remains held, including its segment ownership and
+capacity, until the backend state can be reconciled. A definitive rejection
+such as `INVALID_ARGUMENT` releases it. Automatic reconciliation of these
+uncertain registrations is not implemented: affected names remain `ABORTED`,
+and uncertain registrations still consume the region limit. Recovery requires
+controlled reconciliation or reinitialization of both backend and governor
+with clients stopped; merely retrying under another name must not bypass the
+reservation. This also applies to an uncertain unregister-all operation.
+
 **Payload budget.** `max_inflight_mib` counts every request that carries bytes,
 including unconfigured models passed through in open mode.
 

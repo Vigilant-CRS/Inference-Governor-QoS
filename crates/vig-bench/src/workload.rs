@@ -347,6 +347,26 @@ pub async fn drive(
     duration: Duration,
     via_governor: bool,
 ) -> Vec<StreamReport> {
+    let endpoints = vec![endpoint; streams.len()];
+    drive_routed(&endpoints, streams, duration, via_governor).await
+}
+
+/// Runs streams on their corresponding backend endpoints with one time origin.
+/// A missing or unreachable endpoint produces a disconnected, invalid report.
+/// Connections are established before the measurement window starts.
+pub async fn drive_routed(
+    endpoints: &[&str],
+    streams: &[StreamDef],
+    duration: Duration,
+    via_governor: bool,
+) -> Vec<StreamReport> {
+    let mut clients = Vec::with_capacity(streams.len());
+    for index in 0..streams.len() {
+        clients.push(match endpoints.get(index) {
+            Some(endpoint) => try_connect(endpoint).await.ok(),
+            None => None,
+        });
+    }
     let origin = Instant::now();
     let core_duration = vig_core::Duration::from_nanos_unbounded(
         u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX),
@@ -382,7 +402,7 @@ pub async fn drive(
         // Ist das Ziel gerade weg, faellt dieser Strom fuer dieses Fenster aus
         // und meldet null Lieferungen — der Lauf geht weiter. Der Bericht sagt
         // es in `connected`, damit niemand die Nullen als Messung liest.
-        let Ok(client) = try_connect(endpoint).await else {
+        let Some(client) = clients.get_mut(index).and_then(Option::take) else {
             continue;
         };
         if let Some(flag) = connected.get_mut(index) {
@@ -823,6 +843,40 @@ pub async fn try_connect(
 mod tests {
     use super::{Burst, InputSpec, build_request};
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn routed_streams_reach_their_own_backend() {
+        use super::{StreamDef, drive_routed};
+        use crate::backend::{self, Backend};
+        use std::collections::HashMap;
+        use std::sync::atomic::Ordering;
+
+        let first = Arc::new(Backend::new(1, HashMap::new(), 1));
+        let second = Arc::new(Backend::new(1, HashMap::new(), 2));
+        let a = backend::start(Arc::clone(&first)).await.to_string();
+        let b = backend::start(Arc::clone(&second)).await.to_string();
+        let stream = |name| StreamDef {
+            name,
+            model: name,
+            period: ms(20),
+            max_age: ms(100),
+            in_flight_cap: 1,
+            input: None,
+            text: None,
+            pump: false,
+            burst: None,
+        };
+        let reports = drive_routed(&[&a, &b], &[stream("a"), stream("b")], ms(200), false).await;
+        assert!(
+            reports
+                .iter()
+                .all(|report| report.integrity(false).is_valid())
+        );
+        for (report, backend) in reports.iter().zip([first, second]) {
+            assert!(report.delivered > 0);
+            assert_eq!(backend.executed.load(Ordering::Relaxed), report.delivered);
+        }
+    }
     use std::time::Duration;
 
     fn ms(v: u64) -> Duration {

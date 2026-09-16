@@ -187,11 +187,11 @@ fn shm_refusal(name: &str, refusal: Refusal) -> Status {
 /// Abbruch die Reservierung frei, obwohl das Backend schon registriert hat,
 /// waere das Segment im Backend belegt und hier frei — fuer jeden anderen
 /// Aufrufer (Review R02, R07). Scheitert der Aufruf, oder wird die Aufgabe
-/// selbst abgebrochen, gibt die fallengelassene Reservierung ihren Platz
-/// zurueck. Ein Backend, das nie antwortet, haelt sie so lange, wie seine
-/// Verbindung besteht; das ist die vorsichtige Seite.
+/// selbst abgebrochen, bleibt eine bereits versandte Reservierung bei
+/// unklarem Ausgang gesperrt. Eine verlorene Antwort beweist keine
+/// Ruecknahme im Backend. Nur eine ausdrueckliche Ablehnung gibt sie frei.
 async fn settle_shm<T, F>(
-    reservation: crate::shm::Reservation,
+    mut reservation: crate::shm::Reservation,
     call: F,
 ) -> Result<Response<T>, Status>
 where
@@ -199,9 +199,32 @@ where
     F: Future<Output = Result<Response<T>, Status>> + Send + 'static,
 {
     let task = tokio::spawn(async move {
-        let response = call.await?;
-        reservation.confirm();
-        Ok(response)
+        reservation.dispatched();
+        match call.await {
+            Ok(response) => {
+                reservation.confirm();
+                Ok(response)
+            }
+            Err(status) => {
+                // These are explicit request rejections. Transport failures,
+                // cancellation and internal failures leave the outcome unknown.
+                if matches!(
+                    status.code(),
+                    tonic::Code::InvalidArgument
+                        | tonic::Code::NotFound
+                        | tonic::Code::AlreadyExists
+                        | tonic::Code::PermissionDenied
+                        | tonic::Code::Unauthenticated
+                        | tonic::Code::OutOfRange
+                        | tonic::Code::Unimplemented
+                        | tonic::Code::ResourceExhausted
+                        | tonic::Code::FailedPrecondition
+                ) {
+                    reservation.reject();
+                }
+                Err(status)
+            }
+        }
     });
     task.await
         .map_err(|e| Status::unavailable(format!("Shared-Memory-Aufruf abgebrochen: {e}")))?
@@ -1046,6 +1069,51 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
 
     use super::*;
+
+    #[tokio::test]
+    async fn an_uncertain_shm_registration_keeps_the_segment_reserved() {
+        let registry = ShmRegistry::new();
+        let region = |owner| Region {
+            key: "/vig_uncertain".to_owned(),
+            byte_size: 64,
+            offset: 0,
+            cuda: false,
+            owner: crate::auth::Identity(owner),
+        };
+        let reservation = registry.reserve_registration("a", region(7), true).unwrap();
+        // The server may have applied registration before the connection
+        // failed. A transport error proves neither success nor rollback.
+        let result: Result<Response<()>, Status> = settle_shm(reservation, async {
+            Err(Status::unavailable("response lost after registration"))
+        })
+        .await;
+        assert!(result.is_err());
+        assert!(matches!(
+            registry.reserve_registration("b", region(9), true),
+            Err(Refusal::ForeignSegment)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_rejected_shm_registration_returns_its_reservation() {
+        let registry = ShmRegistry::with_limit(1);
+        let region = Region {
+            key: "/vig_rejected".to_owned(),
+            byte_size: 64,
+            offset: 0,
+            cuda: false,
+            owner: crate::auth::Identity(7),
+        };
+        let reservation = registry
+            .reserve_registration("a", region.clone(), true)
+            .unwrap();
+        let result: Result<Response<()>, Status> = settle_shm(reservation, async {
+            Err(Status::invalid_argument("unsupported region"))
+        })
+        .await;
+        assert!(result.is_err());
+        assert!(registry.reserve_registration("a", region, true).is_ok());
+    }
 
     fn ms(v: u64) -> Duration {
         Duration::from_millis(v).unwrap()
