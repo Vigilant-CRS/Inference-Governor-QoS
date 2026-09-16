@@ -1094,6 +1094,33 @@ pub struct ContractConfig {
     /// Klassen, nie von bewachter Arbeit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_runtime: Option<MinRuntimeConfig>,
+    /// Die Zusage dieses Stroms (ADR-0047).
+    ///
+    /// „98 % der Zyklen frisch, und nie laenger als eine Sekunde nichts."
+    /// Ordnet **innerhalb** der Klasse um, nie darueber. Ohne diese Zeile
+    /// plant der Governor wie bisher.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objective: Option<ObjectiveConfig>,
+}
+
+/// Die Zusage in der Konfiguration (ADR-0047).
+///
+/// Zwei Haelften, beide einzeln optional, mindestens eine muss dastehen: der
+/// **Anteil** sagt, wie viel im Fenster ankommt, die **Luecke**, wie lange nie
+/// nichts ankommt. Ein Anteil allein sagt nichts ueber die Verteilung — 20 %
+/// koennten acht Sekunden Stille und dann zwei Sekunden Vollgas sein.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObjectiveConfig {
+    /// Anteil frischer Zyklen im Fenster, in Promille. Ohne Angabe: keine
+    /// Anteilszusage, dann zaehlt allein die Luecke.
+    #[serde(default)]
+    pub coverage_permille: u16,
+    /// Die Laenge des gleitenden Fensters, hoechstens 60000.
+    pub window_ms: u64,
+    /// Die laengste erlaubte Zeit ohne Ergebnis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_gap_ms: Option<u64>,
 }
 
 /// Das Mindestlaufzeitbudget in der Konfiguration (ADR-0046).
@@ -1700,6 +1727,55 @@ impl Resolved {
             .filter_map(|c| c.min_runtime)
             .map(|b| b.slot_share_permille())
             .fold(0_u64, u64::saturating_add);
+        let slots = u64::try_from(self.slots.regular_len()).unwrap_or(1).max(1);
+        total.checked_div(slots).unwrap_or(0)
+    }
+
+    /// Der Anteil der Slots, den die Zusagen nachrangiger Stroeme
+    /// beanspruchen, in Promille (ADR-0047).
+    ///
+    /// `Summe(z_i * C_i / T_i)` ueber alle **nicht bewachten** Modelle mit
+    /// Zusage, geteilt durch die regulaeren Slots — dieselbe Einheit wie
+    /// [`Self::protected_utilization_permille`], damit sich beides addieren
+    /// laesst.
+    ///
+    /// Zwei Entscheidungen stecken darin:
+    ///
+    /// * **Bewachte Stroeme zaehlen nicht doppelt.** Ein `protected`-Strom mit
+    ///   Zusage steckt ueber seine Klasse schon vollstaendig in der
+    ///   geschuetzten Auslastung; seine Zusage ordnet nur innerhalb der Klasse
+    ///   um und fordert keine zusaetzliche Kapazitaet. Beides zu addieren
+    ///   hiesse, die sorgfaeltigste Konfiguration abzulehnen.
+    /// * **Es zaehlt die strengere Haelfte.** `z_i` ist
+    ///   [`Objective::effective_permille`]: eine Luecke von einer Sekunde
+    ///   verlangt bei 33 ms Takt mindestens 33 ‰, auch wenn der Anteil
+    ///   darunter steht. Ohne Takt traegt die Luecke die ganze Rechnung —
+    ///   `C_i / max_gap_i`.
+    #[must_use]
+    pub fn objective_utilization_permille(&self) -> u64 {
+        let mut total = 0_u64;
+        for contract in self.contracts.iter() {
+            if contract.criticality.is_guarded() {
+                continue;
+            }
+            let (Some(objective), Some(best)) = (contract.objective, contract.variants.get(0))
+            else {
+                continue;
+            };
+            let Ok(runtime) = best.profile.conservative_at(0, self.margin) else {
+                continue;
+            };
+            // Ohne Takt gibt es keine Zyklen; dann ist die Luecke der Takt.
+            let Some(period) = contract.period.or(objective.max_gap) else {
+                continue;
+            };
+            let share = runtime
+                .as_nanos()
+                .saturating_mul(u64::from(objective.effective_permille(period)))
+                .checked_div(period.as_nanos().max(1))
+                .unwrap_or(0);
+            total = total.saturating_add(share);
+        }
         let slots = u64::try_from(self.slots.regular_len()).unwrap_or(1).max(1);
         total.checked_div(slots).unwrap_or(0)
     }
@@ -3065,11 +3141,94 @@ impl ModelConfig {
         }
     }
 
+    /// Die Zeiten des Vertrags aus ihren Millisekundenangaben.
+    ///
+    /// Sie gehoeren zusammen, und sie teilen eine Regel: „nicht angegeben" und
+    /// „angegeben und unzulaessig" duerfen nicht dasselbe Ergebnis haben. Ein
+    /// still verworfenes `max_age_ms` hiesse, dieser Strom altert nie und
+    /// veraltete Frames werden nie verworfen — genau die Regel, die das
+    /// Produkt ausmacht, waere durch einen Tippfehler abgeschaltet.
+    fn build_times(
+        &self,
+        path: &str,
+        findings: &mut Vec<Located>,
+    ) -> (Duration, Option<Duration>, Option<Duration>) {
+        let mut fail = |e: ConfigError, sub: &str| {
+            findings.push(e.at(format!("{path}.{sub}")));
+        };
+        let deadline = match duration_ms(self.contract.deadline_ms, "deadline_ms") {
+            Ok(d) => d,
+            Err(e) => {
+                fail(e, "contract.deadline_ms");
+                Duration::from_nanos_unbounded(1)
+            }
+        };
+        let period = match self.contract.period_ms.map(|p| duration_ms(p, "period_ms")) {
+            Some(Ok(d)) => Some(d),
+            Some(Err(e)) => {
+                fail(e, "contract.period_ms");
+                None
+            }
+            None => None,
+        };
+        let max_age = match self
+            .contract
+            .max_age_ms
+            .map(|a| duration_ms(a, "max_age_ms"))
+        {
+            Some(Ok(d)) => Some(d),
+            Some(Err(e)) => {
+                fail(e, "contract.max_age_ms");
+                None
+            }
+            None => None,
+        };
+        (deadline, period, max_age)
+    }
+
+    /// Die Zusage aus der Konfiguration (ADR-0047).
+    ///
+    /// Wie das Budget: hier entstehen nur die Zeiten, geprueft wird gegen die
+    /// Periode im Vertrag — dort steht sie.
+    fn build_objective(
+        &self,
+        path: &str,
+        findings: &mut Vec<Located>,
+    ) -> Option<vig_core::objective::Objective> {
+        let raw = self.contract.objective?;
+        let window = match duration_ms(raw.window_ms, "objective.window_ms") {
+            Ok(window) => window,
+            Err(e) => {
+                findings.push(e.at(format!("{path}.contract.objective")));
+                return None;
+            }
+        };
+        let max_gap = match raw.max_gap_ms {
+            None => None,
+            Some(gap) => match duration_ms(gap, "objective.max_gap_ms") {
+                Ok(gap) => Some(gap),
+                Err(e) => {
+                    findings.push(e.at(format!("{path}.contract.objective")));
+                    return None;
+                }
+            },
+        };
+        Some(vig_core::objective::Objective {
+            coverage_permille: raw.coverage_permille,
+            window,
+            max_gap,
+        })
+    }
+
     fn to_contract(
         &self,
         path: &str,
         findings: &mut Vec<Located>,
     ) -> Option<(ModelContract, Vec<String>)> {
+        // Vor der Closure: beide leihen `findings` aus, und zwei Ausleihen
+        // zugleich gibt es nicht.
+        let (deadline, period, max_age) = self.build_times(path, findings);
+
         let mut fail = |e: ConfigError, sub: &str| {
             findings.push(e.at(format!("{path}.{sub}")));
         };
@@ -3096,38 +3255,6 @@ impl ModelConfig {
             }
         };
 
-        let deadline = match duration_ms(self.contract.deadline_ms, "deadline_ms") {
-            Ok(d) => d,
-            Err(e) => {
-                fail(e, "contract.deadline_ms");
-                Duration::from_nanos_unbounded(1)
-            }
-        };
-        // Beide Werte sind optional — aber „nicht angegeben" und „angegeben
-        // und unzulaessig" duerfen nicht dasselbe Ergebnis haben. Ein still
-        // verworfenes `max_age_ms` heisst: dieser Strom altert nie, veraltete
-        // Frames werden nie verworfen. Genau die Regel, die das Produkt
-        // ausmacht, waere dann durch einen Tippfehler abgeschaltet.
-        let period = match self.contract.period_ms.map(|p| duration_ms(p, "period_ms")) {
-            Some(Ok(d)) => Some(d),
-            Some(Err(e)) => {
-                fail(e, "contract.period_ms");
-                None
-            }
-            None => None,
-        };
-        let max_age = match self
-            .contract
-            .max_age_ms
-            .map(|a| duration_ms(a, "max_age_ms"))
-        {
-            Some(Ok(d)) => Some(d),
-            Some(Err(e)) => {
-                fail(e, "contract.max_age_ms");
-                None
-            }
-            None => None,
-        };
         let cooperative = match self.cooperative.map(CooperativeConfig::resolve) {
             Some(Ok(c)) => Some(c),
             Some(Err(e)) => {
@@ -3156,6 +3283,7 @@ impl ModelConfig {
         };
 
         let min_runtime = self.build_min_runtime(path, findings);
+        let objective = self.build_objective(path, findings);
 
         let contract = ModelContract {
             // Bis das Backend etwas anderes sagt.
@@ -3176,6 +3304,7 @@ impl ModelConfig {
             cooperative,
             extension,
             min_runtime,
+            objective,
         };
 
         if let Err(e) = contract.validate() {

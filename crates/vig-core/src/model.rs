@@ -3,6 +3,7 @@
 use crate::arrayvec::ArrayVec;
 use crate::contract_ext::ContractExtension;
 use crate::ids::{MAX_VARIANTS, VariantIdx};
+use crate::objective::{Objective, ObjectiveError};
 use crate::profile::VariantProfile;
 use crate::queue::{QueueConfig, QueueConfigError};
 use crate::request::Criticality;
@@ -159,6 +160,8 @@ pub enum ContractError {
     Extension(crate::contract_ext::ExtensionError),
     /// Das Mindestlaufzeitbudget ist unzulaessig (ADR-0046).
     RuntimeBudget(RuntimeBudgetError),
+    /// Die Zusage ist unzulaessig (ADR-0047).
+    Objective(ObjectiveError),
 }
 
 impl From<crate::contract_ext::ExtensionError> for ContractError {
@@ -170,6 +173,12 @@ impl From<crate::contract_ext::ExtensionError> for ContractError {
 impl From<RuntimeBudgetError> for ContractError {
     fn from(e: RuntimeBudgetError) -> Self {
         Self::RuntimeBudget(e)
+    }
+}
+
+impl From<ObjectiveError> for ContractError {
+    fn from(e: ObjectiveError) -> Self {
+        Self::Objective(e)
     }
 }
 
@@ -208,6 +217,7 @@ impl core::fmt::Display for ContractError {
             Self::Queue(e) => write!(f, "Queue-Konfiguration: {e}"),
             Self::Extension(e) => write!(f, "Vertragszusatz: {e}"),
             Self::RuntimeBudget(e) => write!(f, "{e}"),
+            Self::Objective(e) => write!(f, "{e}"),
         }
     }
 }
@@ -432,6 +442,12 @@ pub struct ModelContract {
     /// dieses Modells ueber `normal` und unter `high`. `None` ist die
     /// bisherige Ordnung, bitgleich.
     pub min_runtime: Option<RuntimeBudget>,
+    /// Die Zusage dieses Stroms, falls eine vereinbart ist (ADR-0047).
+    ///
+    /// Anteil und Luecke — „98 % der Zyklen frisch" und „nie laenger als eine
+    /// Sekunde nichts". Sie ordnet **innerhalb** der Klasse um, nie darueber
+    /// (NV-24). `None` ist die bisherige Ordnung, bitgleich.
+    pub objective: Option<Objective>,
 }
 
 impl ModelContract {
@@ -491,6 +507,12 @@ impl ModelContract {
 
         if let Some(budget) = self.min_runtime {
             budget.validate(self.criticality)?;
+        }
+
+        // Gegen die Periode, denn der Anteil zaehlt Zyklen: ohne Takt gibt es
+        // keine, und eine Luecke unter einem Takt ist nicht erfuellbar.
+        if let Some(objective) = self.objective {
+            objective.validate(self.period)?;
         }
 
         if let Some(cooperative) = self.cooperative {

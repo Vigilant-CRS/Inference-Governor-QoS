@@ -384,6 +384,44 @@ fn render_scalar(out: &mut String, name: &str, help: &str, value: u64) {
 /// Getrennt von [`render_derived`], weil sie als Block wachsen: jede neue
 /// Verbrauchersicht kommt hier dazu, und eine Funktion, die zwei Themen
 /// mischt, wird von beiden laenger.
+/// Die Zusage je Strom, in zwei Haelften (ADR-0047).
+///
+/// Anteil und Luecke sind die beiden Haelften der Zusage; `slack` und
+/// `deficit` sind dieselbe Groesse von beiden Seiten. Haelt die Zusage, steht
+/// die Luft in `slack`; ist sie gerissen, steht der Betrag in `deficit`. Zwei
+/// vorzeichenlose Reihen statt einer vorzeichenbehafteten: so muss keine
+/// Auswertung ein Vorzeichen deuten.
+fn render_objective_series(out: &mut String, metrics: &Metrics) {
+    render_per_model(
+        out,
+        "vig_objective_coverage_permille",
+        "Gemessener Anteil erfuellter Zyklen im Zielfenster je Modell; 0 ohne Zusage.",
+        &metrics.objective_coverage_permille,
+        metrics.models,
+    );
+    render_per_model(
+        out,
+        "vig_objective_gap_us",
+        "Zeit seit dem letzten frischen Ergebnis je Modell mit Zusage.",
+        &metrics.objective_gap_us,
+        metrics.models,
+    );
+    render_per_model(
+        out,
+        "vig_objective_slack_us",
+        "Verbleibende Luft bis zum Bruch der Zusage je Modell; 0 wenn gerissen.",
+        &metrics.objective_slack_us,
+        metrics.models,
+    );
+    render_per_model(
+        out,
+        "vig_objective_deficit_us",
+        "Wie weit die Zusage gerissen ist je Modell; 0 solange sie haelt.",
+        &metrics.objective_deficit_us,
+        metrics.models,
+    );
+}
+
 fn render_per_model_series(out: &mut String, metrics: &Metrics) {
     // Verbrauchersicht: was eine Abdeckungszahl nicht zeigt. Zehn verstreute
     // Ausfaelle und ein Block von zehn ergeben dieselbe Rate — fuer eine
@@ -449,6 +487,7 @@ fn render_per_model_series(out: &mut String, metrics: &Metrics) {
         &metrics.runtime_budget_dispatches,
         metrics.models,
     );
+    render_objective_series(out, metrics);
     render_per_model(
         out,
         "vig_weakly_hard_violated",

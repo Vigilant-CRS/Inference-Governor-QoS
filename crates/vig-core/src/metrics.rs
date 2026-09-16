@@ -100,6 +100,29 @@ pub struct Metrics {
     /// Dispatches, die mit verbleibendem Budget ueber `normal` eingeordnet
     /// waren, je Modell (Zaehler).
     pub runtime_budget_dispatches: [u32; MAX_MODELS],
+    /// Der gemessene Anteil erfuellter Zyklen im Zielfenster, in Promille
+    /// (ADR-0047). Null, wo keine Zusage vereinbart ist.
+    ///
+    /// Gezaehlt wird, was beim Verbraucher ankam und dort noch trug — nicht,
+    /// was abgeschickt wurde. Alles andere waere eine Zusage, die sich selbst
+    /// bestaetigt.
+    pub objective_coverage_permille: [u32; MAX_MODELS],
+    /// Die Zeit seit dem letzten frischen Ergebnis, in Mikrosekunden.
+    ///
+    /// Die zweite Haelfte der Zusage: ein Anteil allein sagt nichts ueber die
+    /// Verteilung, und diese Reihe zeigt, ob ein Strom gerade laenger leer
+    /// laeuft, als er darf.
+    pub objective_gap_us: [u32; MAX_MODELS],
+    /// Die verbleibende Luft bis zum Bruch der Zusage, in Mikrosekunden.
+    ///
+    /// Null, sobald die Zusage gerissen ist — dann steht der Betrag in
+    /// [`Self::objective_deficit_us`]. Zwei vorzeichenlose Reihen statt einer
+    /// vorzeichenbehafteten: so bleibt jede Reihe fuer sich lesbar, und keine
+    /// Auswertung muss ein Vorzeichen deuten.
+    pub objective_slack_us: [u32; MAX_MODELS],
+    /// Wie weit die Zusage bereits gerissen ist, in Mikrosekunden. Null,
+    /// solange sie haelt.
+    pub objective_deficit_us: [u32; MAX_MODELS],
     /// Wie oft die zustandsabhaengige Prognose mit dem bisherigen Weg
     /// verglichen wurde (NV-06).
     pub predictor_comparisons: u64,
@@ -432,6 +455,10 @@ impl Metrics {
             runtime_budget_window_us,
             runtime_budget_used_us,
             runtime_budget_dispatches,
+            objective_coverage_permille,
+            objective_gap_us,
+            objective_slack_us,
+            objective_deficit_us,
             predictor_comparisons,
             predictor_fallbacks,
             predictor_more_conservative,
@@ -568,6 +595,13 @@ impl Metrics {
                 &mut self.runtime_budget_dispatches,
                 &runtime_budget_dispatches,
             ),
+            (
+                &mut self.objective_coverage_permille,
+                &objective_coverage_permille,
+            ),
+            (&mut self.objective_gap_us, &objective_gap_us),
+            (&mut self.objective_slack_us, &objective_slack_us),
+            (&mut self.objective_deficit_us, &objective_deficit_us),
             (&mut self.variant_upgrades, &variant_upgrades),
             (&mut self.variant_downgrades, &variant_downgrades),
             (&mut self.arrival_period_us, &arrival_period_us),

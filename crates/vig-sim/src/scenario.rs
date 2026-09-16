@@ -148,6 +148,7 @@ impl StreamSpec {
             // Ein Zusatz haette hier keine Beobachtungsquelle (NV-02).
             extension: None,
             min_runtime: None,
+            objective: None,
         }
     }
 }

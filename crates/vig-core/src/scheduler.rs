@@ -32,6 +32,7 @@ use crate::interference::{Interference, InterferenceVerdict};
 use crate::learning::{FactorLearner, MarginLearning};
 use crate::metrics::Metrics;
 use crate::model::{ContractError, ModelContract};
+use crate::objective::{CoverageLedger, Objective};
 use crate::overload::{OverloadController, OverloadState, PressureSample};
 use crate::predictor::{Mode, Predictor, ShadowLedger, StateClass};
 use crate::profile::SafetyMargin;
@@ -39,7 +40,7 @@ use crate::queue::{DropReason, MAX_QUEUE_CAPACITY, ModelQueue, QueueConfigError}
 use crate::request::{Criticality, RequestDescriptor, RequestState};
 use crate::runtime_budget::{RuntimeBudgetError, RuntimeLedger};
 use crate::slots::{ModelMask, SlotSet};
-use crate::time::{Duration, Instant};
+use crate::time::{Duration, Instant, Slack};
 use crate::variant::{PlanningContext, Resolution, VariantState, resolve};
 
 /// Hoechstzahl gleichzeitig an das Backend uebergebener Requests.
@@ -354,6 +355,13 @@ pub struct Scheduler {
     /// `None`, wo kein Budget vereinbart ist — dann aendert sich an der
     /// Kandidatenwahl nichts.
     runtime_ledgers: [Option<RuntimeLedger>; MAX_MODELS],
+    /// Die Buchfuehrung je Zusage (ADR-0047).
+    ///
+    /// Angelegt wird sie **beim ersten Ereignis** eines Stroms, nicht beim
+    /// Bau: ein Strom, der noch nie dran war, ist nicht im Rueckstand, und
+    /// die Messung soll dort beginnen, wo es etwas zu messen gibt. `None`,
+    /// wo keine Zusage vereinbart ist — dann bleibt alles wie bisher.
+    coverage_ledgers: [Option<CoverageLedger>; MAX_MODELS],
     inflight: ArrayVec<Dispatched, MAX_INFLIGHT>,
     metrics: Metrics,
 }
@@ -412,32 +420,7 @@ impl Scheduler {
             }
         }
 
-        // ADR-0046: je Mindestlaufzeitbudget eine Buchfuehrung. Ob die Slots
-        // das Budget ueberhaupt rechnen koennen, steht erst hier fest — der
-        // Vertrag allein kennt sie nicht.
-        let mut runtime_ledgers: [Option<RuntimeLedger>; MAX_MODELS] = [None; MAX_MODELS];
-        for (i, contract) in contracts.iter().enumerate() {
-            let Some(budget) = contract.min_runtime else {
-                continue;
-            };
-            let regular = slots.regular_len();
-            if !budget.fits_slots(regular) {
-                return Err(SchedulerError::Contract {
-                    model: i,
-                    error: RuntimeBudgetError::BeyondSlots { slots: regular }.into(),
-                });
-            }
-            if let Some(cell) = runtime_ledgers.get_mut(i) {
-                *cell = Some(RuntimeLedger::new(budget));
-            }
-            let micros = |d: Duration| u32::try_from(d.as_micros()).unwrap_or(u32::MAX);
-            if let Some(cell) = metrics.runtime_budget_granted_us.get_mut(i) {
-                *cell = micros(budget.budget);
-            }
-            if let Some(cell) = metrics.runtime_budget_window_us.get_mut(i) {
-                *cell = micros(budget.window);
-            }
-        }
+        let runtime_ledgers = Self::build_runtime_ledgers(&contracts, &slots, &mut metrics)?;
 
         // Die Prognosetabelle bekommt die Form der Konfiguration, nicht die
         // des Maximums: vier Modelle mit je einer Variante brauchen 24 Zellen
@@ -475,6 +458,7 @@ impl Scheduler {
             consecutive_misses: [0; MAX_MODELS],
             miss_windows,
             runtime_ledgers,
+            coverage_ledgers: [None; MAX_MODELS],
             predictor: Predictor::with_shape(models, variants, slot_count),
             hardware_state: StateClass::default(),
             profile_revision: 0,
@@ -1262,6 +1246,15 @@ impl Scheduler {
                 });
                 *cell = Some(latest);
             }
+
+            // ADR-0047: gebucht wird genau hier — ein gueltiges Ergebnis, das
+            // bei der Auslieferung noch trug. Frueher gebucht waere es eine
+            // Zusage, die sich selbst bestaetigt. Ohne vereinbartes
+            // Hoechstalter gibt es keine Frischegrenze; dann zaehlt jedes
+            // gueltige Ergebnis.
+            if expires.is_none_or(|e| e.as_nanos() > now.as_nanos()) {
+                self.record_coverage(index, now);
+            }
             return;
         }
 
@@ -1347,6 +1340,7 @@ impl Scheduler {
             }
         }
         self.publish_runtime_budgets(now);
+        self.publish_objectives(now);
         if let Some(wake) = self.next_wakeup(now) {
             sink.emit(Action::WakeAt(wake));
         }
@@ -1464,7 +1458,8 @@ impl Scheduler {
         let boosted = self.budget_boost(now);
 
         loop {
-            let Some((model, id)) = self.best_candidate(blocked.union(deferred), boosted) else {
+            let Some((model, id)) = self.best_candidate(now, blocked.union(deferred), boosted)
+            else {
                 return false;
             };
             // Kein Kredit heisst: **dieses** Modell kann jetzt nicht starten.
@@ -1851,7 +1846,14 @@ impl Scheduler {
                 profile_revision: self.profile_revision,
                 margin: self.margin_of(model),
                 now,
-                degrade: self.overload.state().forces_degradation(),
+                // ADR-0047, Randfall 7: wer hinter seiner Zusage liegt, senkt
+                // zuerst die eigene Qualitaet — erst danach verdraengt er
+                // einen Nachbarn. Die Mindestqualitaet bleibt unantastbar,
+                // dafuer sorgt die Variantenwahl selbst.
+                degrade: self.overload.state().forces_degradation()
+                    || self
+                        .objective_slack(model, now)
+                        .is_some_and(Slack::is_infeasible),
                 residual: if descriptor.criticality.is_guarded() {
                     self.active_residual()
                 } else {
@@ -2030,6 +2032,48 @@ impl Scheduler {
         }
     }
 
+    /// Je Mindestlaufzeitbudget eine Buchfuehrung (ADR-0046).
+    ///
+    /// Ob die Slots das Budget ueberhaupt rechnen koennen, steht erst hier
+    /// fest — der Vertrag allein kennt sie nicht. Und was vereinbart ist,
+    /// gehoert in den Metrikabzug, bevor der erste Auftrag laeuft: sonst
+    /// sieht ein Betreiber das Budget erst, wenn es schon gewirkt hat.
+    ///
+    /// # Errors
+    ///
+    /// [`SchedulerError::Contract`], wenn ein Budget mehr verlangt, als die
+    /// regulaeren Slots in einem Fenster rechnen koennen.
+    fn build_runtime_ledgers(
+        contracts: &ArrayVec<ModelContract, MAX_MODELS>,
+        slots: &SlotSet,
+        metrics: &mut Metrics,
+    ) -> Result<[Option<RuntimeLedger>; MAX_MODELS], SchedulerError> {
+        let mut ledgers: [Option<RuntimeLedger>; MAX_MODELS] = [None; MAX_MODELS];
+        for (i, contract) in contracts.iter().enumerate() {
+            let Some(budget) = contract.min_runtime else {
+                continue;
+            };
+            let regular = slots.regular_len();
+            if !budget.fits_slots(regular) {
+                return Err(SchedulerError::Contract {
+                    model: i,
+                    error: RuntimeBudgetError::BeyondSlots { slots: regular }.into(),
+                });
+            }
+            if let Some(cell) = ledgers.get_mut(i) {
+                *cell = Some(RuntimeLedger::new(budget));
+            }
+            let micros = |d: Duration| u32::try_from(d.as_micros()).unwrap_or(u32::MAX);
+            if let Some(cell) = metrics.runtime_budget_granted_us.get_mut(i) {
+                *cell = micros(budget.budget);
+            }
+            if let Some(cell) = metrics.runtime_budget_window_us.get_mut(i) {
+                *cell = micros(budget.window);
+            }
+        }
+        Ok(ledgers)
+    }
+
     /// Schreibt die gebuchte Zeit je Budget in den Metrikabzug.
     fn publish_runtime_budgets(&mut self, now: Instant) {
         for (ledger, cell) in self
@@ -2053,6 +2097,78 @@ impl Scheduler {
             .map(|ledger| ledger.used(now))
     }
 
+    /// Bucht ein erfuelltes Ergebnis auf die Zusage eines Stroms (ADR-0047).
+    ///
+    /// Der Zaehler entsteht beim ersten Ereignis, nicht beim Bau: ein Strom,
+    /// der noch nie dran war, ist nicht im Rueckstand.
+    fn record_coverage(&mut self, index: usize, now: Instant) {
+        let Some(objective) = self.contracts.get(index).and_then(|c| c.objective) else {
+            return;
+        };
+        if let Some(cell) = self.coverage_ledgers.get_mut(index) {
+            cell.get_or_insert_with(|| CoverageLedger::new(now))
+                .record(now, &objective);
+        }
+    }
+
+    /// Die Periode, gegen die eine Zusage rechnet.
+    ///
+    /// Ohne Takt zaehlt die Zusage keine Zyklen — dann traegt allein die
+    /// Luecke, und das Fenster dient nur noch als Saettigung.
+    fn objective_period(contract: &ModelContract, objective: &Objective) -> Duration {
+        contract.period.unwrap_or(objective.window)
+    }
+
+    /// Schreibt Anteil, Luecke und Slack je Zusage in den Metrikabzug.
+    fn publish_objectives(&mut self, now: Instant) {
+        for (i, contract) in self.contracts.iter().enumerate() {
+            let (Some(objective), Some(ledger)) = (
+                contract.objective,
+                self.coverage_ledgers.get(i).copied().flatten(),
+            ) else {
+                continue;
+            };
+            let period = Self::objective_period(contract, &objective);
+            let expected = ledger.expected(now, &objective, period);
+            let permille = ledger
+                .fulfilled(now, &objective)
+                .saturating_mul(1_000)
+                .checked_div(expected.max(1))
+                .unwrap_or(0);
+            let gap = now.as_nanos().saturating_sub(ledger.last_ok().as_nanos());
+            let slack = ledger.slack(now, &objective, period).as_nanos();
+
+            let micros =
+                |nanos: u64| u32::try_from(nanos.saturating_div(1_000)).unwrap_or(u32::MAX);
+            if let Some(cell) = self.metrics.objective_coverage_permille.get_mut(i) {
+                *cell = u32::try_from(permille).unwrap_or(u32::MAX);
+            }
+            if let Some(cell) = self.metrics.objective_gap_us.get_mut(i) {
+                *cell = micros(gap);
+            }
+            if let Some(cell) = self.metrics.objective_slack_us.get_mut(i) {
+                *cell = micros(u64::try_from(slack.max(0)).unwrap_or(0));
+            }
+            if let Some(cell) = self.metrics.objective_deficit_us.get_mut(i) {
+                *cell = micros(u64::try_from(slack.min(0).saturating_neg()).unwrap_or(0));
+            }
+        }
+    }
+
+    /// Die verbleibende Luft bis zum Bruch der Zusage (ADR-0047).
+    ///
+    /// Negativ, wenn die Zusage bereits gerissen ist; `None`, wo keine
+    /// vereinbart ist oder der Strom noch nie etwas geliefert hat.
+    #[must_use]
+    pub fn objective_slack(&self, model: ModelIdx, now: Instant) -> Option<crate::time::Slack> {
+        let index = model.get();
+        let objective = self.contracts.get(index).and_then(|c| c.objective)?;
+        let ledger = self.coverage_ledgers.get(index).copied().flatten()?;
+        let contract = self.contracts.get(index)?;
+        let period = Self::objective_period(contract, &objective);
+        Some(ledger.slack(now, &objective, period))
+    }
+
     /// Der beste wartende Kandidat nach lexikographischer Ordnung (Spec 10.6).
     ///
     /// `boosted` sind die Modelle mit verbleibendem Mindestlaufzeitbudget
@@ -2060,19 +2176,28 @@ impl Scheduler {
     /// Ordnung die bisherige.
     fn best_candidate(
         &self,
+        now: Instant,
         vetoed: crate::slots::ModelMask,
         boosted: ModelMask,
     ) -> Option<(ModelIdx, RequestId)> {
-        // Der Schluessel ist (Rang, Pflichtzyklus, Deadline, Generationszeit).
-        // Der Rang ist die Kritikalitaet, zwischen `normal` und `high` um die
-        // Stufe fuer ein verbleibendes Budget erweitert (ADR-0046). Ohne
-        // Budget bildet er die Kritikalitaet streng monoton ab — die Ordnung
-        // ist dann bitgleich die alte.
+        // Der Schluessel ist (Rang, Pflichtzyklus, Slack, Deadline,
+        // Generationszeit). Der Rang ist die Kritikalitaet, zwischen `normal`
+        // und `high` um die Stufe fuer ein verbleibendes Budget erweitert
+        // (ADR-0046). Ohne Budget bildet er die Kritikalitaet streng monoton
+        // ab — die Ordnung ist dann bitgleich die alte.
         //
         // Der Pflichtzyklus steht **nach** dem Rang: er ordnet innerhalb einer
         // Klasse um, nie ueber Klassengrenzen (NV-24). Ist die Policy aus, ist
         // er fuer alle Modelle gleich und faellt damit heraus.
-        let mut best: Option<(u8, bool, Instant, Instant, ModelIdx, RequestId)> = None;
+        //
+        // Der Slack der Zusage (ADR-0047) steht an derselben Stelle und aus
+        // demselben Grund: innerhalb der Klasse, nie darueber. Wer am
+        // wenigsten Luft bis zum Bruch hat, geht zuerst. Ein Strom **ohne**
+        // Zusage zaehlt als unendlich geduldig und steht damit hinter jedem
+        // mit Zusage — wer einen Anspruch ausgesprochen hat, bekommt ihn.
+        // Sind es alle oder keiner, faellt die Stufe heraus und die Ordnung
+        // ist die bisherige.
+        let mut best: Option<(u8, bool, Slack, Instant, Instant, ModelIdx, RequestId)> = None;
 
         for (i, queue) in self.queues.iter().enumerate() {
             let model = ModelIdx(u16::try_from(i).unwrap_or(u16::MAX));
@@ -2092,9 +2217,13 @@ impl Scheduler {
                     .absolute_deadline
                     .unwrap_or(Instant::from_nanos(u64::MAX));
                 let mandatory = self.miss_aware_policy && self.next_cycle_is_mandatory(model);
+                let slack = self
+                    .objective_slack(model, now)
+                    .unwrap_or(Slack::from_nanos(i64::MAX));
                 let key = (
                     rank(descriptor.criticality, boosted.contains(model)),
                     mandatory,
+                    slack,
                     deadline,
                     descriptor.generation_time,
                     model,
@@ -2102,13 +2231,28 @@ impl Scheduler {
                 );
                 let better = match best {
                     None => true,
-                    Some((c, m, d, g, _, _)) => {
+                    Some((
+                        best_rank,
+                        best_mandatory,
+                        best_slack,
+                        best_deadline,
+                        best_born,
+                        _,
+                        _,
+                    )) => {
                         (
                             core::cmp::Reverse(key.0),
                             core::cmp::Reverse(key.1),
                             key.2,
                             key.3,
-                        ) < (core::cmp::Reverse(c), core::cmp::Reverse(m), d, g)
+                            key.4,
+                        ) < (
+                            core::cmp::Reverse(best_rank),
+                            core::cmp::Reverse(best_mandatory),
+                            best_slack,
+                            best_deadline,
+                            best_born,
+                        )
                     }
                 };
                 if better {
@@ -2116,7 +2260,7 @@ impl Scheduler {
                 }
             }
         }
-        best.map(|(_, _, _, _, model, id)| (model, id))
+        best.map(|(_, _, _, _, _, model, id)| (model, id))
     }
 
     /// Die naechste erwartete Ankunft jedes bewachten Modells.

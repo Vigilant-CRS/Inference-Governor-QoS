@@ -37,6 +37,7 @@ pub mod interference;
 pub mod learning;
 pub mod metrics;
 pub mod model;
+pub mod objective;
 pub mod overload;
 pub mod predictor;
 pub mod profile;

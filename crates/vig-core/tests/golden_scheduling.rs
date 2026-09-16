@@ -70,6 +70,7 @@ fn contract(
         cooperative: None,
         extension: None,
         min_runtime: None,
+        objective: None,
     }
 }
 

@@ -635,6 +635,12 @@ fn check_utilization(resolved: &Resolved) -> Verdict {
     let budgets = resolved.runtime_budget_permille();
     let budget_percent = budgets.checked_div(10).unwrap_or(0);
     let reserved = utilization.saturating_add(budgets);
+    // ADR-0047: Zusagen kommen obendrauf, werden aber getrennt gefuehrt.
+    // Eine Sammelsumme wuerde jede Meldung unscharf machen — der Betreiber
+    // soll lesen koennen, *woran* es liegt, nicht nur *dass* es klemmt.
+    let objectives = resolved.objective_utilization_permille();
+    let objective_percent = objectives.checked_div(10).unwrap_or(0);
+    let committed = reserved.saturating_add(objectives);
 
     if utilization > 1_000 {
         fail(&format!(
@@ -651,6 +657,29 @@ fn check_utilization(resolved: &Resolved) -> Verdict {
              bedient und bleiben so unerfuellt (ADR-0046)."
         ));
         Verdict::NotReady
+    } else if objectives > 0 && committed > 1_000 {
+        fail(&format!(
+            "OBJECTIVE_UNSCHEDULABLE: geschuetzte Auslastung {percent} % plus \
+             Mindestlaufzeitbudgets {budget_percent} % plus Zusagen \
+             {objective_percent} % ueber {slots} Slot(s) nicht tragbar. Die \
+             Zusagen werden aus dem Rest bedient und bleiben so unerfuellt \
+             (ADR-0047)."
+        ));
+        Verdict::NotReady
+    } else if objectives > 0 && committed > 800 {
+        warn(&format!(
+            "geschuetzte serialisierte Auslastung {percent} % plus \
+             Mindestlaufzeitbudgets {budget_percent} % plus Zusagen \
+             {objective_percent} %; fuer die uebrige nachrangige Arbeit bleibt \
+             kaum Reserve"
+        ));
+        Verdict::ReadyWithWarnings
+    } else if objectives > 0 {
+        ok(&format!(
+            "geschuetzte serialisierte Auslastung {percent} % plus Zusagen \
+             {objective_percent} %"
+        ));
+        Verdict::Ready
     } else if budgets > 0 && reserved > 800 {
         warn(&format!(
             "geschuetzte serialisierte Auslastung {percent} % plus \
@@ -1170,6 +1199,63 @@ models:
         assert_eq!(check_capacity(&fits), Verdict::Ready);
         let too_much = resolve(yaml(1_500));
         assert_eq!(too_much.runtime_budget_permille(), 750);
+        assert_eq!(check_capacity(&too_much), Verdict::NotReady);
+    }
+
+    /// ADR-0047: Zusagen zaehlen gegen dieselben Slots.
+    ///
+    /// Geschuetzt sind 30 ms konservativ je 50 ms — 600 ‰ eines Slots. Die
+    /// nachrangige Kamera rechnet 66 ms konservativ (p99 60 ms mal Marge) bei
+    /// 100 ms Takt, bleibt damit unter dem Hoechstalter der geschuetzten
+    /// Kamera und loest keinen Blockierbefund aus (ADR-0035).
+    ///
+    /// Zwei Slots und 200 ‰ Zusage passen: 300 ‰ plus 66 ‰. Ein Slot und
+    /// volle Zusage passen nicht: 600 ‰ plus 660 ‰.
+    #[test]
+    fn objectives_count_against_the_slots() {
+        let yaml = |permille: u16, slots: usize| {
+            format!(
+                r#"
+version: 1
+backend:
+  type: triton
+  grpc_endpoint: "127.0.0.1:9201"
+  slots: {slots}
+models:
+  front:
+    class: protected
+    queue: {{ policy: latest, capacity: 1 }}
+    contract: {{ period_ms: 50, deadline_ms: 50, max_age_ms: 100 }}
+    variants:
+      - id: main
+        backend_model: front_main
+        quality: {{ value: 1.0, source: measured }}
+        profile: {{ p50_us: 27272, p95_us: 27272, p99_us: 27272, samples: 100 }}
+  rear:
+    class: normal
+    queue: {{ policy: latest, capacity: 1 }}
+    contract:
+      period_ms: 100
+      deadline_ms: 200
+      max_age_ms: 400
+      objective: {{ coverage_permille: {permille}, window_ms: 10000 }}
+    variants:
+      - id: main
+        backend_model: rear_main
+        quality: {{ value: 1.0, source: measured }}
+        profile: {{ p50_us: 60000, p95_us: 60000, p99_us: 60000, samples: 100 }}
+"#
+            )
+        };
+        let resolve = |y: String| Config::from_yaml(&y).unwrap().resolve().unwrap();
+
+        let fits = resolve(yaml(200, 2));
+        assert_eq!(fits.objective_utilization_permille(), 66);
+        assert_eq!(check_capacity(&fits), Verdict::Ready);
+
+        // Ein Slot, volle Zusage: 600 ‰ geschuetzt plus 660 ‰ Zusage.
+        let too_much = resolve(yaml(1_000, 1));
+        assert_eq!(too_much.objective_utilization_permille(), 660);
         assert_eq!(check_capacity(&too_much), Verdict::NotReady);
     }
 
