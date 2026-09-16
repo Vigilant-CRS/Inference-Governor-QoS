@@ -10,15 +10,15 @@ description = "Benchmark harness against real hardware"
 
 [dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-vig-core = { path = "../vig-core", version = "0.2.0" }
-vig-sim = { path = "../vig-sim", version = "0.2.0" }
-vig-config = { path = "../vig-config", version = "0.2.0" }
-vig-protocol-oip = { path = "../vig-protocol-oip", version = "0.2.0" }
-vig-backend-triton = { path = "../vig-backend-triton", version = "0.2.0" }
-vig-gateway = { path = "../vig-gateway", version = "0.2.0" }
+vig-core = { path = "../vig-core", version = "0.3.0" }
+vig-sim = { path = "../vig-sim", version = "0.3.0" }
+vig-config = { path = "../vig-config", version = "0.3.0" }
+vig-protocol-oip = { path = "../vig-protocol-oip", version = "0.3.0" }
+vig-backend-triton = { path = "../vig-backend-triton", version = "0.3.0" }
+vig-gateway = { path = "../vig-gateway", version = "0.3.0" }
 # Fremde Rechenzeit fuer den Hinweis von vig-fit, dieselbe Messung wie in
 # `vig autotune` (vig_platform::cpu).
-vig-platform = { path = "../vig-platform", version = "0.2.0" }
+vig-platform = { path = "../vig-platform", version = "0.3.0" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.14.6"

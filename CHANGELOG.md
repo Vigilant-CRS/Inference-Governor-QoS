@@ -3,6 +3,89 @@
 Keep a Changelog-Format, semantische Versionierung. Was „die API" hier
 bedeutet, steht in [docs/releases.md](docs/releases.md).
 
+## [0.3.0] — 2026-09-16
+
+### Behoben — die Zerlegung war gesperrt, wo sie gebraucht wird (ADR-0035, Punkt 5a)
+
+- **`check_blocking_work` fragte nie, ob ein Modell zerlegbar ist.** Ihr
+  Befundtext empfahl `cooperative:` als wirksamsten Ausweg — wer ihm folgte,
+  bekam denselben Befund erneut, und der Governor verweigerte den Start. Auf
+  **einer** Ausfuehrungseinheit, dem Fall aus ADR-0014, war die Faehigkeit
+  damit unbenutzbar; auf zwei Slots schweigt die Regel ohnehin, deshalb fiel
+  es nie auf. Gerechnet wird jetzt mit dem **spaetesten** Quantum bei vollem
+  Kontext (`min_tokens` bei `max_total_tokens`), nicht mit dem ganzen Auftrag.
+  Passt auch das nicht unter die engste Zusage, bleibt der Befund — mit einem
+  eigenen Text, der zu einem kleineren Quantum raet statt ein zweites Mal zum
+  Zerlegen.
+- **Die Sicherheitsmarge erreichte die Quantenkosten nicht.**
+  `Scheduler::size_quantum` ersetzte die konservativ geplante Laufzeit durch
+  `cooperative.cost_of_with_context(...)` und umging damit `margin_of(model)`.
+  Konfigurierte wie gelernte Reserve schuetzte ausgerechnet den Term nicht,
+  der ueber Slotbelegung und Look-ahead entscheidet.
+
+### Neu
+
+- **Erstes ausgeliefertes Beispiel mit Zerlegung:**
+  `examples/cooperative_llm/` — eine Kamera (33 ms) und ein Sprachmodell
+  (194 ms) auf einer Karte. Alle vier Vertragswerte sind doppelt gemessen:
+  eine Tokenreihe (8/16/32/48, je 40 Laeufe) und `vig calibrate` ergeben
+  6100 gegen 6277 µs Sockel und 256 gegen 258 Token/s.
+- **`VIG_MIX_LLM_PERIOD_MS`** in `mix-record`: Abstand zwischen zwei Anfragen
+  an das Sprachmodell. Ohne Angabe Dauerbeschuss wie bisher. Wer eine
+  Frischezusage neben einem Sprachmodell bewertet, misst sonst die Saettigung
+  seines eigenen Treibers.
+
+### Gemessen (RTX 4070 Laptop, 30 s je Arm, zwei Laeufe je Punkt)
+
+- **Zerlegung, zwei Slots:** ohne sie weist der Governor 608 Auftraege als
+  nicht machbar ab, mit ihr praktisch keine — und die Kamera liefert 908 statt
+  804 von 910 Bildern, bei gleichem Textausstoss.
+- **`min_tokens` ist keine freie Wahl.** Auf einem Slot kostet der Vorgabewert
+  8 **160 geschuetzte Kamerabilder** (743/764 statt 905/905) und kauft dafuer
+  Text — der falsche Tausch fuer einen `protected`-Strom. Bei 16 kollabiert
+  der Auftrag (zwei Antworten, GPU halb ausgelastet), weil das kleinste
+  Quantum nicht mehr in die Luecke passt und der Look-ahead jede Fortsetzung
+  vetoiert. Das Beispiel steht auf 4. Auf **zwei** Slots bewegt dieselbe Reihe
+  fast nichts: die Quantengroesse ist nur bei knapper Kapazitaet der Engpass.
+- **Ein Slot haelt die Zusage nicht.** Dieselbe Last auf einer
+  Ausfuehrungseinheit laeuft (52 Antworten, keine Abweisung), aber die Kamera
+  reisst ihre 100 ms: 213 bis 236 ms laengste Luecke, auch bei nur zehn
+  Anfragen in 30 s (59 % Auslastung). Waehrend **eines** Auftrags werden sechs
+  Kamerabilder ueberholt. Deshalb faehrt das ausgelieferte Beispiel zwei
+  Slots — eine Vorlage soll die Zusage halten, die sie ausspricht.
+- **Stetige Zusagen (ADR-0047): zwei offene Punkte beantwortet, nicht gebaut.**
+  Die Daempfung — zwei gleichrangige Stroeme mit identischer Zusage, ein Slot
+  zu 100 % belegt, drei Laeufe je Arm, Schwelle vorab festgelegt: die
+  Wertebereiche ueberlappen, kein Effekt. Und die Zulassungsrechnung zaehlt
+  nur Stroeme **mit** Zusage: 78 % eines Slots tatsaechlich gefordert gegen
+  25 % ausgewiesen, die Zusage hielt trotzdem zu 1000 ‰, weil ein Strom ohne
+  Zusage `latest` faehrt und ueberholte Bilder verwirft.
+
+### Behoben — erneute Pruefung vom 16.09. (R10 bis R14)
+
+- Eine sofortige Quarantaene-Ablehnung behielt die Speicherreservierung und
+  blockierte nach wenigen Wiederholungen jede weitere Aufnahme (`actor.rs`).
+- Die zusammengesetzte Textantwort brachte Tensor-Metadaten und Nutzdaten
+  auseinander, sobald ein Modell mehrere Ausgaben hat (`cooperative.rs`).
+- Ungueltige Tokenlimits wurden in gueltige Arbeit umgeschrieben — aus einer 0
+  wurde ein Token.
+- Ein kurzes Offlineprofil konnte ein zu teures Quantum verdecken: die
+  Quantenkosten wurden mit der Profillaufzeit gedeckelt, obwohl das Profil mit
+  einem kurzen Prompt gemessen wird.
+- Fehlerhafte Tensorformen und doppelte Eingaben wurden still zurechtgebogen;
+  fremde Ausgaben konnten als erzeugter Text gelten.
+
+### Bekannte Grenzen
+
+- **Die Blockierpruefung zaehlt Modelle, nicht gleichzeitige Auftraege.**
+  `SlotSet::ready_slot` kennt keine Grenze „ein Modell, ein Slot"; ein Modell
+  mit `capacity: 2` kann zwei Slots belegen und zaehlt trotzdem als ein
+  Blocker. Die naheliegende Verschaerfung wurde gebaut und **zurueckgenommen**:
+  sie lehnt die veroeffentlichte Demo ab, die nachweislich laeuft. Der
+  tragfaehige Weg ist eine durchgesetzte Parallelitaetsgrenze im Kern.
+- **Keine neue Hardwarequalifikation.** Alle Zahlen stammen von einer
+  Maschine; zwei identische Referenzlaeufe streuten um 100 ‰.
+
 ## [Unveroeffentlicht]
 
 ### Neu (Mindestlaufzeit fuer nachrangige Arbeit, ADR-0046)

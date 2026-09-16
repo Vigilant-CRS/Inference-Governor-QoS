@@ -9,8 +9,8 @@ repository.workspace = true
 description = "NVIDIA Triton adapter for the Vigilant Inference Governor"
 
 [dependencies]
-vig-core = { path = "../vig-core", version = "0.2.0" }
-vig-protocol-oip = { path = "../vig-protocol-oip", version = "0.2.0" }
+vig-core = { path = "../vig-core", version = "0.3.0" }
+vig-protocol-oip = { path = "../vig-protocol-oip", version = "0.3.0" }
 tonic = "0.14.6"
 tokio = { version = "1", features = ["time", "sync"] }
 tracing = "0.1"

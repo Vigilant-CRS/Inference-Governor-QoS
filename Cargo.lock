@@ -1436,7 +1436,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vig-backend-triton"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "tokio",
  "tokio-stream",
@@ -1448,7 +1448,7 @@ dependencies = [
 
 [[package]]
 name = "vig-bench"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde_json",
  "tokio",
@@ -1466,7 +1466,7 @@ dependencies = [
 
 [[package]]
 name = "vig-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "clap",
  "serde_json",
@@ -1486,7 +1486,7 @@ dependencies = [
 
 [[package]]
 name = "vig-config"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_norway",
@@ -1495,11 +1495,11 @@ dependencies = [
 
 [[package]]
 name = "vig-core"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "vig-gateway"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "serde_json",
@@ -1518,7 +1518,7 @@ dependencies = [
 
 [[package]]
 name = "vig-platform"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_norway",
@@ -1526,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "vig-protocol-oip"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "prost",
  "prost-build",
@@ -1539,7 +1539,7 @@ dependencies = [
 
 [[package]]
 name = "vig-sim"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "vig-core",
 ]
