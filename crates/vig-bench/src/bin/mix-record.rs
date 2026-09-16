@@ -304,12 +304,25 @@ async fn drive_llm(
 /// Ein Governor im Prozess (wie in `vig-fit` und `demo-record`).
 struct RunningGateway {
     address: String,
-    _handle: vig_gateway::Handle,
+    handle: vig_gateway::Handle,
+    /// Die aufgeloeste Konfiguration — sie haelt die Modellnamen in der
+    /// Reihenfolge, in der die Metrikreihen indiziert sind.
+    resolved: Arc<vig_config::schema::Resolved>,
     shutdown: tokio::sync::oneshot::Sender<()>,
     server: tokio::task::JoinHandle<()>,
 }
 
 impl RunningGateway {
+    /// Der Metrikabzug des Governors, mit den Modellnamen in Indexreihenfolge.
+    ///
+    /// Ohne diese Zahlen bleibt jede Erklaerung fuer eine verfehlte Zusage
+    /// eine Vermutung: erst sie sagen, ob ein Strom im Rueckstand war und
+    /// warum seine Auftraege abgewiesen wurden.
+    async fn metrics(&self) -> Option<(vig_core::Metrics, Vec<String>)> {
+        let metrics = self.handle.metrics().await.ok()?;
+        Some((metrics, self.resolved.model_names.clone()))
+    }
+
     async fn start(resolved: Arc<vig_config::schema::Resolved>) -> Self {
         let triton = Arc::new(vig_backend_triton::TritonClient::new(
             &resolved.backend_endpoint,
@@ -317,6 +330,7 @@ impl RunningGateway {
         let clock = MonotonicClock::start();
         let handle =
             actor::spawn(Arc::clone(&resolved), &triton, clock, &[]).expect("Scheduler startet");
+        let mine = Arc::clone(&resolved);
         let service = GatewayService::new(resolved, triton, handle.clone(), clock);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -341,7 +355,8 @@ impl RunningGateway {
         tokio::time::sleep(Duration::from_millis(200)).await;
         Self {
             address,
-            _handle: handle,
+            handle,
+            resolved: mine,
             shutdown,
             server,
         }
@@ -643,6 +658,13 @@ async fn run() {
     }
     reports.sort_by_key(|r| r.name);
 
+    // Was der Governor selbst gesehen hat — abgefragt **vor** dem Stoppen,
+    // danach gibt es die Zahlen nicht mehr.
+    let governor = match gateway.as_ref() {
+        Some(g) => g.metrics().await,
+        None => None,
+    };
+
     for report in &reports {
         println!(
             "  {:<10} gesendet {:>4} geliefert {:>4} abgewiesen {:>4} Fehler {:>3} unabgedeckt {:>4} ‰ Alter p50 {:>5} ms",
@@ -668,9 +690,59 @@ async fn run() {
         );
     }
 
+    if let Some((metrics, names)) = governor.as_ref() {
+        println!("  — was der Governor sah —");
+        for (i, name) in names.iter().enumerate() {
+            let cell = |row: &[u32; vig_core::ids::MAX_MODELS]| row.get(i).copied().unwrap_or(0);
+            let coverage = cell(&metrics.objective_coverage_permille);
+            let deficit = cell(&metrics.objective_deficit_us);
+            let slack = cell(&metrics.objective_slack_us);
+            if coverage == 0 && deficit == 0 && slack == 0 {
+                continue;
+            }
+            println!(
+                "  {name:<10} Zusage erfuellt {coverage:>4} ‰  Luft {:>5} ms  Rueckstand {:>5} ms  Luecke {:>5} ms",
+                slack / 1_000,
+                deficit / 1_000,
+                cell(&metrics.objective_gap_us) / 1_000,
+            );
+        }
+        // Die Trennfrage: hat der Look-ahead zurueckgehalten, oder waren die
+        // Slots voll?
+        println!(
+            "  abgewiesen: nicht machbar {}, keine Kapazitaet {}, ueberholt {}, veraltet {}",
+            metrics.rejected_infeasible,
+            metrics.rejected_capacity,
+            metrics.superseded,
+            metrics.stale,
+        );
+        println!(
+            "  Rechenzeit {} ms, davon vergeblich {} ms — verfuegbar waren {} ms",
+            metrics.total_compute_nanos / 1_000_000,
+            metrics.stale_compute_nanos / 1_000_000,
+            seconds * 1_000 * metrics.slots,
+        );
+    }
+
     if let Some(path) = env("VIG_MIX_OUT") {
         let value = serde_json::json!({
             "arm": if governed { "governed" } else { "direct" },
+            "governor": governor.as_ref().map(|(m, names)| serde_json::json!({
+                "rejected_infeasible": m.rejected_infeasible,
+                "rejected_capacity": m.rejected_capacity,
+                "superseded": m.superseded,
+                "stale": m.stale,
+                "total_compute_ms": m.total_compute_nanos / 1_000_000,
+                "stale_compute_ms": m.stale_compute_nanos / 1_000_000,
+                "slots": m.slots,
+                "models": names.iter().enumerate().map(|(i, n)| serde_json::json!({
+                    "model": n,
+                    "coverage_permille": m.objective_coverage_permille.get(i).copied().unwrap_or(0),
+                    "gap_us": m.objective_gap_us.get(i).copied().unwrap_or(0),
+                    "slack_us": m.objective_slack_us.get(i).copied().unwrap_or(0),
+                    "deficit_us": m.objective_deficit_us.get(i).copied().unwrap_or(0),
+                })).collect::<Vec<_>>(),
+            })),
             "label": env("VIG_MIX_LABEL"),
             "seconds": seconds,
             "config": config_path,

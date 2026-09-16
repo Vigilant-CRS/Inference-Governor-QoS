@@ -115,6 +115,74 @@ fn declared_preemption_removes_the_finding() {
     );
 }
 
+/// Eine Zusage ist ein Anspruch — und wird wie eine bewachte Klasse geschuetzt
+/// (ADR-0047).
+///
+/// Gemessen am 16.09.2026: ein `normal`-Strom mit 100 ms Frist und einer
+/// Zusage von 800 ‰ erfuellte sie neben einem 195-ms-Aufruf zu 370 ‰, mit
+/// einem 70-ms-Aufruf zu 645 ‰ und ohne ihn zu 965 ‰. Die Unmachbarkeits-
+/// Abweisungen fielen dabei von 355 auf null. Die Konfiguration konnte das
+/// vorher nicht sagen, weil nur bewachte Klassen zaehlten.
+#[test]
+fn an_objective_is_protected_like_a_guarded_class() {
+    let yaml = |with_objective: bool| {
+        let objective = if with_objective {
+            "      objective: { coverage_permille: 800, window_ms: 10000 }\n"
+        } else {
+            ""
+        };
+        format!(
+            "version: 1
+backend:
+  type: triton
+  grpc_endpoint: \"127.0.0.1:9201\"
+  slots: 1
+models:
+  rear:
+    class: normal
+    queue: {{ policy: latest, capacity: 1 }}
+    contract:
+      period_ms: 50
+      deadline_ms: 100
+      max_age_ms: 100
+{objective}    variants:
+      - id: main
+        backend_model: rfdetr
+        quality: {{ value: 1.0, source: measured }}
+        profile: {{ p50_us: 13000, p95_us: 14000, p99_us: 15000, samples: 110 }}
+  llm:
+    class: best_effort
+    queue: {{ policy: fifo, capacity: 2, overflow: backpressure_client }}
+    contract: {{ deadline_ms: 2000, max_age_ms: 4000 }}
+    variants:
+      - id: main
+        backend_model: qwen
+        quality: {{ value: 1.0, source: measured }}
+        profile: {{ p50_us: 193000, p95_us: 195000, p99_us: 196000, samples: 110 }}
+"
+        )
+    };
+
+    // Mit Zusage: der lange Auftrag macht die 100-ms-Frist unhaltbar.
+    let findings = Config::from_yaml(&yaml(true)).unwrap().diagnose();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.to_string().contains("laenger als die engste Zusage")),
+        "eine Zusage muss geschuetzt werden: {findings:?}"
+    );
+
+    // Ohne Zusage hat niemand einen Anspruch, den der lange Auftrag brechen
+    // koennte — dann ist dieselbe Datei zulaessig.
+    let findings = Config::from_yaml(&yaml(false)).unwrap().diagnose();
+    assert!(
+        !findings
+            .iter()
+            .any(|f| f.to_string().contains("laenger als die engste Zusage")),
+        "ohne Anspruch kein Befund: {findings:?}"
+    );
+}
+
 /// Die veroeffentlichte Demo bleibt befundfrei: ein Sprachbildmodell, zwei
 /// Slots. Sonst waere die Regel eine Regression in dem, was wir zeigen.
 #[test]

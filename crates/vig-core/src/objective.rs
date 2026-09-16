@@ -219,22 +219,43 @@ impl Objective {
     }
 }
 
-/// Der gleitende Zaehler eines Stroms: wie viele Zyklen erfuellt waren und
-/// wann zuletzt eines ankam.
+/// Der gleitende Zaehler eines Stroms: wie viele **Verbraucherzyklen**
+/// versorgt waren und wann zuletzt eines ankam.
 ///
-/// Gebucht wird, was der Verbraucher bekommen hat — ein frisches Ergebnis,
-/// nicht ein abgeschickter Auftrag. Alles andere waere eine Zusage, die sich
-/// selbst bestaetigt.
+/// Gezaehlt werden Zyklen, nicht Lieferungen — das ist der Unterschied
+/// zwischen der Zusage und ihrer Vortaeuschung. Ein Ergebnis, das ueber drei
+/// Zyklen frisch bleibt, versorgt drei; fuenf Ergebnisse, die vor dem
+/// naechsten Verbraucherzyklus veralten, versorgen diesen nicht. Wer Lieferungen zaehlt,
+/// meldet im ersten Fall ein Drittel und im zweiten das Zweieinhalbfache —
+/// beides ist falsch, und beides stand hier, bis eine Pruefung es aufdeckte.
+///
+/// Beobachtet wird deshalb im Takt: bei jedem Zyklus fragt der Scheduler, ob
+/// gerade ein gueltiges Ergebnis vorliegt, das noch nicht ueber dem
+/// Hoechstalter ist (`last_valid` und `valid_since`). Nichts wirkt
+/// rueckwirkend — eine spaete Fertigstellung versorgt die Zyklen nicht, die
+/// vor ihr lagen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoverageLedger {
-    /// Erfuellte Zyklen je Abschnitt des Fensters.
-    buckets: [u32; BUCKETS_LEN],
+    /// Versorgte Zyklen je Abschnitt des Fensters.
+    supplied: [u32; BUCKETS_LEN],
+    /// **Beobachtete** Zyklen je Abschnitt — der Nenner.
+    ///
+    /// Zaehler und Nenner muessen aus derselben Koernung kommen. Wird der
+    /// Nenner stattdessen aus Fenster und Takt gerechnet, erfindet die
+    /// Abschnittsgrenze Fehlzyklen: der aelteste Teilabschnitt faellt bereits
+    /// vor dem exakten Fensterrand heraus, im Nenner aber nicht.
+    observed: [u32; BUCKETS_LEN],
     /// Der Abschnittsindex, auf dem der Zaehler gerade steht.
     cursor: u64,
     /// Beginn der Messung; davor gibt es keine Aussage.
     start: Instant,
-    /// Wann zuletzt ein frisches Ergebnis ankam.
+    /// Wann zuletzt ein frisches Ergebnis geliefert wurde.
     last_ok: Instant,
+    /// Bis wann die Zyklen bereits beobachtet sind.
+    ///
+    /// Ohne diese Marke zaehlte jeder Aufruf dieselben Zyklen erneut — der
+    /// Scheduler ruft im Takt, aber auch bei jedem anderen Ereignis.
+    observed_until: Instant,
 }
 
 impl CoverageLedger {
@@ -242,11 +263,124 @@ impl CoverageLedger {
     #[must_use]
     pub fn new(now: Instant) -> Self {
         Self {
-            buckets: [0; BUCKETS_LEN],
+            supplied: [0; BUCKETS_LEN],
+            observed: [0; BUCKETS_LEN],
             cursor: 0,
             start: now,
             last_ok: now,
+            observed_until: now,
         }
+    }
+
+    /// Beobachtet die Verbraucherzyklen, die seit dem letzten Aufruf
+    /// verstrichen sind.
+    ///
+    /// Die Bewertung ist dieselbe wie fuer den Weakly-hard-Monitor
+    /// (`scheduler::observe_cycles`, ADR-0005), und das ist Absicht: zwei
+    /// Kriterien fuer „vertragsgemaess versorgt" im selben Kern liefen
+    /// irgendwann auseinander. Ein Zyklus gilt als versorgt, wenn zu seinem
+    /// Zeitpunkt ein gueltiges Ergebnis vorlag, das noch nicht ueber dem
+    /// Hoechstalter war.
+    ///
+    /// `last_valid` ist die Aufnahmezeit des juengsten brauchbaren
+    /// Ergebnisses, `valid_since` der Zeitpunkt, ab dem es **vorlag** — seine
+    /// Fertigstellung. Beide werden gebraucht: Ein Ergebnis, das erst spaeter
+    /// fertig wurde, versorgt die Zyklen davor nicht, auch wenn seine
+    /// Aufnahmezeit vor ihnen liegt. Nichts wirkt rueckwirkend.
+    ///
+    /// Aufgerufen wird das bei jedem Ereignis; `observed_until` sorgt dafuer,
+    /// dass kein Zyklus doppelt zaehlt.
+    pub fn observe(
+        &mut self,
+        now: Instant,
+        last_valid: Option<Instant>,
+        valid_since: Option<Instant>,
+        max_age: Duration,
+        objective: &Objective,
+        period: Duration,
+    ) {
+        let step = period.as_nanos().max(1);
+        let start = self.start.as_nanos();
+        let previous = self
+            .observed_until
+            .as_nanos()
+            .saturating_sub(start)
+            .checked_div(step)
+            .unwrap_or(0);
+        let last = now
+            .as_nanos()
+            .saturating_sub(start)
+            .checked_div(step)
+            .unwrap_or(0);
+        if last <= previous {
+            return;
+        }
+        let first = previous.saturating_add(1);
+        self.advance(now, objective);
+        let width = objective
+            .window
+            .as_nanos()
+            .checked_div(COVERAGE_BUCKETS)
+            .unwrap_or(1)
+            .max(1);
+        let oldest = self
+            .cursor
+            .saturating_sub(COVERAGE_BUCKETS.saturating_sub(1));
+        let valid_ticks = last_valid.and_then(|capture| {
+            let available = capture.max(valid_since.unwrap_or(capture));
+            let expires = capture.as_nanos().saturating_add(max_age.as_nanos());
+            if expires < start {
+                return None;
+            }
+            Some((
+                available.as_nanos().saturating_sub(start).div_ceil(step),
+                expires.saturating_sub(start).checked_div(step).unwrap_or(0),
+            ))
+        });
+        // Count ticks analytically in each retained bucket. Iterating over
+        // every missed period could do 120,000 iterations per model after a
+        // pause (60-s window, 1-ms period), or never terminate at u64::MAX.
+        // The tick phase remains anchored at `start`, including after pauses.
+        for offset in 0..COVERAGE_BUCKETS {
+            let section = oldest.saturating_add(offset);
+            if section > self.cursor {
+                break;
+            }
+            let from = u128::from(section).saturating_mul(u128::from(width));
+            let to = u128::from(section)
+                .saturating_add(1)
+                .saturating_mul(u128::from(width))
+                .saturating_sub(1);
+            let lo = first.max(u64::try_from(from.div_ceil(u128::from(step))).unwrap_or(u64::MAX));
+            let hi = last.min(
+                u64::try_from(to.checked_div(u128::from(step)).unwrap_or(0)).unwrap_or(u64::MAX),
+            );
+            if hi < lo {
+                continue;
+            }
+            let count = hi.saturating_sub(lo).saturating_add(1);
+            let index = section.bitand_mask();
+            if let Some(cell) = self.observed.get_mut(index) {
+                *cell = cell.saturating_add(u32::try_from(count).unwrap_or(u32::MAX));
+            }
+            if let Some((valid_lo, valid_hi)) = valid_ticks {
+                let supplied_lo = lo.max(valid_lo);
+                let supplied_hi = hi.min(valid_hi);
+                if supplied_hi >= supplied_lo
+                    && let Some(cell) = self.supplied.get_mut(index)
+                {
+                    let count = supplied_hi.saturating_sub(supplied_lo).saturating_add(1);
+                    *cell = cell.saturating_add(u32::try_from(count).unwrap_or(u32::MAX));
+                }
+            }
+        }
+        self.observed_until = Instant::from_nanos(start.saturating_add(last.saturating_mul(step)));
+    }
+
+    /// Records a usable delivery for the gap promise, independently of ticks.
+    /// A retained result may supply several cycles but is still one delivery.
+    pub fn delivered(&mut self, now: Instant) {
+        self.last_ok = self.last_ok.max(now);
     }
 
     /// Der Abschnitt, in den `now` faellt.
@@ -275,7 +409,12 @@ impl CoverageLedger {
                 .saturating_add(step)
                 .saturating_add(1)
                 .bitand_mask();
-            if let Some(cell) = self.buckets.get_mut(index) {
+            // Beide Reihen: bliebe der Nenner eines abgelaufenen Abschnitts
+            // stehen, saenke die Abdeckung ohne einen einzigen Fehlzyklus.
+            if let Some(cell) = self.supplied.get_mut(index) {
+                *cell = 0;
+            }
+            if let Some(cell) = self.observed.get_mut(index) {
                 *cell = 0;
             }
             step = step.saturating_add(1);
@@ -283,17 +422,7 @@ impl CoverageLedger {
         self.cursor = target;
     }
 
-    /// Bucht ein frisches Ergebnis.
-    pub fn record(&mut self, now: Instant, objective: &Objective) {
-        self.advance(now, objective);
-        let index = self.cursor.bitand_mask();
-        if let Some(cell) = self.buckets.get_mut(index) {
-            *cell = cell.saturating_add(1);
-        }
-        self.last_ok = now;
-    }
-
-    /// Die erfuellten Zyklen im Fenster, von `now` aus gesehen.
+    /// Die versorgten Zyklen im Fenster, von `now` aus gesehen.
     ///
     /// Die Abfrage muss dasselbe Fenster sehen wie eine Buchung: sonst zaehlte
     /// ein Strom, der seit zwei Sekunden nichts geliefert hat, weiterhin seine
@@ -302,6 +431,28 @@ impl CoverageLedger {
     /// konnten; geaendert wird dabei nichts.
     #[must_use]
     pub fn fulfilled(&self, now: Instant, objective: &Objective) -> u64 {
+        self.sum_over_window(now, objective, &self.supplied)
+    }
+
+    /// Die **beobachteten** Zyklen im Fenster — der Nenner zu
+    /// [`Self::fulfilled`].
+    ///
+    /// Aus derselben Quelle und ueber dieselben Abschnitte: eine zweite
+    /// Rechnung aus Fenster und Takt weicht um die Koernung ab und erfindet
+    /// damit Fehlzyklen, wo keine sind.
+    #[must_use]
+    pub fn observed_cycles(&self, now: Instant, objective: &Objective) -> u64 {
+        self.sum_over_window(now, objective, &self.observed)
+    }
+
+    /// Summiert eine Reihe ueber die Abschnitte, die noch im Fenster liegen
+    /// und bereits befuellt sein konnten. Geaendert wird dabei nichts.
+    fn sum_over_window(
+        &self,
+        now: Instant,
+        objective: &Objective,
+        row: &[u32; BUCKETS_LEN],
+    ) -> u64 {
         let target = self.bucket_of(now, objective);
         let oldest = target.saturating_sub(COVERAGE_BUCKETS.saturating_sub(1));
         let newest = self.cursor.min(target);
@@ -309,30 +460,31 @@ impl CoverageLedger {
             return 0;
         }
         let mut sum = 0_u64;
-        let mut section = oldest;
-        while section <= newest {
-            if let Some(cell) = self.buckets.get(section.bitand_mask()) {
+        for offset in 0..COVERAGE_BUCKETS {
+            let section = oldest.saturating_add(offset);
+            if section > newest {
+                break;
+            }
+            if let Some(cell) = row.get(section.bitand_mask()) {
                 sum = sum.saturating_add(u64::from(*cell));
             }
-            section = section.saturating_add(1);
         }
         sum
     }
 
-    /// Die Zyklen, die seit dem Beginn erwartet werden konnten — hoechstens
-    /// ein volles Fenster.
+    /// Die Zyklen, gegen die die Zusage gemessen wird: die **beobachteten**.
     ///
-    /// Randfall 2 aus ADR-0047: in der ersten Sekunde rechnet die Zusage gegen
-    /// die verstrichene Zeit, nicht gegen das volle Fenster. Sonst waere jeder
-    /// Strom beim Start maximal dringend.
+    /// Hier stand eine eigene Rechnung aus verstrichener Zeit und Takt. Sie
+    /// wich um die Koernung des Fensters ab und meldete Fehlzyklen, die es nicht gab: bei
+    /// lueckenloser Versorgung 966 statt 1000 Promille. Zaehler und Nenner
+    /// kommen jetzt aus derselben Quelle.
+    ///
+    /// Randfall 2 aus ADR-0047 bleibt erfuellt: im ersten Moment ist noch kein
+    /// Zyklus beobachtet, und ein Strom, der noch gar nicht dran war, ist
+    /// nicht im Rueckstand.
     #[must_use]
-    pub fn expected(&self, now: Instant, objective: &Objective, period: Duration) -> u64 {
-        let elapsed = now.as_nanos().saturating_sub(self.start.as_nanos());
-        let span = elapsed.min(objective.window.as_nanos());
-        // Kein erzwungener Mindestzyklus: im ersten Moment ist noch keiner
-        // faellig, und ein Strom, der noch gar nicht dran war, ist nicht im
-        // Rueckstand.
-        span.checked_div(period.as_nanos().max(1)).unwrap_or(0)
+    pub fn expected(&self, now: Instant, objective: &Objective, _period: Duration) -> u64 {
+        self.observed_cycles(now, objective)
     }
 
     /// Restzeit, bis die Anteilszusage bricht — negativ, wenn sie es schon ist.
@@ -516,21 +668,39 @@ mod tests {
         assert!(ledger.coverage_slack(at(0), &g, ms(33)) >= Slack::ZERO);
     }
 
+    /// Beobachtet bis `until` mit einem Ergebnis, das seit `since` vorliegt
+    /// und bei `capture` aufgenommen wurde.
+    fn watch(
+        ledger: &mut CoverageLedger,
+        until: u64,
+        capture: Option<u64>,
+        since: Option<u64>,
+        max_age_ms: u64,
+        g: &Objective,
+        period_ms: u64,
+    ) {
+        ledger.observe(
+            at(until),
+            capture.map(at),
+            since.map(at),
+            ms(max_age_ms),
+            g,
+            ms(period_ms),
+        );
+    }
+
     #[test]
     fn meeting_the_promise_builds_slack_and_missing_it_spends_slack() {
         let g = goal(500, 1_000, None);
         let mut ledger = CoverageLedger::new(at(0));
-        // Zehn Zyklen zu 100 ms, jeder erfuellt: deutlich ueber 50 %.
-        let mut t = 0;
-        while t < 1_000 {
-            ledger.record(at(t), &g);
-            t = t.saturating_add(100);
-        }
+        // Zehn Zyklen zu 100 ms, durchgehend versorgt: deutlich ueber 50 %.
+        watch(&mut ledger, 1_000, Some(0), Some(0), 10_000, &g, 100);
         let ahead = ledger.coverage_slack(at(1_000), &g, ms(100));
         assert!(ahead > Slack::ZERO, "{ahead}");
 
-        // Eine Sekunde ohne jedes Ergebnis: das Fenster ist leer, die Zusage
-        // gerissen, der Slack negativ.
+        // Eine weitere Sekunde ohne jedes Ergebnis: das Fenster ist leer, die
+        // Zusage gerissen, der Slack negativ.
+        watch(&mut ledger, 2_100, Some(0), Some(0), 10, &g, 100);
         let behind = ledger.coverage_slack(at(2_100), &g, ms(100));
         assert!(behind.is_infeasible(), "{behind}");
     }
@@ -539,7 +709,9 @@ mod tests {
     fn the_gap_half_counts_down_to_its_deadline() {
         let g = goal(0, 10_000, Some(1_000));
         let mut ledger = CoverageLedger::new(at(0));
-        ledger.record(at(100), &g);
+        // Ein Ergebnis bei 100 ms, danach nichts mehr.
+        watch(&mut ledger, 100, Some(100), Some(100), 10_000, &g, 100);
+        ledger.delivered(at(100));
         // 400 ms spaeter sind noch 600 ms Luft.
         assert_eq!(
             ledger.gap_slack(at(500), &g),
@@ -557,15 +729,11 @@ mod tests {
         // Anteil ist bequem, die Luecke laeuft ab: der Slack folgt der Luecke.
         let g = goal(100, 10_000, Some(1_000));
         let mut ledger = CoverageLedger::new(at(0));
-        // Fuenf Erfolge, verlangt ist bei neun Zyklen einer: der Anteil hat
-        // reichlich Puffer, die Luecke laeuft ab.
-        let mut t = 0;
-        while t <= 400 {
-            ledger.record(at(t), &g);
-            t = t.saturating_add(100);
-        }
-        // Bei 1350 ms: der Anteil haette noch 300 ms Puffer (fuenf Erfolge,
-        // verlangt sind zwei), die Luecke laeuft in 50 ms ab.
+        // Bis 400 ms versorgt, danach nicht mehr.
+        watch(&mut ledger, 400, Some(0), Some(0), 10_000, &g, 100);
+        ledger.delivered(at(400));
+        watch(&mut ledger, 1_350, Some(0), Some(0), 400, &g, 100);
+        // Der Anteil hat Puffer, die Luecke laeuft in 50 ms ab.
         let slack = ledger.slack(at(1_350), &g, ms(100));
         assert_eq!(
             slack,
@@ -579,38 +747,94 @@ mod tests {
         // Randfall 3: ein verlorenes Fenster macht niemanden unendlich
         // dringend, und ein grosser Vorsprung ist kein Freifahrtschein.
         let g = goal(500, 1_000, Some(1_000));
-        let ledger = CoverageLedger::new(at(0));
-        let very_late = ledger.slack(at(600_000), &g, ms(100));
-        assert_eq!(very_late, Slack::from_nanos(-1_000_000_000));
+        let mut empty = CoverageLedger::new(at(0));
+        watch(&mut empty, 600_000, None, None, 100, &g, 100);
+        assert_eq!(
+            empty.slack(at(600_000), &g, ms(100)),
+            Slack::from_nanos(-1_000_000_000)
+        );
 
         let mut full = CoverageLedger::new(at(0));
-        let mut t = 0;
-        while t < 1_000 {
-            full.record(at(t), &g);
-            t = t.saturating_add(10);
-        }
-        assert!(full.coverage_slack(at(1_000), &g, ms(100)) <= Slack::from_nanos(1_000_000_000));
+        watch(&mut full, 1_000, Some(0), Some(0), 10_000, &g, 10);
+        assert!(full.coverage_slack(at(1_000), &g, ms(10)) <= Slack::from_nanos(1_000_000_000));
     }
 
     #[test]
-    fn old_results_fall_out_of_the_window() {
+    fn a_stale_result_supplies_no_cycle() {
+        // Der Kern der neuen Zaehlweise: gezaehlt werden Verbraucherzyklen.
+        // Ein Ergebnis, das aelter ist als das Hoechstalter, versorgt keinen —
+        // gleich wie oft es geliefert wurde.
         let g = goal(500, 1_000, None);
         let mut ledger = CoverageLedger::new(at(0));
-        let mut t = 0;
-        while t < 1_000 {
-            ledger.record(at(t), &g);
-            t = t.saturating_add(100);
-        }
-        // Bei 900 ms sind alle zehn im Fenster. (Bei genau 1000 ms faellt die
-        // aelteste knapp heraus: sechzehn Abschnitte zu 62 ms decken 992 ms
-        // ab — dieselbe Koernung wie beim RuntimeLedger.)
-        assert_eq!(ledger.fulfilled(at(900), &g), 10);
-        assert_eq!(ledger.fulfilled(at(1_000), &g), 9);
-        // Schon die blosse Abfrage weit spaeter sieht ein leeres Fenster —
-        // ohne dass jemand etwas buchen muesste.
+        watch(&mut ledger, 500, Some(0), Some(0), 50, &g, 100);
+        // Beobachtet werden die Zyklen 100 bis 500 — der Startzeitpunkt gilt
+        // als bereits gesehen. Jeder davon ist aelter als 50 ms, also versorgt
+        // das eine Ergebnis keinen einzigen.
+        assert_eq!(ledger.fulfilled(at(500), &g), 0);
+        assert_eq!(ledger.observed_cycles(at(500), &g), 5);
+    }
+
+    #[test]
+    fn nothing_supplies_a_cycle_before_the_result_existed() {
+        // Eine spaete Fertigstellung versorgt die Zyklen davor nicht, auch
+        // wenn ihre Aufnahmezeit vor ihnen liegt.
+        let g = goal(500, 1_000, None);
+        let mut ledger = CoverageLedger::new(at(0));
+        watch(&mut ledger, 300, Some(0), Some(250), 500, &g, 100);
+        assert_eq!(
+            ledger.fulfilled(at(300), &g),
+            1,
+            "nur der Zyklus bei 300, nicht die bei 100 und 200"
+        );
+        assert_eq!(ledger.observed_cycles(at(300), &g), 3);
+    }
+
+    #[test]
+    fn old_cycles_fall_out_of_the_window() {
+        let g = goal(500, 1_000, None);
+        let mut ledger = CoverageLedger::new(at(0));
+        watch(&mut ledger, 900, Some(0), Some(0), 10_000, &g, 100);
+        assert_eq!(ledger.fulfilled(at(900), &g), 9);
+        // Weit spaeter ist das Fenster leer — ohne dass jemand etwas
+        // beobachten muesste.
         assert_eq!(ledger.fulfilled(at(5_000), &g), 0);
-        // Und eine Buchung danach steht allein darin.
-        ledger.record(at(5_000), &g);
-        assert_eq!(ledger.fulfilled(at(5_000), &g), 1);
+        assert_eq!(ledger.observed_cycles(at(5_000), &g), 0);
+    }
+
+    #[test]
+    fn sparse_observation_keeps_the_original_tick_phase() {
+        let g = goal(500, 1_000, None);
+        let mut dense = CoverageLedger::new(at(0));
+        let mut sparse = dense;
+        for t in 0..=10_050 {
+            watch(&mut dense, t, Some(0), Some(0), 10_010, &g, 100);
+        }
+        watch(&mut sparse, 10_050, Some(0), Some(0), 10_010, &g, 100);
+        assert_eq!(
+            sparse.fulfilled(at(10_050), &g),
+            dense.fulfilled(at(10_050), &g)
+        );
+        assert_eq!(
+            sparse.observed_cycles(at(10_050), &g),
+            dense.observed_cycles(at(10_050), &g)
+        );
+    }
+
+    #[test]
+    fn observation_at_the_clock_limit_is_bounded_and_idempotent() {
+        let nanosecond = Duration::from_nanos_unbounded(1);
+        let g = Objective {
+            coverage_permille: 500,
+            window: Duration::from_nanos_unbounded(16),
+            max_gap: None,
+        };
+        let mut ledger = CoverageLedger::new(Instant::ZERO);
+        let end = Instant::from_nanos(u64::MAX);
+        ledger.observe(end, None, None, nanosecond, &g, nanosecond);
+        assert_eq!(ledger.observed_cycles(end, &g), 16);
+        assert_eq!(ledger.fulfilled(end, &g), 0);
+        let before = ledger;
+        ledger.observe(end, None, None, nanosecond, &g, nanosecond);
+        assert_eq!(ledger, before);
     }
 }

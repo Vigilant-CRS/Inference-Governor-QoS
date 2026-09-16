@@ -1753,6 +1753,18 @@ impl Resolved {
     ///   `C_i / max_gap_i`.
     #[must_use]
     pub fn objective_utilization_permille(&self) -> u64 {
+        self.objective_utilization(false)
+    }
+
+    /// Additional objective demand not already covered by the same model's
+    /// minimum runtime budget. Work can satisfy both promises at once;
+    /// reservations of different models must never offset each other.
+    #[must_use]
+    pub fn additional_objective_utilization_permille(&self) -> u64 {
+        self.objective_utilization(true)
+    }
+
+    fn objective_utilization(&self, subtract_own_budget: bool) -> u64 {
         let mut total = 0_u64;
         for contract in self.contracts.iter() {
             if contract.criticality.is_guarded() {
@@ -1774,7 +1786,14 @@ impl Resolved {
                 .saturating_mul(u64::from(objective.effective_permille(period)))
                 .checked_div(period.as_nanos().max(1))
                 .unwrap_or(0);
-            total = total.saturating_add(share);
+            let reserved = if subtract_own_budget {
+                contract
+                    .min_runtime
+                    .map_or(0, |budget| budget.slot_share_permille())
+            } else {
+                0
+            };
+            total = total.saturating_add(share.saturating_sub(reserved));
         }
         let slots = u64::try_from(self.slots.regular_len()).unwrap_or(1).max(1);
         total.checked_div(slots).unwrap_or(0)
@@ -1959,15 +1978,37 @@ fn check_blocking_work(
         return;
     }
     // Die engste Zusage, die gehalten werden muss. Das Hoechstalter ist die
-    // fachliche Grenze; fehlt es, zaehlt die Frist.
-    let Some(tightest) = contracts
-        .iter()
-        .filter(|contract| contract.criticality.is_guarded())
-        .map(|contract| contract.max_age.unwrap_or(contract.deadline))
-        .min()
-    else {
+    // fachliche Grenze; fehlt es, zaehlt die Frist. Eine vereinbarte Luecke
+    // (ADR-0047) ist ebenfalls eine Zusage und kann strenger sein.
+    //
+    // Nicht nur bewachte Klassen: ein Strom mit `objective` hat einen
+    // ausgesprochenen Anspruch, und lange nicht praemptierbare Arbeit macht
+    // ihn genauso unhaltbar. Gemessen am 16.09.2026: ein `normal`-Strom mit
+    // 100 ms Frist erfuellte seine Zusage neben einem 195-ms-Aufruf zu 370 ‰,
+    // ohne ihn zu 965 ‰ — bei 87 statt 73 Prozent Auslastung. Es fehlte nicht
+    // die Kapazitaet, es fehlte der freie Slot.
+    let promise_of = |contract: &ModelContract| -> Option<Duration> {
+        if !contract.criticality.is_guarded() && contract.objective.is_none() {
+            return None;
+        }
+        let limit = contract.max_age.unwrap_or(contract.deadline);
+        Some(match contract.objective.and_then(|o| o.max_gap) {
+            Some(gap) if gap < limit => gap,
+            _ => limit,
+        })
+    };
+    let Some(tightest) = contracts.iter().filter_map(promise_of).min() else {
         return;
     };
+
+    // Bewusst **nicht** eingerechnet: wie viele Slots die bewachte Arbeit im
+    // Mittel belegt. Der Gedanke lag nahe — ein dauerhaft belegter Slot plus
+    // ein langer Auftrag sperren alles aus —, aber die eigene Messung
+    // widerlegt ihn: am 16.09.2026 war genau diese Lage (ein Blocker, zwei
+    // Slots, eine Kamera mit 60 % Dauerlast) einwandfrei, 1 ‰ unabgedeckt bei
+    // 39 ms laengster Luecke. Eine Schwelle, die das ablehnt, waere strenger
+    // als die Wirklichkeit und wuerde elf ausgelieferte Beispiele
+    // zurueckweisen, von denen die meisten tragen.
 
     let mut blockers = Vec::new();
     for (i, (name, contract)) in model_names.iter().zip(contracts.iter()).enumerate() {

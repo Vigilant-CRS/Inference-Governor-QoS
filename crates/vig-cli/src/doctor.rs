@@ -635,10 +635,9 @@ fn check_utilization(resolved: &Resolved) -> Verdict {
     let budgets = resolved.runtime_budget_permille();
     let budget_percent = budgets.checked_div(10).unwrap_or(0);
     let reserved = utilization.saturating_add(budgets);
-    // ADR-0047: Zusagen kommen obendrauf, werden aber getrennt gefuehrt.
-    // Eine Sammelsumme wuerde jede Meldung unscharf machen — der Betreiber
-    // soll lesen koennen, *woran* es liegt, nicht nur *dass* es klemmt.
-    let objectives = resolved.objective_utilization_permille();
+    // A delivery can satisfy an objective and spend the same model's runtime
+    // budget at once. Add only the demand beyond that model's reservation.
+    let objectives = resolved.additional_objective_utilization_permille();
     let objective_percent = objectives.checked_div(10).unwrap_or(0);
     let committed = reserved.saturating_add(objectives);
 
@@ -660,7 +659,7 @@ fn check_utilization(resolved: &Resolved) -> Verdict {
     } else if objectives > 0 && committed > 1_000 {
         fail(&format!(
             "OBJECTIVE_UNSCHEDULABLE: geschuetzte Auslastung {percent} % plus \
-             Mindestlaufzeitbudgets {budget_percent} % plus Zusagen \
+             Mindestlaufzeitbudgets {budget_percent} % plus zusaetzlicher Zielbedarf \
              {objective_percent} % ueber {slots} Slot(s) nicht tragbar. Die \
              Zusagen werden aus dem Rest bedient und bleiben so unerfuellt \
              (ADR-0047)."
@@ -669,15 +668,15 @@ fn check_utilization(resolved: &Resolved) -> Verdict {
     } else if objectives > 0 && committed > 800 {
         warn(&format!(
             "geschuetzte serialisierte Auslastung {percent} % plus \
-             Mindestlaufzeitbudgets {budget_percent} % plus Zusagen \
+             Mindestlaufzeitbudgets {budget_percent} % plus zusaetzlicher Zielbedarf \
              {objective_percent} %; fuer die uebrige nachrangige Arbeit bleibt \
              kaum Reserve"
         ));
         Verdict::ReadyWithWarnings
     } else if objectives > 0 {
         ok(&format!(
-            "geschuetzte serialisierte Auslastung {percent} % plus Zusagen \
-             {objective_percent} %"
+            "geschuetzte serialisierte Auslastung {percent} % plus \
+             Mindestlaufzeitbudgets {budget_percent} % plus zusaetzlicher Zielbedarf {objective_percent} %"
         ));
         Verdict::Ready
     } else if budgets > 0 && reserved > 800 {
@@ -1257,6 +1256,22 @@ models:
         let too_much = resolve(yaml(1_000, 1));
         assert_eq!(too_much.objective_utilization_permille(), 660);
         assert_eq!(check_capacity(&too_much), Verdict::NotReady);
+
+        // Both promises refer to the same rear model. Its 350 ms runtime
+        // reservation already pays for the objective's 330 ms estimate.
+        // Counting both would falsely reject 950 permille as 1280 permille.
+        let mut overlap = resolve(yaml(500, 1));
+        let rear = overlap
+            .model_names
+            .iter()
+            .position(|name| name == "rear")
+            .unwrap();
+        overlap.contracts.get_mut(rear).unwrap().min_runtime =
+            Some(vig_core::runtime_budget::RuntimeBudget {
+                budget: vig_core::Duration::from_millis(350).unwrap(),
+                window: vig_core::Duration::from_millis(1_000).unwrap(),
+            });
+        assert_eq!(check_capacity(&overlap), Verdict::ReadyWithWarnings);
     }
 
     /// ADR-0043: Zwei Zusagen, die sich ausschliessen, sollen beim Start

@@ -212,8 +212,12 @@ fn what_arrived_fresh_is_counted_and_visible() {
         "Luecke {} us",
         metrics.objective_gap_us[0]
     );
-    // Und die Zusage haelt: Luft ja, Rueckstand nein.
-    assert!(metrics.objective_slack_us[0] > 0);
+    // Und die Zusage haelt: kein Rueckstand.
+    //
+    // Nicht „Luft ueber null": die Pflicht wird aufgerundet, 98 % von dreissig
+    // Zyklen sind dreissig — wer alle versorgt, hat exakt null Puffer und
+    // trotzdem nichts versaeumt. Ein Test, der hier Luft verlangt, verlangt
+    // mehr als alle.
     assert_eq!(metrics.objective_deficit_us[0], 0);
 }
 
@@ -298,6 +302,167 @@ fn a_result_that_no_longer_carried_is_not_counted() {
         0,
         "ein Ergebnis, das nie trug, darf keine Zusage erfuellen"
     );
+}
+
+/// A stream that requests work but never delivers must accrue a deficit.
+#[test]
+fn an_unsuccessful_first_request_still_starts_the_objective() {
+    let camera = with_objective(contract(100, 10, 40), 500, 1_000, Some(200));
+    let mut scheduler = build(std::slice::from_ref(&camera), 1).unwrap();
+    let mut backend = Backend::default();
+    run(&mut scheduler, &mut backend, 501, |t| {
+        (t == 0)
+            .then(|| frame(1, 0, t, &camera))
+            .into_iter()
+            .collect()
+    });
+    assert!(
+        scheduler
+            .objective_slack(ModelIdx(0), at(500))
+            .is_some_and(Slack::is_infeasible)
+    );
+    assert!(scheduler.metrics().objective_deficit_us[0] > 0);
+}
+
+/// One retained result can supply several consumer cycles while still fresh.
+#[test]
+fn a_retained_fresh_result_supplies_each_consumer_cycle() {
+    let camera = with_objective(contract(100, 500, 10), 1_000, 1_000, None);
+    let mut scheduler = build(std::slice::from_ref(&camera), 1).unwrap();
+    let mut backend = Backend::default();
+    run(&mut scheduler, &mut backend, 401, |t| {
+        (t == 0)
+            .then(|| frame(1, 0, t, &camera))
+            .into_iter()
+            .collect()
+    });
+    assert_eq!(scheduler.metrics().objective_coverage_permille[0], 1_000);
+    assert_eq!(scheduler.metrics().objective_deficit_us[0], 0);
+}
+
+/// Bursts between ticks cannot pay for cycles where every result is stale.
+#[test]
+fn a_burst_of_results_cannot_invent_consumer_coverage() {
+    let camera = with_objective(contract(100, 50, 1), 500, 1_000, None);
+    let mut scheduler = build(std::slice::from_ref(&camera), 1).unwrap();
+    let mut backend = Backend::default();
+    run(&mut scheduler, &mut backend, 301, |t| {
+        (t < 50 && t % 10 == 0)
+            .then(|| frame(t, 0, t, &camera))
+            .into_iter()
+            .collect()
+    });
+    assert_eq!(scheduler.metrics().objective_coverage_permille[0], 0);
+}
+
+/// A completion must not supply ticks which elapsed before the result existed.
+#[test]
+fn a_completion_does_not_retroactively_supply_elapsed_cycles() {
+    let camera = with_objective(contract(100, 500, 250), 500, 1_000, None);
+    let mut scheduler = build(std::slice::from_ref(&camera), 1).unwrap();
+    let mut actions = Vec::new();
+    scheduler.on_event(at(0), Event::Arrival(frame(1, 0, 0, &camera)), &mut |a| {
+        actions.push(a);
+    });
+    let slot = actions
+        .iter()
+        .find_map(|a| match a {
+            Action::Dispatch { slot, .. } => Some(*slot),
+            _ => None,
+        })
+        .unwrap();
+    scheduler.on_event(
+        at(250),
+        Event::Completion {
+            request: RequestId(1),
+            slot,
+        },
+        &mut |_| {},
+    );
+    scheduler.on_event(at(300), Event::Tick, &mut |_| {});
+    assert_eq!(scheduler.metrics().objective_coverage_permille[0], 333);
+}
+
+/// Window rotation must not make continuous coverage look like missing ticks.
+#[test]
+fn continuous_coverage_stays_complete_across_bucket_boundaries() {
+    let camera = with_objective(contract(33, 100, 10), 1_000, 1_000, None);
+    let mut scheduler = build(std::slice::from_ref(&camera), 1).unwrap();
+    let mut backend = Backend::default();
+    run(&mut scheduler, &mut backend, 10_001, |t| {
+        (t % 33 == 0)
+            .then(|| frame(t, 0, t, &camera))
+            .into_iter()
+            .collect()
+    });
+    assert_eq!(scheduler.metrics().objective_coverage_permille[0], 1_000);
+    assert_eq!(scheduler.metrics().objective_deficit_us[0], 0);
+}
+
+#[test]
+fn a_second_completion_cannot_fill_the_gap_before_its_delivery() {
+    let camera = with_objective(contract(100, 100, 10), 500, 1_000, None);
+    let mut scheduler = build(std::slice::from_ref(&camera), 1).unwrap();
+    for (id, arrival, finish) in [(1, 0, 10), (2, 190, 250)] {
+        let mut actions = Vec::new();
+        scheduler.on_event(
+            at(arrival),
+            Event::Arrival(frame(id, 0, arrival, &camera)),
+            &mut |a| actions.push(a),
+        );
+        let slot = actions
+            .iter()
+            .find_map(|a| match a {
+                Action::Dispatch { slot, .. } => Some(*slot),
+                _ => None,
+            })
+            .unwrap();
+        scheduler.on_event(
+            at(finish),
+            Event::Completion {
+                request: RequestId(id),
+                slot,
+            },
+            &mut |_| {},
+        );
+    }
+    scheduler.on_event(at(300), Event::Tick, &mut |_| {});
+    // Tick 100 has the first result. Tick 200 has no fresh result yet;
+    // at tick 300 the second result (captured at 190) has expired too.
+    assert_eq!(scheduler.metrics().objective_coverage_permille[0], 333);
+}
+
+#[test]
+fn a_gap_only_objective_counts_deliveries_without_period_or_max_age() {
+    let mut camera = with_objective(contract(100, 500, 10), 0, 1_000, Some(200));
+    camera.period = None;
+    camera.max_age = None;
+    let mut scheduler = build(std::slice::from_ref(&camera), 1).unwrap();
+    let mut backend = Backend::default();
+    run(&mut scheduler, &mut backend, 311, |t| {
+        (t == 0 || t == 300)
+            .then(|| frame(t, 0, t, &camera))
+            .into_iter()
+            .collect()
+    });
+    assert_eq!(scheduler.metrics().objective_gap_us[0], 0);
+    assert_eq!(scheduler.metrics().objective_deficit_us[0], 0);
+}
+
+#[test]
+fn a_retained_result_does_not_reset_the_gap_between_deliveries() {
+    let camera = with_objective(contract(100, 500, 10), 0, 1_000, Some(200));
+    let mut scheduler = build(std::slice::from_ref(&camera), 1).unwrap();
+    let mut backend = Backend::default();
+    run(&mut scheduler, &mut backend, 301, |t| {
+        (t == 0)
+            .then(|| frame(1, 0, t, &camera))
+            .into_iter()
+            .collect()
+    });
+    assert_eq!(scheduler.metrics().objective_coverage_permille[0], 1_000);
+    assert_eq!(scheduler.metrics().objective_gap_us[0], 290_000);
+    assert!(scheduler.metrics().objective_deficit_us[0] > 0);
 }
 
 // ---------------------------------------------------------------------------

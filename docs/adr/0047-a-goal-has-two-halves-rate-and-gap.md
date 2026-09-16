@@ -1,6 +1,6 @@
 # ADR-0047: Ein Ziel hat zwei Haelften — Anteil und Luecke
 
-**Status:** Entwurf · 2026-09-16
+**Status:** Akzeptiert, opt-in, mit offener Daempfung · 2026-09-16
 **Betrifft:** `core/objective` (neu), `core/scheduler` (Kandidatenwahl),
 `config` (`contract.objective`), `cli/doctor` (Zulassung), Exporter;
 Spec 10.6, NV-24, ADR-0027, ADR-0035, ADR-0043, ADR-0046
@@ -146,37 +146,74 @@ Abschnitte, wie `RuntimeLedger`). Der Aufwand je Entscheidung bleibt konstant
    die die Mindestqualitaet noch erfuellt". Ein negativer Slack setzt ihn
    ebenfalls. Wer hinter seiner Zusage liegt, senkt zuerst die eigene
    Qualitaet; die Mindestqualitaet bleibt unantastbar.
-6. **Messung auf Hardware.** Durchgefuehrt, **Ergebnis negativ.** Sechs Laeufe
-   zu 30 s auf einer RTX 4070 Laptop
-   (`InferenceQoS-runtime/uebergabe/ziele-hardware-2026-09-16.md`): Bei einer
-   Zusage von 800 ‰ liefert der versprochene Strom 522 bis 557 ‰ — genauso
-   viel wie ohne jede Zusage. Die Steuerung **wirkt** nachweisbar (der
-   Referenzstrom ohne Zusage faellt in allen vier Zusage-Laeufen unter beide
-   Vergleichslaeufe, ohne Ueberlapp), und die bewachte Kamera bleibt
-   unberuehrt (5–13 ‰ unabgedeckt gegen 6–16 ‰). Aber das Genommene kommt
-   beim versprochenen Strom nicht an.
+6. **Messung auf Hardware.** Durchgefuehrt, neun Laeufe zu 30 s auf einer
+   RTX 4070 Laptop
+   (`InferenceQoS-runtime/uebergabe/ziele-hardware-2026-09-16.md`). **Der
+   Mechanismus traegt** — aber erst, nachdem der wahre Grund fuer das erste,
+   negative Ergebnis gefunden war.
 
-## Warum Schritt 6 scheiterte
+## Was Schritt 6 zeigte
 
-Die Zulassungsrechnung hielt die Zusage fuer tragbar — 676 ‰ von 1000 — und
-die GPU war gemessen voll. Zwei Gruende, beide strukturell:
+Dreimal derselbe Aufbau, nur die Laenge des nachrangigen Sprachmodell-Aufrufs
+variiert; die Zusage lautet 800 ‰ bei 100 ms Frist:
 
-* **Die Rechnung veranschlagt den zugesagten Anteil, die Stroeme senden mit
-  vollem Takt.** Ein Strom, der 800 ‰ von 600 Bildern verspricht, bietet
-  trotzdem 600 an; die Rechnung sieht 128 ‰ der Slots, das Angebot ist ein
-  Vielfaches davon.
-* **Eine Zusage auf `normal` holt beim Versorgungsschutz nichts, was bewachter
-  Arbeit gehoert.** Der Slack ordnet innerhalb der Klasse (NV-24). Er
-  verschiebt zwischen gleichrangigen Stroemen — genau das zeigt die Messung —,
-  aber er schafft keine Kapazitaet.
+| Sprachmodell | „nicht machbar" | erfuellt | Rueckstand | Auslastung |
+|---|---|---|---|---|
+| ohne | 0 | **1000 ‰** | 0 ms | 71 % |
+| ~70 ms | **0** | **930 ‰** | 0 ms | 80 % |
+| ~195 ms | 407 | 460 ‰ | 3250 ms | 87 % |
 
-Und ein methodischer Fund, der beide Male dieselbe Form hatte: Der erste
-Versuch lief mit 500 ‰, und die reine Klassenordnung lieferte bereits 522 bis
-540 ‰ — die Zusage war erfuellt, bevor die Steuerung etwas tun musste. Im
-Kern-Test war es dieselbe Falle: 12 zu 8 Starts sahen nach Wirkung aus und
-waren ohne jede Zusage identisch. Beide Versuche erzeugen jetzt ihre eigene
-Referenz; ohne die waere hier eine Wirkung berichtet worden, die es nicht
-gibt.
+**Die Zusage haelt, solange kein Aufruf laenger rechnet als sie selbst** —
+in beiden Faellen ohne langen Blocker, und die geschuetzte Kamera bekommt
+dabei 910 von 910 beziehungsweise 905 von 910 Bildern. Zwei Ursachen trennen
+sich sauber:
+
+* **Blockierung.** Ein Aufruf von 195 ms macht eine 100-ms-Frist arithmetisch
+  tot; der Governor weist ab, weil er sie nicht garantieren kann. Bei 70 ms
+  verschwinden diese Abweisungen vollstaendig. Das deckt die Blockierpruefung
+  ab — sie schuetzt seither auch Stroeme **mit Zusage**, nicht nur bewachte
+  Klassen.
+* **Kapazitaet.** Danach bleibt ein gradueller Rest (645 statt 800 ‰) ohne
+  eine einzige Unmachbarkeit. Das ist eine Frage der Zulassungsrechnung und
+  offen: sie kennt bewachte Arbeit, Budgets und Zusagen — nicht die
+  nachrangigen Stroeme ohne Zusage, die trotzdem senden.
+
+Die Steuerung selbst arbeitet messbar richtig: Der Referenzstrom ohne Zusage
+faellt in allen vier Zusage-Laeufen unter beide Vergleichslaeufe, ohne
+Ueberlapp, und die bewachte Kamera bleibt unberuehrt. Der Governor meldete
+fuer den versprochenen Strom 4300 ms Rueckstand bei 0 ms Luft — er hat ihn
+also dauerhaft bevorzugt und konnte es gegen den Blocker nur nicht
+durchsetzen.
+
+## Vier Irrtuemer, die diese Schritte korrigiert haben
+
+**Eine Metrik, die etwas anderes mass.** Der schwerste: Gezaehlt wurden
+gelieferte Ergebnisse statt versorgter Verbraucherzyklen. Ein Ergebnis, das
+drei Zyklen lang frisch bleibt, versorgt drei — gezaehlt wurde eines (333
+statt 1000 ‰). Mehrere bei Lieferung frische Ergebnisse koennen vor dem
+naechsten Verbraucherzyklus bereits veralten; ihre Anzahl ist deshalb keine
+Zahl versorgter Zyklen. Dazu
+wirkte eine spaete Fertigstellung rueckwirkend, und ein Strom ohne jede
+Lieferung galt als versorgt, weil sein Zaehler nie entstand. Aufgedeckt hat
+das eine parallele Pruefsitzung mit fuenf Tests, von denen vier durchfielen.
+Der Kern misst jetzt wie der Weakly-hard-Monitor: ein Zyklus ist versorgt,
+wenn zu seinem Zeitpunkt ein Ergebnis vorlag, das nicht zu alt war.
+
+**Eine Wirkung, die es nicht gab.** Der erste Kern-Test zeigte 12 zu 8
+Dispatches — dieselbe Verteilung wie ohne jede Zusage. Der erste
+Hardwareversuch lief mit 500 ‰, und die Klassenordnung lieferte ohnehin 522
+bis 540 ‰. Beide Versuche erzeugen jetzt ihre eigene Referenz.
+
+**Eine Ursache, die nicht stimmte.** Zuerst hiess es, die Zulassungsrechnung
+veranschlage den zugesagten Anteil, waehrend die Stroeme mit vollem Takt
+senden. Die Reihe oben widerlegt das: Am Sendeverhalten aendert sich nichts,
+und mit einem kuerzeren Aufruf haelt die Zusage trotzdem.
+
+**Eine Regel, die zu scharf war.** Aus dem Befund lag nahe, auch die
+Slotbelegung durch bewachte Arbeit als Blockierer zu zaehlen. Diese Schwelle
+haette elf ausgelieferte Beispiele abgelehnt — und eine Messung desselben
+Tages widerlegt sie: ein Blocker, zwei Slots, eine Kamera mit 60 % Dauerlast
+ergaben 1 ‰ Unterdeckung. Uebernommen ist nur, was die Messung deckt.
 
 ## Was bewusst nicht gebaut ist
 
@@ -186,5 +223,34 @@ zwei Stroeme mit gleichem Ziel nicht in ein Zickzack geraten, ist damit
 **nicht bewiesen**. Hysterese und eine Anpassung nur alle k Zyklen stehen aus;
 bis dahin gilt die Steuerung als erprobt, nicht als abgesichert.
 
-**Akzeptiert wird diese ADR erst, wenn Schritt 6 auf gemessener Hardware
-zeigt, dass die Ziele gehalten werden — vorher ist sie ein Entwurf.**
+**Schritt 6 ist erbracht.** Auf gemessener Hardware haelt eine Zusage von
+800 ‰ vollstaendig (1000 ‰ ohne nachrangiges Sprachmodell, 930 ‰ mit einem
+kurzen), waehrend die geschuetzte Kamera unberuehrt bleibt. Gebrochen wird sie
+allein durch einen Aufruf, der laenger rechnet als die Zusage selbst — und
+genau diesen Fall lehnt die Blockierpruefung ab.
+
+Die ADR gilt damit als angenommen, **mit einer benannten Luecke**: Die
+Daempfung (Randfall 4) ist nicht gebaut, und die Zulassungsrechnung kennt die
+nachrangigen Stroeme ohne Zusage nicht, die trotzdem senden. Beides gehoert
+gesagt, solange es offen ist.
+
+## Ergaenzende Reparaturen aus dem Review vom 16.09.
+
+Anteil und Lieferluecke haben getrennte Zaehler: ein aufbewahrtes Ergebnis
+kann mehrere Verbraucherzyklen versorgen, setzt aber `max_gap` nicht immer
+wieder zurueck. Eine reine Lueckenzusage funktioniert auch ohne Periode oder
+Hoechstalter. Vor einer Fertigstellung werden vergangene Zyklen noch mit dem
+vorherigen Ergebnis bewertet; sonst koennte auch die zweite Lieferung einen
+vergangenen Ausfall rueckwirkend heilen. Zyklenzaehlung und Defizit stehen vor
+der Kandidatenwahl fest.
+
+Das Nachholen zaehlt die Takte arithmetisch in hoechstens 16 Abschnitten,
+haelt die urspruengliche Taktphase und terminiert auch an der Zahlengrenze.
+Zaehler und Nenner verwenden dasselbe angenaeherte gleitende Fenster.
+
+In der Kapazitaetsrechnung ergaenzt eine Ergebniszusage nur den Bedarf, den
+das Mindestlaufzeitbudget **desselben** Modells noch nicht deckt. Eine
+Ausfuehrung kann beide Anforderungen zugleich bedienen. Budgets anderer
+Modelle werden dafuer nicht verrechnet. Die Rechnung bleibt eine
+Kapazitaetsabschaetzung und ersetzt keine Hardwarequalifikation dieser
+reparierten Mess- und Steuerungsfassung.

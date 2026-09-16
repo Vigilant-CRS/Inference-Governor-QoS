@@ -297,6 +297,12 @@ pub struct Scheduler {
     /// fuehrt (`vig-sim::coverage`, Review R02/R03). Zwei Implementierungen
     /// derselben Groesse mit verschiedenen Regeln waren der Fehler.
     usable_until: [Option<Instant>; MAX_MODELS],
+    /// Ab wann das juengste gueltige Ergebnis **vorlag** (ADR-0047).
+    ///
+    /// Seine Fertigstellung, nicht seine Aufnahme. Ohne diese Marke versorgte
+    /// ein spaet fertiggewordenes Ergebnis rueckwirkend Zyklen, die es nie
+    /// gesehen haben — der Verbraucher stand in dieser Zeit ohne da.
+    valid_since: [Option<Instant>; MAX_MODELS],
     /// Aufeinanderfolgende Requests ohne gueltiges Ergebnis je Modell.
     consecutive_misses: [u32; MAX_MODELS],
     /// Die gemessene, gerichtete Interferenz zwischen Modellen (NV-11).
@@ -455,6 +461,7 @@ impl Scheduler {
             interference: Interference::new(),
             last_valid: [None; MAX_MODELS],
             usable_until: [None; MAX_MODELS],
+            valid_since: [None; MAX_MODELS],
             consecutive_misses: [0; MAX_MODELS],
             miss_windows,
             runtime_ledgers,
@@ -589,6 +596,12 @@ impl Scheduler {
 
     /// Verarbeitet ein Ereignis und emittiert die daraus folgenden Aktionen.
     pub fn on_event<S: ActionSink>(&mut self, now: Instant, event: Event, sink: &mut S) {
+        // Evaluate elapsed ticks with the result that actually existed then,
+        // before a completion replaces it. The boundary at `now` itself is
+        // evaluated below so an on-time completion can supply that tick.
+        if let Some(before) = now.as_nanos().checked_sub(1) {
+            self.observe_objective_cycles(Instant::from_nanos(before));
+        }
         match event {
             Event::Arrival(descriptor) => self.on_arrival(now, descriptor, sink),
             Event::Completion { request, slot } => self.on_completion(now, request, slot, sink),
@@ -603,6 +616,7 @@ impl Scheduler {
         // der alles ablehnt, soll nicht dadurch gut dastehen, dass keine
         // Zyklen entstehen.
         self.observe_cycles(now);
+        self.observe_objective_cycles(now);
         self.schedule(now, sink);
     }
 
@@ -614,6 +628,12 @@ impl Scheduler {
     ) {
         self.metrics.received = self.metrics.received.saturating_add(1);
         let model = descriptor.logical_model;
+
+        // ADR-0047: ab der ersten angemeldeten Arbeit laeuft die Zusage. Erst
+        // bei der ersten **Lieferung** anzufangen hiesse, einen Strom, dessen
+        // Auftraege samt und sonders scheitern, als versorgt zu fuehren —
+        // gerade weil er nie versorgt wurde.
+        self.start_coverage(model, now);
 
         // Wie schnell dieser Strom tatsaechlich liefert. Billig genug fuer den
         // heissen Pfad: ein Vergleich, eine Schiebeoperation, zwei Speicher.
@@ -1215,15 +1235,13 @@ impl Scheduler {
             if let Some(slot) = self.metrics.consecutive_misses.get_mut(index) {
                 *slot = 0;
             }
-            if let Some(cell) = self.last_valid.get_mut(index) {
-                let freshest = cell.map_or(capture, |previous| {
-                    if capture.as_nanos() > previous.as_nanos() {
-                        capture
-                    } else {
-                        previous
-                    }
-                });
-                *cell = Some(freshest);
+            if let Some(cell) = self.last_valid.get_mut(index)
+                && cell.is_none_or(|previous| capture > previous)
+            {
+                *cell = Some(capture);
+                if let Some(since) = self.valid_since.get_mut(index) {
+                    *since = Some(now);
+                }
             }
             // Und bis wann es traegt. Ein Ergebnis, dessen Hoechstalter schon
             // bei der Auslieferung abgelaufen war, verlaengert die
@@ -1247,13 +1265,13 @@ impl Scheduler {
                 *cell = Some(latest);
             }
 
-            // ADR-0047: gebucht wird genau hier — ein gueltiges Ergebnis, das
-            // bei der Auslieferung noch trug. Frueher gebucht waere es eine
-            // Zusage, die sich selbst bestaetigt. Ohne vereinbartes
-            // Hoechstalter gibt es keine Frischegrenze; dann zaehlt jedes
-            // gueltige Ergebnis.
-            if expires.is_none_or(|e| e.as_nanos() > now.as_nanos()) {
-                self.record_coverage(index, now);
+            // Coverage counts consumer ticks, but max_gap is the interval
+            // between usable deliveries. Keep those two clocks separate,
+            // including for objectives without a period or max_age.
+            if expires.is_none_or(|expiry| expiry >= now)
+                && let Some(Some(ledger)) = self.coverage_ledgers.get_mut(index)
+            {
+                ledger.delivered(now);
             }
             return;
         }
@@ -2097,17 +2115,25 @@ impl Scheduler {
             .map(|ledger| ledger.used(now))
     }
 
-    /// Bucht ein erfuelltes Ergebnis auf die Zusage eines Stroms (ADR-0047).
+    /// Legt den Zaehler eines Stroms an, sobald er das erste Mal Arbeit
+    /// anmeldet (ADR-0047).
     ///
-    /// Der Zaehler entsteht beim ersten Ereignis, nicht beim Bau: ein Strom,
-    /// der noch nie dran war, ist nicht im Rueckstand.
-    fn record_coverage(&mut self, index: usize, now: Instant) {
-        let Some(objective) = self.contracts.get(index).and_then(|c| c.objective) else {
+    /// Bei der **Ankunft**, nicht bei der ersten Lieferung: ein Strom, dessen
+    /// Auftraege samt und sonders scheitern, haette sonst nie einen Zaehler
+    /// und damit nie einen Rueckstand — er stuende als versorgt da, gerade
+    /// weil er nie versorgt wurde.
+    fn start_coverage(&mut self, model: ModelIdx, now: Instant) {
+        let index = model.get();
+        if self
+            .contracts
+            .get(index)
+            .and_then(|c| c.objective)
+            .is_none()
+        {
             return;
-        };
+        }
         if let Some(cell) = self.coverage_ledgers.get_mut(index) {
-            cell.get_or_insert_with(|| CoverageLedger::new(now))
-                .record(now, &objective);
+            let _ = cell.get_or_insert_with(|| CoverageLedger::new(now));
         }
     }
 
@@ -2119,7 +2145,36 @@ impl Scheduler {
         contract.period.unwrap_or(objective.window)
     }
 
-    /// Schreibt Anteil, Luecke und Slack je Zusage in den Metrikabzug.
+    /// Evaluates consumer cycles before the next scheduling decision.
+    fn observe_objective_cycles(&mut self, now: Instant) {
+        for i in 0..self.contracts.len() {
+            let Some(objective) = self.contracts.get(i).and_then(|c| c.objective) else {
+                continue;
+            };
+            let Some(contract) = self.contracts.get(i) else {
+                continue;
+            };
+            let period = Self::objective_period(contract, &objective);
+            let mut max_age = contract
+                .max_age
+                .unwrap_or(Duration::from_nanos_unbounded(u64::MAX));
+            if let Some(extension) = contract.extension.as_ref()
+                && extension.require_new_sample_each_cycle
+                && let Some(tick) = extension.tick()
+            {
+                max_age = max_age.min(Duration::from_nanos_unbounded(
+                    tick.as_nanos().saturating_sub(1),
+                ));
+            }
+            let last_valid = self.last_valid.get(i).copied().flatten();
+            let valid_since = self.valid_since.get(i).copied().flatten();
+            if let Some(Some(ledger)) = self.coverage_ledgers.get_mut(i) {
+                ledger.observe(now, last_valid, valid_since, max_age, &objective, period);
+            }
+        }
+    }
+
+    /// Publishes coverage and the separate delivery-gap objective.
     fn publish_objectives(&mut self, now: Instant) {
         for (i, contract) in self.contracts.iter().enumerate() {
             let (Some(objective), Some(ledger)) = (
