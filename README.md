@@ -96,7 +96,7 @@ it just had no way to know that.
 
 ## What it actually does
 
-Four decisions, all made **before** the request reaches the GPU:
+Six decisions, all made **before** the request reaches the GPU:
 
 | | Decision | Why it matters |
 |---|---|---|
@@ -104,6 +104,8 @@ Four decisions, all made **before** the request reaches the GPU:
 | ⏱️ | **Refuse work that would arrive too late.** If the result would be stale when finished, it is not started. | A late answer is not a slow answer — it is a wrong one. Better to say so immediately. |
 | 🛡️ | **Hold back background work.** If a protected stream is expected within the next few milliseconds, a long job does not start. | This is the one place the governor deliberately leaves the GPU idle. It is also the reason the camera stays fresh. |
 | 🎚️ | **Pick the model variant that still fits.** Under pressure a smaller, faster variant is chosen instead of missing the deadline. | A slightly less precise answer on time beats a perfect answer nobody can use. |
+| ✂️ | **Hold a long job and continue it.** A generative model declared `cooperative:` runs in pieces sized from the time actually free; between two of them the slot is open, and its state travels in the prompt. | Dropping is not the only alternative to blocking. Internally measured: unkeepable refusals 221 → **0**, protected camera 795 → **891** of 910 frames, at the same total compute. |
+| 🎯 | **Keep a promise you can write down.** A contract can carry `objective:` — a share of cycles *and* a longest tolerable gap, both turned into time left until the promise breaks. | "98 % fresh, and never a full second with nothing" is a sentence an operator can state and the governor can check. It orders streams within their class, never above it. |
 
 It speaks the **Open Inference Protocol**, the same gRPC API Triton speaks. A
 client changes one thing: the address it connects to.
@@ -411,6 +413,8 @@ decision; it does **not** mean it is better on your workload.
 
 | Open | Why it matters |
 |---|---|
+| Cooperative decomposition was switched on nowhere | It has been in the core and measured since 1 September, and until 16 September **no shipped configuration set `cooperative:`** — so a full day of mixed-load measurement saw an indivisible block and drew the wrong conclusion from it ("more slots, or a shorter call"). The capability works; the defaults did not use it. Turning it on in the examples is still open. |
+| Continuous objectives are measured on one machine only | `objective:` holds on this laptop: 800 ‰ promised, 685–736 ‰ reached beside a long neighbour, 930–1000 ‰ without one. Two identical reference runs differed by 100 ‰, so single runs scatter. Damping against oscillation between equally ranked streams ([ADR-0047](docs/adr/0047-a-goal-has-two-halves-rate-and-gap.md), edge case 4) is **not built**, and admission still ignores lower-priority streams that send without a promise. |
 | Hardware beyond one machine | Every performance number here comes from one RTX 3070 Laptop. The scheduling core is built and tested for `aarch64` in CI, but **no Jetson measurement exists** — and emulation says nothing about runtime. [What you have to run first.](docs/hardware-qualification.md) |
 | A second GPU platform | The governor now drives a second backend on a second GPU (TFLite on an Adreno 540), which shows the logic is portable. It is not a Jetson qualification, and the advantage did not travel with the logic. |
 | A pilot | Release qualification is complete except for what needs a named workload and a named person: the sign-off of a pilot owner. Without one, every further extension is a guess. |

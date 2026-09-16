@@ -116,6 +116,19 @@ idle — and the reason the camera stays fresh.</p>
 <p>Under pressure a smaller, faster model variant is chosen rather than missing
 the deadline, and it switches back when the pressure is gone.</p>
 </div>
+<div class="karte">
+<h3>Holds a long job and continues it</h3>
+<p>Dropping is not the only alternative to blocking. A generative job can run a
+piece, step aside when the camera is due, wait, and continue when there is room
+— its state travels in the prompt. The slot is free between two pieces.</p>
+</div>
+<div class="karte">
+<h3>Keeps a promise you can write down</h3>
+<p>Beyond fixed classes, a stream can promise <i>"98 % of cycles fresh, and
+never a full second with nothing"</i>. Both halves become the same quantity —
+time left until the promise breaks — and the tighter one decides. A promise
+orders streams <i>within</i> their class, never above it.</p>
+</div>
 </div>
 
 ## What it measured
@@ -136,6 +149,23 @@ without a governor. The difference is that the governor decides which side
 loses and says so. For models that can be split, the trade becomes visible:
 [twenty times more background progress for seven points of detector
 coverage](docs/benchmark/wp26.md).
+
+**When the long job can be split, the trade largely disappears.** Internal
+measurement of 16 September, five streams on two slots, a language model next
+to 33 ms cameras — the same load, once as one block and once in quanta:
+
+| | one block | in quanta |
+|---|---:|---:|
+| refused as unkeepable | 221 | **0** |
+| protected camera, frames served | 795 | **891** of 910 |
+| second camera, promise kept | 361 ‰ | **689 ‰** |
+
+Same total compute, and the price is named: the language model produces about
+1554 instead of 2640 tokens, because that GPU time went to the cameras. That it
+really split is visible in the governor's own counters — 189 pieces for 38
+jobs, context growing to 70 tokens, no refused decomposition. Single runs
+scatter (two identical reference runs gave 361 ‰ and 465 ‰); the direction was
+the same in every run and far larger than the scatter.
 
 <div class="karten">
 <div class="karte">
