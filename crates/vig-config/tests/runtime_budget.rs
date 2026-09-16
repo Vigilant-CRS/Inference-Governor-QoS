@@ -122,23 +122,15 @@ fn an_unknown_field_in_the_budget_is_refused() {
     assert!(Config::from_yaml(&yaml(2, "best_effort", typo)).is_err());
 }
 
-/// Der Vorschlag in der Demo-Konfiguration ist gueltig, sobald man ihn
-/// einkommentiert — und ohne ihn bleibt die Demo, wie sie gemessen wurde.
+/// Die Demo-Konfiguration traegt das Budget, mit dem sie aufgenommen wurde:
+/// 300 ms je Sekunde fuer das Sprachmodell, und sonst keines
+/// (docs/benchmark/demo-2026-09-15.md, Abschnitt "With a runtime budget").
 #[test]
-fn the_suggestion_in_the_demo_resolves() {
-    let plain = Config::from_yaml(DEMO).unwrap().resolve().unwrap();
-    assert!(plain.contracts.iter().all(|c| c.min_runtime.is_none()));
-
-    let measured = "    contract: { deadline_ms: 5000, max_age_ms: 8000 }\n";
-    let suggestion = "    contract: { deadline_ms: 5000, max_age_ms: 8000, \
-                      min_runtime: { budget_ms: 300, window_ms: 1000 } }\n";
-    assert!(DEMO.contains(measured), "gemessene Zeile fehlt in der Demo");
-    assert!(
-        DEMO.contains(&format!("    # {}", suggestion.trim_start())),
-        "Vorschlag fehlt in der Demo"
-    );
-    let enabled = DEMO.replacen(measured, suggestion, 1);
-    let config = Config::from_yaml(&enabled).unwrap();
+fn the_budget_in_the_demo_resolves() {
+    let budgeted = "    contract: { deadline_ms: 5000, max_age_ms: 8000, \
+                     min_runtime: { budget_ms: 300, window_ms: 1000 } }\n";
+    assert!(DEMO.contains(budgeted), "Budgetzeile fehlt in der Demo");
+    let config = Config::from_yaml(DEMO).unwrap();
     assert!(config.diagnose().is_empty(), "{:?}", config.diagnose());
     let resolved = config.resolve().unwrap();
     let vlm = resolved.model_index("vlm").unwrap();
@@ -148,6 +140,14 @@ fn the_suggestion_in_the_demo_resolves() {
             .get(vlm.get())
             .unwrap()
             .min_runtime
-            .is_some()
+            .is_some(),
+        "das Sprachmodell der Demo hat kein Budget"
     );
+    // Nur das Sprachmodell: die Kameras bezahlen es, sie bekommen keines.
+    let with_budget = resolved
+        .contracts
+        .iter()
+        .filter(|c| c.min_runtime.is_some())
+        .count();
+    assert_eq!(with_budget, 1, "nur das Sprachmodell traegt ein Budget");
 }
